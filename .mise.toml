@@ -1,0 +1,37 @@
+# Repo-local mise task lane for AFI.
+#
+# Per AGENTS.md, every repository command runs through `mise run <task>`;
+# agents never invoke raw `cargo` or `xcodebuild`. Each task below wraps the
+# underlying cargo command so the lane is the single entry point.
+#
+# This is the Phase 0 validation bootstrap only. Clippy runs with default
+# lints here on purpose -- the strict Cargo `[lints]` policy and `clippy.toml`
+# land in a later lane, after the dependency, unsafe, and Ratatui migrations.
+# The toolchain is left on the repo's existing `rust-toolchain.toml` channel
+# (`stable`); Harness pins a dated nightly for its own edition-2024 and cache
+# reasons, which do not apply to AFI (edition 2021, no nightly features), so
+# no pin is transplanted here.
+
+[tasks.fmt]
+description = "Apply rustfmt to all Rust sources"
+run = "cargo fmt --all"
+
+[tasks."fmt:check"]
+description = "Verify rustfmt formatting without writing changes"
+run = "cargo fmt --all --check"
+
+[tasks."check:rust"]
+description = "Run clippy across all targets (default lints for now)"
+run = "cargo clippy --all-targets"
+
+[tasks.test]
+description = "Run the repository test suite"
+run = "cargo test"
+
+[tasks."check:source-size"]
+description = "Fail if any Rust source file exceeds the 420-line cap"
+run = "./scripts/check-rust-source-size.sh"
+
+[tasks.check]
+description = "Aggregate strict validation gate: format, clippy, source size, tests"
+depends = ["fmt:check", "check:rust", "check:source-size", "test"]

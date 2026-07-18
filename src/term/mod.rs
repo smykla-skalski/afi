@@ -1,11 +1,13 @@
 //! Terminal UI: ANSI codes, OSC title, char width helpers, Life spinner,
-//! chatbox input editor (ratatui), and the Esc interrupt watcher.
+//! chatbox input editor, and the Esc interrupt watcher.
 //!
-//! Phase 7 implements the terminal primitives. The full ratatui app shell
-//! (scrollback region, footer with ctx colorization) and the chatbox input
-//! editor port of `_chatbox_raw` are here.
+//! The `chatbox` driver and the `editor` state render the multi-line input
+//! with Ratatui (inline viewport, bordered box, real cursor). The ANSI
+//! constants and width helpers below serve the remaining non-Ratatui output
+//! (banner, streamed model tokens, Life spinner).
 
 pub mod chatbox;
+pub mod editor;
 pub mod interrupt;
 pub mod life;
 

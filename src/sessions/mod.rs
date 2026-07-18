@@ -1,5 +1,5 @@
 //! Chat-session persistence: one JSON file per session under
-//! `~/.minion/sessions/` (or `MINION_SESSIONS_DIR` / `MINION_HOME`).
+//! `~/.afi/sessions/` (or `AFI_SESSIONS_DIR` / `AFI_HOME`).
 //!
 //! Fresh, version-tagged schema (`"schema": "afi-1"`) - the Python
 //! version's files will not resume. The file stores the exact `messages`
@@ -23,29 +23,29 @@ pub const SESSION_LIST_DEFAULT_LIMIT: usize = 10;
 /// Upper bound on the page size (matches the Python `SESSION_LIST_MAX_LIMIT`).
 pub const SESSION_LIST_MAX_LIMIT: usize = 100;
 
-/// Where session files live. Honors `MINION_SESSIONS_DIR`, then
-/// `MINION_HOME/sessions`, then `~/.minion/sessions`.
+/// Where session files live. Honors `AFI_SESSIONS_DIR`, then
+/// `AFI_HOME/sessions`, then `~/.afi/sessions`.
 pub fn sessions_dir(env: &HashMap<String, String>) -> PathBuf {
-    if let Some(d) = env.get("MINION_SESSIONS_DIR") {
+    if let Some(d) = env.get("AFI_SESSIONS_DIR") {
         return PathBuf::from(d);
     }
     let home = minion_home(env);
     home.join("sessions")
 }
 
-/// Where memory files live. Always under `MINION_HOME/memories`.
+/// Where memory files live. Always under `AFI_HOME/memories`.
 pub fn memories_dir(env: &HashMap<String, String>) -> PathBuf {
     minion_home(env).join("memories")
 }
 
-/// `~/.minion` or `MINION_HOME`.
+/// `~/.afi` or `AFI_HOME`.
 pub fn minion_home(env: &HashMap<String, String>) -> PathBuf {
-    if let Some(d) = env.get("MINION_HOME") {
+    if let Some(d) = env.get("AFI_HOME") {
         return PathBuf::from(d);
     }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".minion")
+        .join(".afi")
 }
 
 /// Short, unguessable, sortable-ish session id: `YYYYMMDD-HHMMSS-<6 hex>`.

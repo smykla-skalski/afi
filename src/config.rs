@@ -1,7 +1,7 @@
 //! Model sources, runtime state, and source discovery.
 //!
 //! A "source" bundles a base_url, api_key, and optional model name. Define
-//! sources with `MINION_SOURCES` + `MINION_SOURCE_<NAME>_*` env vars; the
+//! sources with `AFI_SOURCES` + `AFI_SOURCE_<NAME>_*` env vars; the
 //! built-in `together` and `openrouter` sources auto-register when their
 //! keys are present. Switch at runtime with `switch_source` (the `/source`
 //! slash command in the REPL).
@@ -41,7 +41,7 @@ pub fn build_http_headers(
 
 // --- EXTRA_BODY parsing ------------------------------------------------------
 
-/// Parse a `MINION_SOURCE_<NAME>_EXTRA_BODY` env value into a JSON object, or
+/// Parse a `AFI_SOURCE_<NAME>_EXTRA_BODY` env value into a JSON object, or
 /// `None`. Bad JSON is warned to stderr and ignored so a typo never silently
 /// drops routing - it fails loudly at load.
 pub fn parse_extra_body(raw: Option<&str>) -> Option<Value> {
@@ -54,7 +54,7 @@ pub fn parse_extra_body(raw: Option<&str>) -> Option<Value> {
         Ok(Value::Object(_)) => None, // empty {} -> no routing, same as unset
         Ok(other) => {
             eprintln!(
-                "minion: MINION_*_EXTRA_BODY must be a JSON object, ignoring (got {}); \
+                "minion: AFI_*_EXTRA_BODY must be a JSON object, ignoring (got {}); \
                  provider routing is NOT set",
                 type_name(&other)
             );
@@ -62,7 +62,7 @@ pub fn parse_extra_body(raw: Option<&str>) -> Option<Value> {
         }
         Err(e) => {
             eprintln!(
-                "minion: ignoring bad MINION_*_EXTRA_BODY JSON ({} at char {}); \
+                "minion: ignoring bad AFI_*_EXTRA_BODY JSON ({} at char {}); \
                  provider routing is NOT set",
                 e,
                 e.line() // close enough to the Python `pos`; serde doesn't expose char offset
@@ -360,9 +360,9 @@ impl Runtime {
     /// `env` is the starting env (typically `std::env::vars()`); `env_file`
     /// is loaded and merged in without clobbering existing keys (matches the
     /// Python `~/.env` loader). Then sources are discovered, args parsed,
-    /// approval defaults applied (env `MINION_APPROVAL` then `--approval` /
+    /// approval defaults applied (env `AFI_APPROVAL` then `--approval` /
     /// `--yolo`), and the starting source selected (`--source` then
-    /// `MINION_ACTIVE` then first in `MINION_SOURCES`).
+    /// `AFI_ACTIVE` then first in `AFI_SOURCES`).
     pub fn build(
         args: &[String],
         mut env: HashMap<String, String>,
@@ -376,13 +376,13 @@ impl Runtime {
         let parsed = parse_args(args);
 
         let mut approval = ApprovalState::default();
-        if let Some(val) = env.get("MINION_APPROVAL") {
+        if let Some(val) = env.get("AFI_APPROVAL") {
             if !val.trim().is_empty() {
                 if let Some(kind) = normalize_approval(val) {
                     apply_approval(&mut approval, kind, true);
                 } else {
                     eprintln!(
-                        "  \u{2717} unknown MINION_APPROVAL={:?} \
+                        "  \u{2717} unknown AFI_APPROVAL={:?} \
                          (want all|low|medium|high|yolo); prompting for all actions",
                         val
                     );
@@ -422,7 +422,7 @@ impl Runtime {
 
         let start = parsed
             .source
-            .or_else(|| rt.env.get("MINION_ACTIVE").cloned())
+            .or_else(|| rt.env.get("AFI_ACTIVE").cloned())
             .or_else(|| rt.source_order.first().cloned());
         if let Some(name) = start {
             rt.switch_source(&name, None);
@@ -487,21 +487,21 @@ impl Runtime {
 
 // --- Source discovery --------------------------------------------------------
 
-/// Build the sources map + ordered list from `MINION_SOURCE_*` env vars,
-/// falling back to a single `local` source from the legacy `MINION_*` vars.
+/// Build the sources map + ordered list from `AFI_SOURCE_*` env vars,
+/// falling back to a single `local` source from the legacy `AFI_*` vars.
 pub fn discover_sources(env: &HashMap<String, String>) -> (HashMap<String, Source>, Vec<String>) {
     let mut sources: HashMap<String, Source> = HashMap::new();
     let mut source_order: Vec<String> = Vec::new();
 
-    let names: Vec<String> = match env.get("MINION_SOURCES") {
+    let names: Vec<String> = match env.get("AFI_SOURCES") {
         Some(raw) if !raw.trim().is_empty() => raw
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect(),
         _ => {
-            // auto-discover from MINION_SOURCE_*_BASE_URL
-            let prefix = "MINION_SOURCE_";
+            // auto-discover from AFI_SOURCE_*_BASE_URL
+            let prefix = "AFI_SOURCE_";
             let suffix = "_BASE_URL";
             let mut found: Vec<String> = env
                 .keys()
@@ -517,7 +517,7 @@ pub fn discover_sources(env: &HashMap<String, String>) -> (HashMap<String, Sourc
     };
 
     for name in &names {
-        let p = format!("MINION_SOURCE_{}_", name.to_uppercase());
+        let p = format!("AFI_SOURCE_{}_", name.to_uppercase());
         let base_url = match env.get(&(p.clone() + "BASE_URL")) {
             Some(s) => s.clone(),
             None => continue,
@@ -536,14 +536,14 @@ pub fn discover_sources(env: &HashMap<String, String>) -> (HashMap<String, Sourc
     }
 
     if sources.is_empty() {
-        // legacy fallback: one source from MINION_BASE_URL etc.
+        // legacy fallback: one source from AFI_BASE_URL etc.
         let src = Source::new(
             "local",
-            env.get("MINION_BASE_URL")
+            env.get("AFI_BASE_URL")
                 .cloned()
                 .unwrap_or_else(|| "http://localhost:8080/v1".to_string()),
-            envfile::resolve_api_key(env, env.get("MINION_API_KEY").map(|s| s.as_str())),
-            env.get("MINION_MODEL").cloned(),
+            envfile::resolve_api_key(env, env.get("AFI_API_KEY").map(|s| s.as_str())),
+            env.get("AFI_MODEL").cloned(),
             None,
             None,
         );
@@ -576,7 +576,7 @@ pub fn discover_sources(env: &HashMap<String, String>) -> (HashMap<String, Sourc
         if let Some(k) = key {
             if !k.is_empty() {
                 let or_body = parse_extra_body(
-                    env.get("MINION_SOURCE_OPENROUTER_EXTRA_BODY")
+                    env.get("AFI_SOURCE_OPENROUTER_EXTRA_BODY")
                         .map(|s| s.as_str()),
                 )
                 .unwrap_or_else(|| {
@@ -588,11 +588,11 @@ pub fn discover_sources(env: &HashMap<String, String>) -> (HashMap<String, Sourc
                     })
                 });
                 let app_name = env
-                    .get("MINION_SOURCE_OPENROUTER_APP_NAME")
+                    .get("AFI_SOURCE_OPENROUTER_APP_NAME")
                     .map(|s| s.as_str())
                     .or(Some("Minion"));
                 let app_url = env
-                    .get("MINION_SOURCE_OPENROUTER_APP_URL")
+                    .get("AFI_SOURCE_OPENROUTER_APP_URL")
                     .map(|s| s.as_str())
                     .or(Some("https://github.com/Sentdex/minion"));
                 let headers = build_http_headers(app_name, app_url);

@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::known_tool_names;
 
 // Regexes are non-greedy on the JSON body so multiple calls per line parse.
-static MINION_TOOL_TAG: Lazy<Regex> =
+static AFI_TOOL_TAG: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[minion_tool_call\]\s*(\{.*?\})\s*\[/minion_tool_call\]").unwrap());
 
 static TOOL_PROTOCOL_TAG_RE: Lazy<Regex> =
@@ -49,7 +49,7 @@ pub fn parse_text_calls(content: &str) -> Vec<TextCall> {
         if in_fence {
             continue;
         }
-        scan_line(line, &MINION_TOOL_TAG, &mut calls);
+        scan_line(line, &AFI_TOOL_TAG, &mut calls);
         scan_line(line, legacy_tool_tag_regex(), &mut calls);
     }
     calls
@@ -115,7 +115,7 @@ pub fn escape_tool_protocol_delimiters(text: &str) -> String {
     }
 }
 
-/// Default per-tool-result char cap (`MINION_TOOL_RESULT_CHARS`, default 20000).
+/// Default per-tool-result char cap (`AFI_TOOL_RESULT_CHARS`, default 20000).
 pub const TOOL_RESULT_CHARS_DEFAULT: usize = 20_000;
 
 /// Neutralize active protocol delimiters, dedup runs of >=3 identical

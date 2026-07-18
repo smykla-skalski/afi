@@ -9,7 +9,7 @@ use afi::Runtime;
 /// Build a runtime with a clean env (only the vars you pass in).
 ///
 /// `args` is argv including argv[0] (typically `"minion"`). `env` is the
-/// starting env; no `MINION_*` vars leak from the shell. `env_file` is
+/// starting env; no `AFI_*` vars leak from the shell. `env_file` is
 /// optional - pass `Some(path)` to exercise the `~/.env` loader.
 #[allow(dead_code)]
 pub fn build(args: &[&str], env: &[(&str, &str)]) -> Runtime {

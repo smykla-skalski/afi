@@ -22,7 +22,7 @@ use serde_json::json;
 use crate::sessions::minion_home;
 
 /// Default poll window for `run_bash` (~3 s). Override with
-/// `MINION_BASH_POLL_SECONDS`.
+/// `AFI_BASH_POLL_SECONDS`.
 pub const DEFAULT_POLL_SECONDS: i64 = 3;
 
 /// Infer a poll timeout from a `sleep N` in the command. Returns `max(N) + 10`
@@ -337,7 +337,7 @@ pub fn run_bash(
         Some(t) => t,
         None => infer_timeout_from_sleep(
             command,
-            env.get("MINION_BASH_POLL_SECONDS")
+            env.get("AFI_BASH_POLL_SECONDS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_POLL_SECONDS),
         ),
@@ -455,7 +455,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = std::collections::HashMap::new();
         env.insert(
-            "MINION_HOME".to_string(),
+            "AFI_HOME".to_string(),
             tmp.path().to_string_lossy().to_string(),
         );
         let out = run_bash("echo hello", None, &env, &|| false);
@@ -468,7 +468,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = std::collections::HashMap::new();
         env.insert(
-            "MINION_HOME".to_string(),
+            "AFI_HOME".to_string(),
             tmp.path().to_string_lossy().to_string(),
         );
         let out = run_bash("sleep 10", Some(1), &env, &|| false);
@@ -481,7 +481,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = std::collections::HashMap::new();
         env.insert(
-            "MINION_HOME".to_string(),
+            "AFI_HOME".to_string(),
             tmp.path().to_string_lossy().to_string(),
         );
         let out = run_bash("sleep 10", Some(5), &env, &|| true);

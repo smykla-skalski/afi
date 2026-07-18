@@ -60,7 +60,7 @@ pub static FINAL_ANSWER_TOOL_CHOICE: Lazy<serde_json::Value> = Lazy::new(|| {
 // --- env-tunable constants (resolved at runtime from the env map) -----------
 
 /// Resolve env-tunable constants from the env map. These mirror the Python
-/// module-level constants that are resolved from `MINION_*` env vars.
+/// module-level constants that are resolved from `AFI_*` env vars.
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub reasoning_only_char_limit: usize,
@@ -115,56 +115,55 @@ impl ModelConfig {
     /// defaults when vars are missing or invalid.
     pub fn from_env(env: &std::collections::HashMap<String, String>) -> Self {
         let backend = env
-            .get("MINION_BACKEND")
+            .get("AFI_BACKEND")
             .map(|v| v.trim().to_lowercase())
             .unwrap_or_default();
         let is_vllm = backend == "vllm";
 
         Self {
-            reasoning_only_char_limit: env_int(env, "MINION_REASONING_ONLY_CHARS", 36000) as usize,
-            reasoning_only_time_limit: env_int(env, "MINION_REASONING_ONLY_TIME", 120) as u64,
-            reasoning_only_retry_limit: env_int(env, "MINION_REASONING_ONLY_RETRIES", 3) as u32,
-            malformed_stream_retry_limit: env_int(env, "MINION_MALFORMED_STREAM_RETRIES", 2) as u32,
-            empty_turn_retry_limit: env_int(env, "MINION_EMPTY_TURN_RETRIES", 3) as u32,
-            forced_final_max_tokens: env_int(env, "MINION_FORCED_FINAL_MAX_TOKENS", 2048) as u32,
-            max_completion_tokens: env_int(env, "MINION_MAX_TOKENS", 16000) as u32,
-            tool_result_chars: env_int(env, "MINION_TOOL_RESULT_CHARS", 20000) as usize,
-            session_desc_refresh: env_int(env, "MINION_SESSION_DESC_REFRESH", 6) as u32,
-            recovery_temperature: env_float(env, "MINION_RECOVERY_TEMPERATURE", 1.0),
-            recovery_top_p: env_float(env, "MINION_RECOVERY_TOP_P", 0.95),
+            reasoning_only_char_limit: env_int(env, "AFI_REASONING_ONLY_CHARS", 36000) as usize,
+            reasoning_only_time_limit: env_int(env, "AFI_REASONING_ONLY_TIME", 120) as u64,
+            reasoning_only_retry_limit: env_int(env, "AFI_REASONING_ONLY_RETRIES", 3) as u32,
+            malformed_stream_retry_limit: env_int(env, "AFI_MALFORMED_STREAM_RETRIES", 2) as u32,
+            empty_turn_retry_limit: env_int(env, "AFI_EMPTY_TURN_RETRIES", 3) as u32,
+            forced_final_max_tokens: env_int(env, "AFI_FORCED_FINAL_MAX_TOKENS", 2048) as u32,
+            max_completion_tokens: env_int(env, "AFI_MAX_TOKENS", 16000) as u32,
+            tool_result_chars: env_int(env, "AFI_TOOL_RESULT_CHARS", 20000) as usize,
+            session_desc_refresh: env_int(env, "AFI_SESSION_DESC_REFRESH", 6) as u32,
+            recovery_temperature: env_float(env, "AFI_RECOVERY_TEMPERATURE", 1.0),
+            recovery_top_p: env_float(env, "AFI_RECOVERY_TOP_P", 0.95),
             recovery_min_p: if is_vllm {
                 None
             } else {
-                Some(env_float(env, "MINION_RECOVERY_MIN_P", 0.02))
+                Some(env_float(env, "AFI_RECOVERY_MIN_P", 0.02))
             },
             recovery_repeat_penalty: if is_vllm {
                 None
             } else {
-                Some(env_float(env, "MINION_RECOVERY_REPEAT_PENALTY", 1.2))
+                Some(env_float(env, "AFI_RECOVERY_REPEAT_PENALTY", 1.2))
             },
             recovery_repeat_last_n: if is_vllm {
                 None
             } else {
-                Some(env_int(env, "MINION_RECOVERY_REPEAT_LAST_N", 512))
+                Some(env_int(env, "AFI_RECOVERY_REPEAT_LAST_N", 512))
             },
             recovery_dry_multiplier: if is_vllm {
                 None
             } else {
-                Some(env_float(env, "MINION_RECOVERY_DRY_MULTIPLIER", 0.8))
+                Some(env_float(env, "AFI_RECOVERY_DRY_MULTIPLIER", 0.8))
             },
             recovery_dry_base: if is_vllm {
                 None
             } else {
-                Some(env_float(env, "MINION_RECOVERY_DRY_BASE", 1.75))
+                Some(env_float(env, "AFI_RECOVERY_DRY_BASE", 1.75))
             },
             recovery_dry_allowed_length: if is_vllm {
                 None
             } else {
-                Some(env_int(env, "MINION_RECOVERY_DRY_ALLOWED_LENGTH", 2))
+                Some(env_int(env, "AFI_RECOVERY_DRY_ALLOWED_LENGTH", 2))
             },
-            autocompress_percent: env_int(env, "MINION_AUTOCOMPRESS_PERCENT", 85).clamp(0, 100)
-                as u32,
-            read_file_lines: env_int(env, "MINION_READ_FILE_LINES", 400),
+            autocompress_percent: env_int(env, "AFI_AUTOCOMPRESS_PERCENT", 85).clamp(0, 100) as u32,
+            read_file_lines: env_int(env, "AFI_READ_FILE_LINES", 400),
         }
     }
 }

@@ -11,14 +11,14 @@ the documented breaking changes below. The CLI flags, env vars, slash
 commands, system prompt, tool schemas, recovery knobs, session auto-save,
 multi-source system, approval gating, and TUI chatbox all behave as before.
 
-**Breaking — traffic log moved to `~/.minion/logs/traffic.jsonl`.**
+**Breaking — traffic log moved to `~/.afi/logs/traffic.jsonl`.**
 The old `llamacpp.log` next to the script is gone — an installed binary has
 no "next to the script" location, and `llamacpp` was always a misnomer
 (afi talks to vLLM, SGLang, Z.ai, OpenAI, OpenRouter, Bedrock-via-LiteLLM,
 not just llama.cpp). Same JSONL event schema (`{"ts","dir","data"}`), so
 anything tailing the old file keeps working after a path update.
 
-**Breaking — session format changed.** `~/.minion/sessions/<id>.json` files
+**Breaking — session format changed.** `~/.afi/sessions/<id>.json` files
 written by the Python version will not resume — the Rust port uses a fresh,
 version-tagged schema (`"schema": "afi-1"`). A one-shot importer was
 deferred; start a fresh session on first run.
@@ -30,7 +30,7 @@ status — e.g. Orca (github.com/stablyai/orca), whose custom-CLI-agent docs
 say a title containing "working" or "idle" is picked up automatically —
 show a live status dot for this pane. The title cycles a braille spinner
 glyph on every `LifeSpinner` tick while a turn runs, and resets to
-`afi idle` at the chat prompt. Always on; opt out with `MINION_TITLE=0`.
+`afi idle` at the chat prompt. Always on; opt out with `AFI_TITLE=0`.
 A stray title escape is harmless in a terminal that ignores it.
 
 ### Fixed — text-protocol tool calls dropped when surrounded by prose
@@ -75,13 +75,13 @@ command controls which provider(s) serve the request:
 - `/provider off` clear routing, let OpenRouter pick
 - `/provider openrouter parasail` set routing on a named source
 
-New `MINION_SOURCE_<NAME>_EXTRA_BODY` env var (JSON) seeds provider routing and
-any other arbitrary request-body fields. New `MINION_SOURCE_<NAME>_APP_NAME` /
-`MINION_SOURCE_<NAME>_APP_URL` set HTTP-Referer / X-Title headers (used by
+New `AFI_SOURCE_<NAME>_EXTRA_BODY` env var (JSON) seeds provider routing and
+any other arbitrary request-body fields. New `AFI_SOURCE_<NAME>_APP_NAME` /
+`AFI_SOURCE_<NAME>_APP_URL` set HTTP-Referer / X-Title headers (used by
 OpenRouter's dashboard). Provider routing is persisted in session JSON and
 re-applied on `/resume`.
 
-### Added — vLLM backend awareness (`MINION_BACKEND=vllm`)
+### Added — vLLM backend awareness (`AFI_BACKEND=vllm`)
 
 Disables llama.cpp-only recovery knobs (`min_p`, `repeat_penalty`, DRY) that
 vLLM's speculative decoder rejects — omits them from `extra_body` on retries.
@@ -184,34 +184,34 @@ the sole keystroke consumer. No spawn/join window exists to leak through.
   instead of an empty string (offset 1) or a nonsensical `lines 2-0 of 0` header
   (offset > 1), so an empty file is distinguishable from a failed read.
 - `/autocompress on` was resetting to a hardcoded `85`, silently throwing away a
-  custom `MINION_AUTOCOMPRESS_PERCENT` (e.g. `30` → `off` → `on` jumped to 85).
+  custom `AFI_AUTOCOMPRESS_PERCENT` (e.g. `30` → `off` → `on` jumped to 85).
   It now restores the configured default via the new `AUTOCOMPRESS_DEFAULT`
   constant — still 85% when unset, and falls back to 85 when configured off so
   "on" still turns something on.
 - `_precise_abbr` floored the billions branch to an integer (`1B`) even though
   its docstring promised two decimals like K/M; now `1.50B`.
 - README documents three env vars that were missing from the table:
-  `MINION_ACTIVE`, `MINION_READ_FILE_LINES`, `MINION_EMPTY_TURN_RETRIES`.
+  `AFI_ACTIVE`, `AFI_READ_FILE_LINES`, `AFI_EMPTY_TURN_RETRIES`.
 - Tests: new `tests/test_abbr.py`; empty-file case in
   `tests/test_read_file_paging.py`; `tests/test_autocompress.py` now checks that
   `on` restores the configured (non-85) default.
 
-### Added — automatic context compression (`MINION_AUTOCOMPRESS_PERCENT`, `/autocompress`)
+### Added — automatic context compression (`AFI_AUTOCOMPRESS_PERCENT`, `/autocompress`)
 
 afi can now fold older context automatically when the conversation gets
 close to the context limit, instead of waiting for a manual `/compress`.
 Triggered after each settled model turn: if the last request's
-`prompt_tokens` filled at least `MINION_AUTOCOMPRESS_PERCENT` of the active
+`prompt_tokens` filled at least `AFI_AUTOCOMPRESS_PERCENT` of the active
 source's context window, it compresses in place and prints a subtle
 `↻ auto-compressed N turns → 1 summary (M chars), kept last K verbatim`
 line. Default **85%** (set `0` to disable).
 
-- New env var `MINION_AUTOCOMPRESS_PERCENT` (default 85, clamped 0–100; `0`
-  disables auto-compression entirely). E.g. `MINION_AUTOCOMPRESS_PERCENT=30`
+- New env var `AFI_AUTOCOMPRESS_PERCENT` (default 85, clamped 0–100; `0`
+  disables auto-compression entirely). E.g. `AFI_AUTOCOMPRESS_PERCENT=30`
   on a 170K window fires at ~51K tokens.
 - New `/autocompress` command: bare shows the current threshold/status;
   `/autocompress <1-100>` sets it; `off`/`0`/`disable` disables; `on`/`enable`
-  re-enables at the configured `MINION_AUTOCOMPRESS_PERCENT` (85% by default).
+  re-enables at the configured `AFI_AUTOCOMPRESS_PERCENT` (85% by default).
   Takes effect immediately for the next turn.
 - `compress()` gained an `auto=False` param. When `auto=True`, the keep count
   is raised to `max(COMPRESS_KEEP, body_len // 3)` — roughly the last third of
@@ -228,7 +228,7 @@ line. Default **85%** (set `0` to disable).
 - `tests/test_autocompress.py` pins the keep-formula (auto keeps ~⅓ vs
   manual's flat 2), all the `_maybe_autocompress` guard conditions, the
   `/autocompress` command parser (show/set/off/on/invalid/out-of-range), and
-  `MINION_AUTOCOMPRESS_PERCENT` env-var seeding + clamping.
+  `AFI_AUTOCOMPRESS_PERCENT` env-var seeding + clamping.
 
 ### Added — max context window shown in the footer / `/source`
 The per-turn stats footer now shows the server's maximum context window next
@@ -312,12 +312,12 @@ The turn loop now detects the empty turn and auto-recovers instead of stopping:
   answer — and retries with **recovery sampling** (more entropy, anti-repetition
   knobs) to break out of the empty-output attractor. The dangling `tool` result is
   preserved, so the retry has full context.
-- After `MINION_EMPTY_TURN_RETRIES` (default 3) consecutive empty turns, it
+- After `AFI_EMPTY_TURN_RETRIES` (default 3) consecutive empty turns, it
   escalates to a **forced final answer** (`TURN_FORCE_FINAL`, the existing path),
   so the agent either says something concrete or reports it's blocked rather than
   spinning forever. A successful tool call resets the empty-turn counter (mirrors
   the reasoning-loop / malformed-stream counters).
-- The path is fully opt-out: `MINION_EMPTY_TURN_RETRIES=0` restores the old
+- The path is fully opt-out: `AFI_EMPTY_TURN_RETRIES=0` restores the old
   behavior (empty turn = done). Empty turns under `/recover` (forced-final) still
   stop, since an empty forced answer already means "give up."
 
@@ -340,7 +340,7 @@ afi now ships a built-in `together` source for the Together AI API. When
 auto-registered at `https://api.together.xyz/v1`, defaulting to the
 `zai-org/GLM-5.2` model. It's appended last, so it never displaces your
 default startup source — opt in with `/source together` or `--source together`.
-Defining your own `MINION_SOURCE_TOGETHER_*` vars overrides the built-in
+Defining your own `AFI_SOURCE_TOGETHER_*` vars overrides the built-in
 entirely.
 
 Because Together hosts many models, `/source` now takes an optional model
@@ -430,7 +430,7 @@ The `model_turn` reasoning stream now just streams + counts `reasoning_only_char
 branch. Tests for the removed detectors were deleted; the remaining recovery-path
 tests (forced-final, malformed-stream, `/recover`) keep coverage of what stayed.
 README's env-var table and "Reasoning recovery guards" section updated to match
-the surviving knobs (and the new `MINION_TOOL_RESULT_CHARS` cap + DRY/repeat
+the surviving knobs (and the new `AFI_TOOL_RESULT_CHARS` cap + DRY/repeat
 recovery params, which were previously undocumented).
 
 ### Added — `/recover` command (manual recovery checkpoint)
@@ -455,7 +455,7 @@ bounded visible answer instead of continuing free-form.
 Previously, if the gibberish detector cut the stream and the recovery retry
 also collapsed into noise, afi gave up and waited for user input —
 leaving the user staring at a dead turn with no answer. Now, after
-`MINION_REASONING_GIBBERISH_RETRIES` (default 1) recovery attempts fail,
+`AFI_REASONING_GIBBERISH_RETRIES` (default 1) recovery attempts fail,
 afi escalates: it nudges the model with `GIBBERISH_CHECKPOINT_NUDGE`
 (asking for a bounded visible checkpoint: last valid result, next step,
 blockers) and returns `TURN_FORCE_FINAL`, which re-enters the turn with
@@ -520,7 +520,7 @@ so the tests can assert against stable wording.
 
 > **Note:** the file was previously called `miniagent.py` and configured via
 > `AGENT_BASE_URL` / `AGENT_MODEL` / `AGENT_API_KEY`. Renamed to `afi` /
-> `MINION_*` for clarity. The old env vars are silently ignored — set the new
+> `AFI_*` for clarity. The old env vars are silently ignored — set the new
 > ones.
 
 ### Added — transcript shown on resume
@@ -552,7 +552,7 @@ two things they didn't before: a scannable **short id** and a
   works.
 - `_maybe_refresh_description(id, messages)` makes one cheap non-streaming
   call every `SESSION_DESC_REFRESH` (default **6**, override with
-  `MINION_SESSION_DESC_REFRESH`; `0` disables) user turns, asking the model
+  `AFI_SESSION_DESC_REFRESH`; `0` disables) user turns, asking the model
   for a ≤70-char one-liner about what the session is working on. Stored in
   the session file's `description` field alongside a `desc_turns` counter so
   the next refresh is scheduled correctly. Surfaced as a dim subtitle line
@@ -597,8 +597,8 @@ working tree had already moved to a plain banner printed into scrollback
 ### Added — chat sessions (save / resume)
 
 Every chat is now automatically saved and resumable. Sessions are stored as
-plain JSON files under `~/.minion/sessions/` (override with `MINION_HOME` or
-`MINION_SESSIONS_DIR`), one file per session, holding the exact `messages`
+plain JSON files under `~/.afi/sessions/` (override with `AFI_HOME` or
+`AFI_SESSIONS_DIR`), one file per session, holding the exact `messages`
 array the model sees plus light metadata (id, title, source, cwd, timestamps).
 Greppable, human-readable, and trivially round-trippable. A deliberately
 lightweight take on session persistence — inspired by how Hermes
@@ -735,37 +735,37 @@ in the region below it (rows 2..bottom) without disturbing the bar.
 > (notably Zellij) don't fully implement DECSTBM — in those the bar may
 > scroll away after enough output.
 
-### Added — multi-source system (`MINION_SOURCES`)
+### Added — multi-source system (`AFI_SOURCES`)
 Define multiple named endpoints and switch between them at runtime without
 restarting. Each "source" bundles a base URL, API key, and optional model
 name. Conversation context is preserved across switches (use `/reset` for a
 clean slate).
 
-- New `MINION_SOURCES=local,zai` env var (comma-separated source names;
+- New `AFI_SOURCES=local,zai` env var (comma-separated source names;
   the first is the default at startup).
-- Per-source config via `MINION_SOURCE_<NAME>_BASE_URL`,
-  `MINION_SOURCE_<NAME>_API_KEY`, `MINION_SOURCE_<NAME>_MODEL`.
-- **`$key` indirection** — `MINION_SOURCE_ZAI_API_KEY=$zai_test` looks up
+- Per-source config via `AFI_SOURCE_<NAME>_BASE_URL`,
+  `AFI_SOURCE_<NAME>_API_KEY`, `AFI_SOURCE_<NAME>_MODEL`.
+- **`$key` indirection** — `AFI_SOURCE_ZAI_API_KEY=$zai_test` looks up
   the env var (or `~/.env` key) named `zai_test` rather than taking the
   literal string. Avoids duplicating keys that already live somewhere.
-- **Auto-discovery** — if `MINION_SOURCES` is unset, minion scans for
-  `MINION_SOURCE_*_BASE_URL` vars and builds sources from those.
+- **Auto-discovery** — if `AFI_SOURCES` is unset, minion scans for
+  `AFI_SOURCE_*_BASE_URL` vars and builds sources from those.
 - New `Source` class (`resolve_model()` queries `/v1/models` if no model is
   set; `display_model()` shows `auto` when unset). Each source has its own
   `OpenAI` client.
 - New `switch_source(name)` — reassigns the global `client` / `MODEL` /
   `ACTIVE` so a mid-session swap is picked up instantly by every function
   that reads them.
-- New `--source <name>` flag and `MINION_ACTIVE` env var to pick the
+- New `--source <name>` flag and `AFI_ACTIVE` env var to pick the
   starting source.
 - New `/source` REPL command — bare lists all sources with model + URL;
   `/source <name>` switches and repaints the status bar.
 - New `sources.example.env` with an annotated multi-source template.
-- Backward compatible: if no `MINION_SOURCE_*` vars are present, a single
-  `local` source is built from the legacy `MINION_BASE_URL` /
-  `MINION_API_KEY` / `MINION_MODEL` vars.
+- Backward compatible: if no `AFI_SOURCE_*` vars are present, a single
+  `local` source is built from the legacy `AFI_BASE_URL` /
+  `AFI_API_KEY` / `AFI_MODEL` vars.
 
-### Added — `~/.env` auto-loading (`MINION_ENV_FILE`)
+### Added — `~/.env` auto-loading (`AFI_ENV_FILE`)
 afi now reads `~/.env` at startup (before source discovery) and populates
 `os.environ` from it, without clobbering vars already set in the shell.
 Sources, API keys, and other config can live in one place instead of being
@@ -773,7 +773,7 @@ exported in every terminal.
 
 - New `_load_env_file()` — parses `KEY=VALUE` lines (handles `export`
   prefix, quoted values, comments, blank lines). Points at
-  `MINION_ENV_FILE` if set, otherwise `~/.env`.
+  `AFI_ENV_FILE` if set, otherwise `~/.env`.
 - Existing `export`-based setups keep working unchanged.
 
 ### Added — escalating reasoning-loop nudges + retry limit
@@ -784,7 +784,7 @@ firing the same nudge repeatedly.
   gentle "stop planning, take action"; second is stricter ("exactly one
   concrete action"); third is a hard stop ("emit only a tool call now").
   The nudge index is clamped to `len(nudges) - 1`.
-- New `MINION_REASONING_LOOP_RETRIES` env var (default: number of nudges)
+- New `AFI_REASONING_LOOP_RETRIES` env var (default: number of nudges)
   — after this many cuts, afi stops retrying, prints a "max retries hit"
   message, and drops back to the prompt for user input.
 - New `TURN_LOOP_CUT` return status from `model_turn`; the REPL increments
@@ -863,7 +863,7 @@ to context so the model knows what happened on its next turn.
   cancelled — they run to completion. Hard-stop with Ctrl+C if you need
   one. (Cancel-a-running-tool is a separate follow-up.)
 
-### Added — reasoning-loop guard (`MINION_REASONING_LOOP_SIGNALS`)
+### Added — reasoning-loop guard (`AFI_REASONING_LOOP_SIGNALS`)
 Reasoning models sometimes spin in place — they keep saying "let me
 implement…" / "start coding…" / "now I'll write the code…" without ever
 emitting content or a tool call, burning tokens and stalling the turn.
@@ -874,7 +874,7 @@ and take a concrete action.
 
 - `REASONING_LOOP_SIGNALS` (tuple of 9 phrases) and
   `REASONING_LOOP_SIGNALS_LIMIT` (default 10, override with
-  `MINION_REASONING_LOOP_SIGNALS` env var; `0` disables) module constants.
+  `AFI_REASONING_LOOP_SIGNALS` env var; `0` disables) module constants.
 - New `_ReasoningLoopSignalCounter` class — sliding-window phrase counter
   that scans each streamed `reasoning_content` chunk for new occurrences
   (only counts matches that extend past the previous boundary so we don't

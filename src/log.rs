@@ -1,7 +1,7 @@
 //! Append-only JSONL traffic log.
 //!
 //! Replaces the Python `llamacpp.log` that lived next to the script. Lives at
-//! `~/.minion/logs/traffic.jsonl` so an installed binary (which has no "next
+//! `~/.afi/logs/traffic.jsonl` so an installed binary (which has no "next
 //! to the script") still has a stable, discoverable log location. Same
 //! `{"ts","dir","data"}` event schema as the Python `_log_event` so existing
 //! log tooling keeps working after a path update.
@@ -13,10 +13,10 @@ use std::path::PathBuf;
 use chrono::Local;
 use serde_json::Value;
 
-/// Where the traffic log lives: `~/.minion/logs/traffic.jsonl`.
+/// Where the traffic log lives: `~/.afi/logs/traffic.jsonl`.
 pub fn log_path() -> PathBuf {
     let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    p.push(".minion");
+    p.push(".afi");
     p.push("logs");
     p.push("traffic.jsonl");
     p

@@ -15,21 +15,21 @@ slash commands, and behavior are byte-identical except for two documented
 breaking changes (see [CHANGELOG.md](CHANGELOG.md)):
 
 - the traffic log moved from `llamacpp.log` next to the script to
-  `~/.minion/logs/traffic.jsonl`
-- the `~/.minion/sessions/<id>.json` schema is fresh and version-tagged;
+  `~/.afi/logs/traffic.jsonl`
+- the `~/.afi/sessions/<id>.json` schema is fresh and version-tagged;
   sessions written by the Python version will not resume
 
 ## Quick start
 
 ```
 cargo install --path .
-export MINION_BASE_URL=http://localhost:8080/v1
-export MINION_MODEL=your-model-name
-export MINION_API_KEY=sk-noop        # any string; local servers ignore it
+export AFI_BASE_URL=http://localhost:8080/v1
+export AFI_MODEL=your-model-name
+export AFI_API_KEY=sk-noop        # any string; local servers ignore it
 afi
 ```
 
-If `MINION_MODEL` is unset, afi asks the server what it's serving.
+If `AFI_MODEL` is unset, afi asks the server what it's serving.
 
 ## Configuration
 
@@ -39,9 +39,9 @@ afi reads configuration from environment variables, and automatically loads
 ### Single source (simple)
 
 ```
-MINION_BASE_URL=http://localhost:8080/v1
-MINION_MODEL=your-model-name
-MINION_API_KEY=sk-noop
+AFI_BASE_URL=http://localhost:8080/v1
+AFI_MODEL=your-model-name
+AFI_API_KEY=sk-noop
 ```
 
 ### Multiple sources
@@ -49,14 +49,14 @@ MINION_API_KEY=sk-noop
 Define named endpoints and switch between them at runtime:
 
 ```
-MINION_SOURCES=local,zai
+AFI_SOURCES=local,zai
 
-MINION_SOURCE_LOCAL_BASE_URL=http://localhost:8080/v1
-MINION_SOURCE_LOCAL_API_KEY=sk-noop
+AFI_SOURCE_LOCAL_BASE_URL=http://localhost:8080/v1
+AFI_SOURCE_LOCAL_API_KEY=sk-noop
 
-MINION_SOURCE_ZAI_BASE_URL=https://api.z.ai/api/paas/v4
-MINION_SOURCE_ZAI_API_KEY=$zai_test         # $name = look up a key from env / ~/.env
-MINION_SOURCE_ZAI_MODEL=glm-x-preview
+AFI_SOURCE_ZAI_BASE_URL=https://api.z.ai/api/paas/v4
+AFI_SOURCE_ZAI_API_KEY=$zai_test         # $name = look up a key from env / ~/.env
+AFI_SOURCE_ZAI_MODEL=glm-x-preview
 ```
 
 See [`sources.example.env`](sources.example.env) for a full annotated example.
@@ -77,18 +77,18 @@ Switch at runtime with `/source [name]`.
 
 | env var | what it does |
 | --- | --- |
-| `MINION_APPROVAL` | persistent default approval mode: `all`/`low`/`medium`/`high`/`yolo` |
-| `MINION_BASE_URL` / `MINION_MODEL` / `MINION_API_KEY` | legacy single-source config |
-| `MINION_SOURCES` / `MINION_SOURCE_*` | named multi-source endpoints |
-| `MINION_ACTIVE` | name of the source to start on |
+| `AFI_APPROVAL` | persistent default approval mode: `all`/`low`/`medium`/`high`/`yolo` |
+| `AFI_BASE_URL` / `AFI_MODEL` / `AFI_API_KEY` | legacy single-source config |
+| `AFI_SOURCES` / `AFI_SOURCE_*` | named multi-source endpoints |
+| `AFI_ACTIVE` | name of the source to start on |
 | `TOGETHER_API_KEY` | auto-registers a built-in `together` source |
 | `OPENROUTER_API_KEY` | auto-registers a built-in `openrouter` source |
-| `MINION_BACKEND` | set to `vllm` to disable llama.cpp-only recovery knobs |
-| `MINION_HOME` / `MINION_SESSIONS_DIR` | where session JSON files are stored |
-| `MINION_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; 0=off) |
-| `MINION_MAX_TOKENS` | token cap for normal streaming requests (default 16000) |
-| `MINION_READ_FILE_LINES` | default lines returned by `read_file` (default 400) |
-| `MINION_TOOL_RESULT_CHARS` | per-tool-result char cap (default 20000) |
+| `AFI_BACKEND` | set to `vllm` to disable llama.cpp-only recovery knobs |
+| `AFI_HOME` / `AFI_SESSIONS_DIR` | where session JSON files are stored |
+| `AFI_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; 0=off) |
+| `AFI_MAX_TOKENS` | token cap for normal streaming requests (default 16000) |
+| `AFI_READ_FILE_LINES` | default lines returned by `read_file` (default 400) |
+| `AFI_TOOL_RESULT_CHARS` | per-tool-result char cap (default 20000) |
 
 ## Subcommands
 
@@ -132,8 +132,8 @@ Falls back to plain `read_line` when stdin/stdout isn't a TTY.
 
 ## Sessions (save / resume)
 
-Every chat is automatically saved to `~/.minion/sessions/` (override with
-`MINION_HOME` or `MINION_SESSIONS_DIR`) - one JSON file per session holding
+Every chat is automatically saved to `~/.afi/sessions/` (override with
+`AFI_HOME` or `AFI_SESSIONS_DIR`) - one JSON file per session holding
 the exact message array the model sees plus a little metadata (id, title,
 description, source, cwd, timestamps). Files are plain JSON and
 human-readable/greppable.

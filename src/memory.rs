@@ -1,5 +1,5 @@
 //! Memory: save, remember, and list developer memories stored as markdown
-//! files under `~/.minion/memories/`.
+//! files under `~/.afi/memories/`.
 //!
 //! `/memory save [focus...]`  - distill the session into a memory (model call,
 //!   phase 5 wires the actual API; for now it's a stub that returns an error)
@@ -101,7 +101,7 @@ pub fn remember_memories(
     results.into_iter().map(|(_, n, t, f)| (n, t, f)).collect()
 }
 
-/// Save a memory markdown file to `~/.minion/memories/<slug>.md`.
+/// Save a memory markdown file to `~/.afi/memories/<slug>.md`.
 /// Returns the path of the saved file.
 pub fn save_memory_file(env: &HashMap<String, String>, slug: &str, content: &str) -> PathBuf {
     let dir = memories_dir(env);
@@ -119,7 +119,7 @@ mod tests {
 
     fn env_for(dir: &Path) -> HashMap<String, String> {
         let mut env = HashMap::new();
-        env.insert("MINION_HOME".to_string(), dir.to_string_lossy().to_string());
+        env.insert("AFI_HOME".to_string(), dir.to_string_lossy().to_string());
         env
     }
 

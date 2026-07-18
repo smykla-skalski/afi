@@ -1,6 +1,6 @@
 //! Env-file loading (`~/.env`) and `$name` key indirection.
 //!
-//! Loads `~/.env` (or `MINION_ENV_FILE`) into a map without clobbering vars
+//! Loads `~/.env` (or `AFI_ENV_FILE`) into a map without clobbering vars
 //! already set. Lets source config / API keys live in one place instead of
 //! being exported in every terminal. Mirrors the Python `_load_env_file` /
 //! `_resolve_api_key` helpers.

@@ -10,7 +10,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let env_map: HashMap<String, String> = env::vars().collect();
     let env_file = env_map
-        .get("MINION_ENV_FILE")
+        .get("AFI_ENV_FILE")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".env")));
 

@@ -34,7 +34,7 @@ pub const MANUAL_RECOVERY_NUDGE: &str = "Manual recovery requested by the user b
 /// `min_p`, `repeat_penalty`, `repeat_last_n`, and the DRY family are
 /// llama.cpp extensions that ride in `extra_body`. Non-llama.cpp endpoints
 /// ignore unknown keys. Set any `RECOVERY_*` value negative to omit it.
-/// When `MINION_BACKEND=vllm` the llama.cpp-only knobs are `None` so they're
+/// When `AFI_BACKEND=vllm` the llama.cpp-only knobs are `None` so they're
 /// omitted automatically.
 pub fn recovery_sampling_opts(config: &ModelConfig) -> Value {
     let mut opts = json!({});

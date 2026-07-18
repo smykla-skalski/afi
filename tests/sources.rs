@@ -8,7 +8,7 @@ use afi::config::{parse_extra_body, ParsedArgs};
 use afi::{ApprovalKind, Source};
 use serde_json::json;
 
-// Test 1: legacy fallback (no MINION_SOURCE_* vars)
+// Test 1: legacy fallback (no AFI_SOURCE_* vars)
 #[test]
 fn test_1_legacy_fallback() {
     let rt = common::build(&["afi"], &[]);
@@ -24,13 +24,13 @@ fn test_2_multi_source_discovery() {
     let rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCES", "local,zai"),
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("MINION_SOURCE_LOCAL_API_KEY", "sk-noop"),
+            ("AFI_SOURCES", "local,zai"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_LOCAL_API_KEY", "sk-noop"),
             ("ZAI_TEST_KEY", "fake-zai-key-12345"),
-            ("MINION_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
-            ("MINION_SOURCE_ZAI_API_KEY", "$ZAI_TEST_KEY"),
-            ("MINION_SOURCE_ZAI_MODEL", "glm-x-preview"),
+            ("AFI_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
+            ("AFI_SOURCE_ZAI_API_KEY", "$ZAI_TEST_KEY"),
+            ("AFI_SOURCE_ZAI_MODEL", "glm-x-preview"),
         ],
     );
     assert_eq!(rt.source_order, vec!["local", "zai"]);
@@ -46,10 +46,10 @@ fn test_3_switch_source() {
     let mut rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCES", "local,zai"),
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("MINION_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
-            ("MINION_SOURCE_ZAI_MODEL", "glm-x-preview"),
+            ("AFI_SOURCES", "local,zai"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
+            ("AFI_SOURCE_ZAI_MODEL", "glm-x-preview"),
         ],
     );
     let _old_model = rt.model.clone();
@@ -65,10 +65,10 @@ fn test_4_switch_back() {
     let mut rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCES", "local,zai"),
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("MINION_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
-            ("MINION_SOURCE_ZAI_MODEL", "glm-x-preview"),
+            ("AFI_SOURCES", "local,zai"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
+            ("AFI_SOURCE_ZAI_MODEL", "glm-x-preview"),
         ],
     );
     assert!(rt.switch_source("local", None));
@@ -80,7 +80,7 @@ fn test_4_switch_back() {
 fn test_5_unknown_source() {
     let mut rt = common::build(
         &["afi"],
-        &[("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1")],
+        &[("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1")],
     );
     assert!(!rt.switch_source("nonexistent", None));
 }
@@ -91,23 +91,23 @@ fn test_6_source_flag() {
     let rt = common::build(
         &["afi", "--source", "zai"],
         &[
-            ("MINION_SOURCES", "local,zai"),
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("MINION_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
-            ("MINION_SOURCE_ZAI_MODEL", "glm-x-preview"),
+            ("AFI_SOURCES", "local,zai"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
+            ("AFI_SOURCE_ZAI_MODEL", "glm-x-preview"),
         ],
     );
     assert_eq!(rt.active.as_deref(), Some("zai"));
 }
 
-// Test 7: auto-discover from MINION_SOURCE_*_BASE_URL without MINION_SOURCES
+// Test 7: auto-discover from AFI_SOURCE_*_BASE_URL without AFI_SOURCES
 #[test]
 fn test_7_auto_discover() {
     let rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("MINION_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
         ],
     );
     let set: std::collections::HashSet<&str> = rt.source_order.iter().map(|s| s.as_str()).collect();
@@ -120,9 +120,9 @@ fn test_8_banner_reflects_source() {
     let mut rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCES", "local,zai"),
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("MINION_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
+            ("AFI_SOURCES", "local,zai"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
         ],
     );
     rt.switch_source("zai", None);
@@ -136,7 +136,7 @@ fn test_9_builtin_together() {
     let rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
             ("TOGETHER_API_KEY", "fake-together-key"),
         ],
     );
@@ -161,7 +161,7 @@ fn test_9_builtin_together() {
 fn test_10_no_together_without_key() {
     let rt = common::build(
         &["afi"],
-        &[("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1")],
+        &[("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1")],
     );
     assert!(!rt.sources.contains_key("together"));
 }
@@ -172,13 +172,13 @@ fn test_11_explicit_together_overrides_builtin() {
     let rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCES", "together"),
+            ("AFI_SOURCES", "together"),
             (
-                "MINION_SOURCE_TOGETHER_BASE_URL",
+                "AFI_SOURCE_TOGETHER_BASE_URL",
                 "https://my-proxy.example/v1",
             ),
-            ("MINION_SOURCE_TOGETHER_API_KEY", "custom-key"),
-            ("MINION_SOURCE_TOGETHER_MODEL", "my-org/my-model"),
+            ("AFI_SOURCE_TOGETHER_API_KEY", "custom-key"),
+            ("AFI_SOURCE_TOGETHER_MODEL", "my-org/my-model"),
             ("TOGETHER_API_KEY", "fake-together-key"),
         ],
     );
@@ -199,13 +199,13 @@ fn test_12_switch_source_model_override() {
     let mut rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCES", "together"),
+            ("AFI_SOURCES", "together"),
             (
-                "MINION_SOURCE_TOGETHER_BASE_URL",
+                "AFI_SOURCE_TOGETHER_BASE_URL",
                 "https://api.together.xyz/v1",
             ),
-            ("MINION_SOURCE_TOGETHER_API_KEY", "k"),
-            ("MINION_SOURCE_TOGETHER_MODEL", "zai-org/GLM-5.2"),
+            ("AFI_SOURCE_TOGETHER_API_KEY", "k"),
+            ("AFI_SOURCE_TOGETHER_MODEL", "zai-org/GLM-5.2"),
         ],
     );
     rt.switch_source("together", None);
@@ -222,7 +222,7 @@ fn test_13_builtin_openrouter() {
     let rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
             ("OPENROUTER_API_KEY", "fake-or-key"),
         ],
     );
@@ -250,7 +250,7 @@ fn test_13_builtin_openrouter() {
 fn test_14_no_openrouter_without_key() {
     let rt = common::build(
         &["afi"],
-        &[("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1")],
+        &[("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1")],
     );
     assert!(!rt.sources.contains_key("openrouter"));
 }
@@ -261,15 +261,15 @@ fn test_15_explicit_openrouter_overrides_builtin() {
     let rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCES", "openrouter"),
+            ("AFI_SOURCES", "openrouter"),
             (
-                "MINION_SOURCE_OPENROUTER_BASE_URL",
+                "AFI_SOURCE_OPENROUTER_BASE_URL",
                 "https://my-or-proxy.example/v1",
             ),
-            ("MINION_SOURCE_OPENROUTER_API_KEY", "custom-or-key"),
-            ("MINION_SOURCE_OPENROUTER_MODEL", "my-org/my-model"),
+            ("AFI_SOURCE_OPENROUTER_API_KEY", "custom-or-key"),
+            ("AFI_SOURCE_OPENROUTER_MODEL", "my-org/my-model"),
             (
-                "MINION_SOURCE_OPENROUTER_EXTRA_BODY",
+                "AFI_SOURCE_OPENROUTER_EXTRA_BODY",
                 r#"{"provider":{"order":["Together"],"allow_fallbacks":true}}"#,
             ),
             ("OPENROUTER_API_KEY", "fake-or-key"),
@@ -296,14 +296,14 @@ fn test_16_bad_extra_body_ignored() {
     let rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCES", "openrouter"),
+            ("AFI_SOURCES", "openrouter"),
             (
-                "MINION_SOURCE_OPENROUTER_BASE_URL",
+                "AFI_SOURCE_OPENROUTER_BASE_URL",
                 "https://openrouter.ai/api/v1",
             ),
-            ("MINION_SOURCE_OPENROUTER_API_KEY", "k"),
-            ("MINION_SOURCE_OPENROUTER_MODEL", "z-ai/glm-5.2"),
-            ("MINION_SOURCE_OPENROUTER_EXTRA_BODY", "not json{"),
+            ("AFI_SOURCE_OPENROUTER_API_KEY", "k"),
+            ("AFI_SOURCE_OPENROUTER_MODEL", "z-ai/glm-5.2"),
+            ("AFI_SOURCE_OPENROUTER_EXTRA_BODY", "not json{"),
         ],
     );
     // A malformed explicit config must NOT fall back to the built-in default -
@@ -317,7 +317,7 @@ fn test_17_provider_order_helpers() {
     let mut rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
             ("OPENROUTER_API_KEY", "k"),
         ],
     );
@@ -349,7 +349,7 @@ fn test_18_extra_request_kwargs_plumbing() {
     let mut rt = common::build(
         &["afi"],
         &[
-            ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+            ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
             ("OPENROUTER_API_KEY", "k"),
         ],
     );

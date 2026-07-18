@@ -678,7 +678,7 @@ pub struct LoopRequest<'a> {
 pub async fn run_model_turn_loop(messages: &mut Vec<Value>, lr: LoopRequest<'_>) {
     let max_turns: u32 = lr
         .env
-        .get("MINION_MAX_MODEL_TURNS")
+        .get("AFI_MAX_MODEL_TURNS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(200);
     let mut steps: u32 = 0;

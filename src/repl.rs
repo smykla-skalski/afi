@@ -463,7 +463,7 @@ pub fn run_one_shot(prompt_file: &str, _rt: &Runtime) {
             },
         ));
     } else {
-        eprintln!("{RED}  no active source - set MINION_BASE_URL and MINION_MODEL{RESET}");
+        eprintln!("{RED}  no active source - set AFI_BASE_URL and AFI_MODEL{RESET}");
     }
 }
 

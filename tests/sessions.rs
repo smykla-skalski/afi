@@ -24,7 +24,7 @@ fn msg(role: &str, content: &str) -> serde_json::Value {
 fn env_for(dir: &std::path::Path) -> HashMap<String, String> {
     let mut env = HashMap::new();
     env.insert(
-        "MINION_SESSIONS_DIR".to_string(),
+        "AFI_SESSIONS_DIR".to_string(),
         dir.to_string_lossy().to_string(),
     );
     env

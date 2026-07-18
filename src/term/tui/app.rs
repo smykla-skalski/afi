@@ -8,7 +8,7 @@ use throbber_widgets_tui::ThrobberState;
 use crate::risk::ApprovalChoice;
 use crate::term::{MessageKind, OutputEvent, StreamKind};
 
-use super::view;
+use super::{composer, view};
 
 const SCROLL_STEP: usize = 5;
 
@@ -39,6 +39,7 @@ pub struct TuiApp {
     pub(super) header: String,
     pub(super) transcript: Vec<TranscriptEntry>,
     pub(super) composer: TextArea<'static>,
+    pub(super) composer_view: composer::ViewState,
     pub(super) activity: Option<String>,
     pub(super) task_running: bool,
     pub(super) throbber: ThrobberState,
@@ -62,6 +63,7 @@ impl TuiApp {
             header: String::new(),
             transcript: Vec::new(),
             composer: make_composer(Vec::new()),
+            composer_view: composer::ViewState::default(),
             activity: None,
             task_running: false,
             throbber: ThrobberState::default(),
@@ -169,7 +171,8 @@ impl TuiApp {
         }
         let before = self.input_text();
         let was_selecting = self.composer.is_selecting();
-        let _ = self.composer.insert_str(text);
+        let text = composer::normalize_newlines(text);
+        let _ = self.composer.insert_str(text.as_ref());
         if self.input_text() != before || self.composer.is_selecting() != was_selecting {
             self.reset_history_navigation();
         }
@@ -189,11 +192,6 @@ impl TuiApp {
 
     pub(super) fn input_text(&self) -> String {
         self.composer.lines().join("\n")
-    }
-
-    pub(super) fn composer_height(&self) -> u16 {
-        let lines = u16::try_from(self.composer.lines().len()).unwrap_or(u16::MAX);
-        lines.saturating_add(2).clamp(3, 7)
     }
 
     pub(crate) fn is_busy(&self) -> bool {
@@ -289,9 +287,11 @@ impl TuiApp {
     }
 
     fn apply_composer_input(&mut self, key: KeyEvent) {
+        let scroll = self.composer_view.key_scroll_delta(key);
         if self.composer.input(key) {
             self.reset_history_navigation();
         }
+        self.composer_view.record_scroll(scroll);
     }
 
     fn move_or_navigate_history(&mut self, key: KeyEvent) {
@@ -336,6 +336,7 @@ impl TuiApp {
             Some(index) => index - 1,
             None => {
                 self.history_draft = Some(self.composer.clone());
+                self.composer_view.save_draft();
                 self.history.len() - 1
             }
         };
@@ -356,6 +357,7 @@ impl TuiApp {
             self.history_index = None;
             if let Some(draft) = self.history_draft.take() {
                 self.composer = draft;
+                self.composer_view.restore_draft();
             }
         }
     }
@@ -373,6 +375,7 @@ impl TuiApp {
     fn reset_history_navigation(&mut self) {
         self.history_index = None;
         self.history_draft = None;
+        self.composer_view.clear_draft();
     }
 }
 

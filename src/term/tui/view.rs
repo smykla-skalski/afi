@@ -10,6 +10,7 @@ use throbber_widgets_tui::{BRAILLE_SIX, Throbber};
 use crate::term::{MessageKind, StreamKind};
 
 use super::app::{EntryKind, TranscriptEntry, TuiApp};
+use super::composer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct LayoutAreas {
@@ -21,11 +22,18 @@ pub(super) struct LayoutAreas {
 }
 
 pub(super) fn render(frame: &mut Frame, app: &mut TuiApp) {
-    let areas = layout_areas(frame.area(), app.composer_height());
+    let metrics = composer::measure(&app.composer, frame.area());
+    let areas = layout_areas(frame.area(), metrics.outer_height);
     render_header(frame, app, areas.header);
     render_transcript(frame, app, areas.transcript);
     render_status(frame, app, areas.status);
-    frame.render_widget(&app.composer, areas.composer);
+    composer::render(
+        frame,
+        &mut app.composer,
+        &mut app.composer_view,
+        areas.composer,
+        metrics.visual_rows,
+    );
     render_footer(frame, app, areas.footer);
     if app.approval.is_some() {
         render_approval(frame, app);
@@ -237,7 +245,7 @@ fn render_footer(frame: &mut Frame, app: &TuiApp, area: Rect) {
     } else if app.task_running {
         "Esc cancel · PgUp/PgDown or wheel scroll"
     } else {
-        "Enter send · Alt+Enter newline · ↑/↓ lines/history · PgUp/PgDown or wheel scroll · Ctrl+C quit"
+        "Enter send · Alt+Enter newline · ↑/↓ edit/history · PgUp/PgDown or wheel scroll · Ctrl+C quit"
     };
     frame.render_widget(
         Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),

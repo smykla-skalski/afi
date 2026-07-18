@@ -8,6 +8,7 @@ use crate::risk::ApprovalChoice;
 use crate::term::{MessageKind, OutputEvent, StreamKind};
 
 use super::app::{InputAction, TuiApp};
+use super::composer;
 use super::view::layout_areas;
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -31,6 +32,11 @@ fn render(app: &mut TuiApp, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| app.render(frame)).unwrap();
     terminal.backend().buffer().clone()
+}
+
+fn areas(app: &TuiApp, area: Rect) -> super::view::LayoutAreas {
+    let metrics = composer::measure(&app.composer, area);
+    layout_areas(area, metrics.outer_height)
 }
 
 fn row(buffer: &Buffer, y: u16) -> String {
@@ -187,7 +193,7 @@ fn scrollbar_thumb_tracks_conversation_position() {
     });
 
     let bottom = render(&mut app, 40, 12);
-    let transcript = layout_areas(Rect::new(0, 0, 40, 12), app.composer_height()).transcript;
+    let transcript = areas(&app, Rect::new(0, 0, 40, 12)).transcript;
     let x = transcript.right() - 1;
     let top_y = transcript.y + 1;
     let bottom_y = transcript.bottom() - 2;
@@ -257,7 +263,7 @@ fn spinner_tick_only_changes_status_region() {
     let before = render(&mut app, 60, 18);
     app.tick();
     let after = render(&mut app, 60, 18);
-    let status = layout_areas(Rect::new(0, 0, 60, 18), app.composer_height()).status;
+    let status = areas(&app, Rect::new(0, 0, 60, 18)).status;
 
     let mut changes = 0;
     for y in 0..18 {

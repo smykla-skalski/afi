@@ -118,9 +118,9 @@ Switch at runtime with `/source [name]`.
 When stdin and stdout are terminals, afi runs one persistent fullscreen Ratatui interface. The header, Markdown conversation, activity indicator, multiline composer, footer, and approval dialog share one layout and one input loop.
 
 - **Enter** submits; **Alt+Enter** or **Ctrl+J** inserts a newline.
-- **Paste** inserts text verbatim, including newlines.
+- **Paste** preserves indentation, blank lines, and trailing newlines across LF, CRLF, and CR line endings. The composer grows to five visible rows, then scrolls internally with a scrollbar.
 - **Up/Down** moves through multiline or wrapped input, then traverses prompt history at the boundary; moving past the newest entry restores the unfinished draft. **Alt+Up/Down** traverses history directly.
-- **PageUp/PageDown** or the **mouse wheel** scrolls the conversation or an open approval dialog; a scrollbar shows the current position.
+- **PageUp/PageDown** or the **mouse wheel** scrolls the conversation or an open approval dialog. The conversation and overflowing composer each show their current position with a scrollbar.
 - **Esc** or **Ctrl+C** requests cancellation of active work; **Ctrl+C** exits while idle.
 - **Y** approves a requested action; **N**, **Enter**, or **Esc** denies or cancels it.
 

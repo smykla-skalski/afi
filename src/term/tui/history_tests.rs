@@ -179,7 +179,7 @@ fn normalized_empty_paste_detaches_recalled_prompt() {
         .move_cursor(ratatui_textarea::CursorMove::Jump(0, 2));
     let _ = app.handle_key(modified(KeyCode::Right, KeyModifiers::SHIFT));
 
-    app.paste("\r");
+    app.paste("");
     let _ = app.handle_key(key(KeyCode::Down));
 
     assert_composer(&app, "pror", (0, 2));

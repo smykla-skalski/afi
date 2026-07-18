@@ -1,5 +1,5 @@
-//! Tools the agent can call: read_file, write_file, edit_file, list_dir,
-//! run_bash, wait_background.
+//! Tools the agent can call: `read_file`, `write_file`, `edit_file`, `list_dir`,
+//! `run_bash`, `wait_background`.
 //!
 //! Phase 3 implements the file tools + the text-protocol parser. Bash (with
 //! detached process-group execution + background polling) lands in `bash.rs`.
@@ -8,13 +8,15 @@
 pub mod bash;
 pub mod protocol;
 
+use std::fmt::Write as _;
 use std::fs;
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value};
+use std::sync::LazyLock;
 
 /// The names of all registered tools, in dispatch order.
+#[must_use]
 pub fn known_tool_names() -> &'static [&'static str] {
     &[
         "read_file",
@@ -26,8 +28,8 @@ pub fn known_tool_names() -> &'static [&'static str] {
     ]
 }
 
-/// The OpenAI tool schemas sent to the model. Mirrors `TOOLS` in the Python.
-pub static TOOLS: Lazy<Value> = Lazy::new(|| {
+/// The `OpenAI` tool schemas sent to the model. Mirrors `TOOLS` in the Python.
+pub static TOOLS: LazyLock<Value> = LazyLock::new(|| {
     json!([
         {"type": "function", "function": {"name": "read_file", "description": "Read a file's contents. Returns lines numbered (1-based, like `cat -n`: a right-aligned number, a tab, then the line). Large files return only a window — pass `offset` (1-based start line) and `limit` (max lines, default 400) to page through the rest; a header shows the visible range and total line count.",
             "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "description": "1-based line to start from (default 1)"}, "limit": {"type": "integer", "description": "max lines to return (default 400; <=0 reads to end)"}}, "required": ["path"]}}},
@@ -46,9 +48,46 @@ pub static TOOLS: Lazy<Value> = Lazy::new(|| {
 
 // --- read_file ---------------------------------------------------------------
 
+/// Count logical lines from a `split('\n')` result, dropping the trailing empty
+/// element a final newline leaves behind so counts match `cat -n`. `split('\n')`
+/// on `"a\nb\n"` gives `["a", "b", ""]`; `""` (an empty file) gives `[""]` (0).
+fn line_count(all: &[&str]) -> usize {
+    if all.len() == 1 && all[0].is_empty() {
+        0
+    } else if all.last() == Some(&"") && all.len() > 1 {
+        all.len() - 1
+    } else {
+        all.len()
+    }
+}
+
+/// 0-based start line from a 1-based `offset` (default 1).
+fn window_start(offset: Option<i64>) -> usize {
+    match offset {
+        Some(o) => usize::try_from(o.max(1))
+            .unwrap_or(usize::MAX)
+            .saturating_sub(1),
+        None => 0,
+    }
+}
+
+/// Exclusive end line for the window. A `limit <= 0` (or its `env_read_lines`
+/// fallback) reads through to `total`.
+fn window_end(start: usize, limit: Option<i64>, total: usize, env_read_lines: i64) -> usize {
+    let lim = limit.unwrap_or(env_read_lines);
+    if lim <= 0 {
+        total
+    } else {
+        start
+            .saturating_add(usize::try_from(lim).unwrap_or(usize::MAX))
+            .min(total)
+    }
+}
+
 /// Read a file as numbered lines (1-based, `cat -n` style). Large files
 /// return only a window; pass `offset` / `limit` to page through the rest.
 /// A header announces the visible range + total line count.
+#[must_use]
 pub fn read_file(
     path: &str,
     offset: Option<i64>,
@@ -57,27 +96,14 @@ pub fn read_file(
 ) -> String {
     let lines = match fs::read_to_string(path) {
         Ok(s) => s,
-        Err(e) => return format!("ERROR reading {}: {}", path, e),
+        Err(e) => return format!("ERROR reading {path}: {e}"),
     };
     let all: Vec<&str> = lines.split('\n').collect();
-    // split('\n') on "a\nb\n" gives ["a", "b", ""] — drop the trailing empty
-    // from a final newline so line counts match `cat -n`. An empty file ("")
-    // gives [""] which is 0 lines.
-    let total = if all.len() == 1 && all[0].is_empty() {
-        0
-    } else if all.last() == Some(&"") && all.len() > 1 {
-        all.len() - 1
-    } else {
-        all.len()
-    };
-
-    let start = match offset {
-        Some(o) => o.max(1) as usize - 1,
-        None => 0,
-    };
+    let total = line_count(&all);
+    let start = window_start(offset);
 
     if total == 0 {
-        return format!("[{}: empty file]", path);
+        return format!("[{path}: empty file]");
     }
     if start >= total {
         return format!(
@@ -88,19 +114,11 @@ pub fn read_file(
         );
     }
 
-    let lim = match limit {
-        Some(l) => l,
-        None => env_read_lines,
-    };
-    let end = if lim <= 0 {
-        total
-    } else {
-        (start + lim as usize).min(total)
-    };
+    let end = window_end(start, limit, total, env_read_lines);
 
     let mut body = String::new();
     for (idx, line) in all.iter().enumerate().skip(start).take(end - start) {
-        body.push_str(&format!("{:>6}\t{}\n", idx + 1, line));
+        let _ = writeln!(body, "{:>6}\t{line}", idx + 1);
     }
 
     if start > 0 || end < total {
@@ -121,20 +139,22 @@ pub fn read_file(
 
 /// Write (overwrite) a file. Returns a status string. Phase 4 adds the
 /// approval prompt; for now the caller decides whether to call this.
+#[must_use]
 pub fn write_file(path: &str, content: &str) -> String {
     match fs::write(path, content) {
-        Ok(_) => format!("wrote {} bytes to {}", content.len(), path),
-        Err(e) => format!("ERROR writing {}: {}", path, e),
+        Ok(()) => format!("wrote {} bytes to {}", content.len(), path),
+        Err(e) => format!("ERROR writing {path}: {e}"),
     }
 }
 
 // --- edit_file ---------------------------------------------------------------
 
-static LINE_NUM_PREFIX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^ *\d+\t").unwrap());
+static LINE_NUM_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ *\d+\t").unwrap());
 
-/// Remove read_file's `<n>\t` line-number prefixes from a pasted block. Only
+/// Remove `read_file`'s `<n>\t` line-number prefixes from a pasted block. Only
 /// strips when EVERY non-empty line carries one — so ordinary edits, and code
 /// that merely starts a line with digits, are never altered.
+#[must_use]
 pub fn strip_line_numbers(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let nonempty: Vec<&&str> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
@@ -150,11 +170,12 @@ pub fn strip_line_numbers(text: &str) -> String {
 
 /// Replace one exact occurrence of `old` with `new` in a file. If the exact
 /// match fails, retries with line-number prefixes stripped (the model may have
-/// pasted read_file's numbered output).
+/// pasted `read_file`'s numbered output).
+#[must_use]
 pub fn edit_file(path: &str, old: &str, new: &str) -> String {
     let src = match fs::read_to_string(path) {
         Ok(s) => s,
-        Err(e) => return format!("ERROR reading {}: {}", path, e),
+        Err(e) => return format!("ERROR reading {path}: {e}"),
     };
 
     // Try exact match first.
@@ -170,18 +191,19 @@ pub fn edit_file(path: &str, old: &str, new: &str) -> String {
     }
     let count = src.matches(&old_str).count();
     if count != 1 {
-        return format!("ERROR: `old` matched {} times (need exactly 1)", count);
+        return format!("ERROR: `old` matched {count} times (need exactly 1)");
     }
     let result = src.replacen(&old_str, &new_str, 1);
     match fs::write(path, &result) {
-        Ok(_) => format!("edited {}", path),
-        Err(e) => format!("ERROR writing {}: {}", path, e),
+        Ok(()) => format!("edited {path}"),
+        Err(e) => format!("ERROR writing {path}: {e}"),
     }
 }
 
 // --- list_dir ----------------------------------------------------------------
 
 /// List a directory, sorted.
+#[must_use]
 pub fn list_dir(path: &str) -> String {
     match fs::read_dir(path) {
         Ok(entries) => {
@@ -192,13 +214,23 @@ pub fn list_dir(path: &str) -> String {
             names.sort();
             names.join("\n")
         }
-        Err(e) => format!("ERROR listing {}: {}", path, e),
+        Err(e) => format!("ERROR listing {path}: {e}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::mem;
+
     use super::*;
+
+    fn numbered_lines(count: usize, prefix: &str) -> String {
+        use std::fmt::Write as _;
+        (1..=count).fold(String::new(), |mut s, i| {
+            let _ = writeln!(s, "{prefix}{i}");
+            s
+        })
+    }
 
     fn write_tmp(name: &str, content: &str) -> String {
         let dir = tempfile::tempdir().unwrap();
@@ -207,7 +239,7 @@ mod tests {
         // Leak the temp dir so the file survives the test — return the path.
         // (tempfile::TempDir drops on scope exit; we keep the dir alive by
         // forgetting it.)
-        std::mem::forget(dir);
+        mem::forget(dir);
         path.to_string_lossy().to_string()
     }
 
@@ -235,10 +267,10 @@ mod tests {
 
     #[test]
     fn large_file_default_window_has_header() {
-        let content: String = (1..=1000).map(|i| format!("line{}\n", i)).collect();
+        let content: String = numbered_lines(1000, "line");
         let path = write_tmp("big.txt", &content);
         let out = read_file(&path, None, None, 400);
-        assert!(out.starts_with(&format!("[{}: lines 1-400 of 1000;", path)));
+        assert!(out.starts_with(&format!("[{path}: lines 1-400 of 1000;")));
         let body = out.split_once('\n').unwrap().1;
         let body_lines: Vec<&str> = body.lines().collect();
         assert_eq!(body_lines.len(), 400);
@@ -248,10 +280,10 @@ mod tests {
 
     #[test]
     fn offset_and_limit_window() {
-        let content: String = (1..=1000).map(|i| format!("line{}\n", i)).collect();
+        let content: String = numbered_lines(1000, "line");
         let path = write_tmp("big2.txt", &content);
         let out = read_file(&path, Some(500), Some(3), 400);
-        assert!(out.starts_with(&format!("[{}: lines 500-502 of 1000;", path)));
+        assert!(out.starts_with(&format!("[{path}: lines 500-502 of 1000;")));
         let body_lines: Vec<&str> = out.split_once('\n').unwrap().1.lines().collect();
         assert_eq!(
             body_lines,
@@ -261,10 +293,10 @@ mod tests {
 
     #[test]
     fn limit_clamps_at_eof() {
-        let content: String = (1..=10).map(|i| format!("line{}\n", i)).collect();
+        let content: String = numbered_lines(10, "line");
         let path = write_tmp("big3.txt", &content);
         let out = read_file(&path, Some(8), Some(100), 400);
-        assert!(out.starts_with(&format!("[{}: lines 8-10 of 10;", path)));
+        assert!(out.starts_with(&format!("[{path}: lines 8-10 of 10;")));
         assert!(out.trim_end().ends_with("    10\tline10"));
     }
 
@@ -274,7 +306,7 @@ mod tests {
         let out = read_file(&path, Some(99), None, 400);
         assert_eq!(
             out,
-            format!("[{}: 2 lines; offset 99 is past end of file]", path)
+            format!("[{path}: 2 lines; offset 99 is past end of file]")
         );
     }
 
@@ -283,17 +315,17 @@ mod tests {
         let path = write_tmp("empty.txt", "");
         assert_eq!(
             read_file(&path, None, None, 400),
-            format!("[{}: empty file]", path)
+            format!("[{path}: empty file]")
         );
         assert_eq!(
             read_file(&path, Some(5), None, 400),
-            format!("[{}: empty file]", path)
+            format!("[{path}: empty file]")
         );
     }
 
     #[test]
     fn limit_zero_reads_to_end() {
-        let content: String = (1..=50).map(|i| format!("line{}\n", i)).collect();
+        let content: String = numbered_lines(50, "line");
         let path = write_tmp("big4.txt", &content);
         let out = read_file(&path, None, Some(0), 400);
         assert!(!out.starts_with('['));
@@ -302,7 +334,7 @@ mod tests {
 
     #[test]
     fn line_number_matches_real_position() {
-        let content: String = (1..=30).map(|i| format!("row{}\n", i)).collect();
+        let content: String = numbered_lines(30, "row");
         let path = write_tmp("map.txt", &content);
         let out = read_file(&path, Some(17), Some(1), 400);
         let body = out.split_once('\n').unwrap().1.trim_end();
@@ -322,7 +354,7 @@ mod tests {
         assert!(old_block.contains('\t') && old_block.trim_start().starts_with("1\t"));
         let new_block = "     1\tdef foo():\n     2\t    return 10";
         let res = edit_file(&path, old_block, new_block);
-        assert_eq!(res, format!("edited {}", path));
+        assert_eq!(res, format!("edited {path}"));
         let src = fs::read_to_string(&path).unwrap();
         assert!(src.contains("return 10"));
         assert!(!src.contains('\t'), "line-number prefixes must not leak");
@@ -333,7 +365,7 @@ mod tests {
     fn edit_file_plain_old_still_works() {
         let path = write_tmp("edit2.txt", "hello world\n");
         let res = edit_file(&path, "hello", "goodbye");
-        assert_eq!(res, format!("edited {}", path));
+        assert_eq!(res, format!("edited {path}"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world\n");
     }
 
@@ -341,7 +373,7 @@ mod tests {
     fn edit_file_does_not_strip_real_numeric_content() {
         let path = write_tmp("data.tsv", "1\tapple\n2\tbanana\n3\tcherry\n");
         let res = edit_file(&path, "2\tbanana", "2\tBANANA");
-        assert_eq!(res, format!("edited {}", path));
+        assert_eq!(res, format!("edited {path}"));
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "1\tapple\n2\tBANANA\n3\tcherry\n"

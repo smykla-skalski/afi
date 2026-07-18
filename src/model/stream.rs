@@ -1,8 +1,8 @@
 //! SSE stream parsing and usage normalization.
 //!
 //! Parses `data: {...}\n\n` SSE events from the OpenAI-compatible streaming
-//! API, extracts content / tool_calls / reasoning_content / usage from each
-//! chunk, and normalizes token usage from both the OpenAI `usage` object and
+//! API, extracts content / `tool_calls` / `reasoning_content` / usage from each
+//! chunk, and normalizes token usage from both the `OpenAI` `usage` object and
 //! the llama.cpp `timings` extra.
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ pub struct ToolCallDelta {
     pub arguments: Option<String>,
 }
 
-/// The standard OpenAI usage object.
+/// The standard `OpenAI` usage object.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u64,
@@ -58,7 +58,7 @@ pub struct Timings {
 }
 
 /// Normalized token usage: input (minus cache), output (minus reasoning),
-/// cache_read, reasoning. Matches the OpenAI usage convention.
+/// `cache_read`, reasoning. Matches the `OpenAI` usage convention.
 #[derive(Debug, Clone, Default)]
 pub struct NormalizedUsage {
     pub input_tokens: u64,
@@ -73,6 +73,7 @@ pub struct NormalizedUsage {
 ///
 /// When neither is available, a rough estimate is derived from `fallback_chars`
 /// (client-side char count of streamed content + tool-call arguments).
+#[must_use]
 pub fn normalize_usage(
     usage: Option<&Usage>,
     timings: Option<&Timings>,
@@ -96,13 +97,11 @@ pub fn normalize_usage(
         let cache_n = u
             .prompt_tokens_details
             .as_ref()
-            .map(|d| d.cached_tokens)
-            .unwrap_or(0);
+            .map_or(0, |d| d.cached_tokens);
         let reasoning_n = u
             .output_tokens_details
             .as_ref()
-            .map(|d| d.reasoning_tokens)
-            .unwrap_or(0);
+            .map_or(0, |d| d.reasoning_tokens);
         return Some(NormalizedUsage {
             input_tokens: u.prompt_tokens.saturating_sub(cache_n),
             output_tokens: u.completion_tokens.saturating_sub(reasoning_n),
@@ -127,6 +126,7 @@ pub fn normalize_usage(
 
 /// Parse a single `data: {...}` SSE line into a `StreamChunk`. Returns
 /// `None` for `data: [DONE]` or blank lines.
+#[must_use]
 pub fn parse_sse_line(line: &str) -> Option<StreamChunk> {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') {
@@ -139,59 +139,68 @@ pub fn parse_sse_line(line: &str) -> Option<StreamChunk> {
     let v: Value = serde_json::from_str(json_str).ok()?;
 
     let mut chunk = StreamChunk::default();
-
-    // Extract choices[0].delta
-    if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
-        if let Some(choice) = choices.first() {
-            if let Some(delta) = choice.get("delta") {
-                chunk.content = delta
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .map(String::from);
-                chunk.reasoning_content = delta
-                    .get("reasoning_content")
-                    .and_then(|c| c.as_str())
-                    .map(String::from);
-                if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-                    for tc in tcs {
-                        let mut delta_t = ToolCallDelta {
-                            index: tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32,
-                            ..Default::default()
-                        };
-                        delta_t.id = tc.get("id").and_then(|i| i.as_str()).map(String::from);
-                        if let Some(func) = tc.get("function") {
-                            delta_t.name =
-                                func.get("name").and_then(|n| n.as_str()).map(String::from);
-                            delta_t.arguments = func
-                                .get("arguments")
-                                .and_then(|a| a.as_str())
-                                .map(String::from);
-                        }
-                        chunk.tool_calls.push(delta_t);
-                    }
-                }
-            }
-            chunk.finish_reason = choice
-                .get("finish_reason")
-                .and_then(|f| f.as_str())
-                .map(String::from);
-        }
+    if let Some(choice) = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+    {
+        apply_choice(&mut chunk, choice);
     }
-
-    // Extract usage (if present, on the final chunk)
+    // Usage / timings ride on the final chunk.
     if let Some(u) = v.get("usage") {
         chunk.usage = serde_json::from_value(u.clone()).ok();
     }
-
-    // Extract timings (llama.cpp extra, on the final chunk)
     if let Some(t) = v.get("timings") {
         chunk.timings = serde_json::from_value(t.clone()).ok();
     }
-
     Some(chunk)
 }
 
-/// Parse a full SSE response body into a Vec of StreamChunks.
+/// Fold one `choices[0]` entry (delta `content`/`reasoning`/`tool_calls` +
+/// `finish_reason`) into `chunk`.
+fn apply_choice(chunk: &mut StreamChunk, choice: &Value) {
+    if let Some(delta) = choice.get("delta") {
+        chunk.content = delta
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(String::from);
+        chunk.reasoning_content = delta
+            .get("reasoning_content")
+            .and_then(|c| c.as_str())
+            .map(String::from);
+        if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+            chunk.tool_calls = tcs.iter().map(parse_tool_delta).collect();
+        }
+    }
+    chunk.finish_reason = choice
+        .get("finish_reason")
+        .and_then(|f| f.as_str())
+        .map(String::from);
+}
+
+/// Parse one streamed `tool_calls` delta entry.
+fn parse_tool_delta(tc: &Value) -> ToolCallDelta {
+    let mut delta_t = ToolCallDelta {
+        index: tc
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
+        ..Default::default()
+    };
+    delta_t.id = tc.get("id").and_then(|i| i.as_str()).map(String::from);
+    if let Some(func) = tc.get("function") {
+        delta_t.name = func.get("name").and_then(|n| n.as_str()).map(String::from);
+        delta_t.arguments = func
+            .get("arguments")
+            .and_then(|a| a.as_str())
+            .map(String::from);
+    }
+    delta_t
+}
+
+/// Parse a full SSE response body into a Vec of `StreamChunks`.
+#[must_use]
 pub fn parse_sse_body(body: &str) -> Vec<StreamChunk> {
     body.split("\n\n")
         .flat_map(|event| event.lines().filter_map(parse_sse_line).collect::<Vec<_>>())

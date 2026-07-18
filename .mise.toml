@@ -36,6 +36,13 @@ run = "./scripts/check-rust-source-size.sh"
 description = "Aggregate strict validation gate: format, clippy, source size, tests"
 depends = ["fmt:check", "check:rust", "check:source-size", "test"]
 
+[tasks."lint:fix"]
+description = "Format and apply machine-applicable clippy fixes across all targets"
+run = [
+  "cargo fmt --all",
+  "cargo clippy --fix --allow-dirty --allow-staged --all-targets",
+]
+
 [tasks.install]
 description = "Install the current afi binary into the standard Cargo bin directory for terminal use"
 # --path . installs this local package; --locked pins to Cargo.lock; --force

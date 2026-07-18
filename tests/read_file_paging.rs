@@ -2,13 +2,24 @@
 
 use afi::tools::protocol::{parse_text_calls, sanitize_tool_result};
 use afi::tools::{edit_file, list_dir, read_file, strip_line_numbers};
+use std::fmt::Write as _;
 use std::fs;
+use std::path::Path;
 use tempfile::tempdir;
 
-fn write_tmp(dir: &std::path::Path, name: &str, content: &str) -> String {
+fn write_tmp(dir: &Path, name: &str, content: &str) -> String {
     let path = dir.join(name);
     fs::write(&path, content).unwrap();
     path.to_string_lossy().to_string()
+}
+
+/// Build `<prefix>1\n<prefix>2\n...<prefix>n\n` for paging fixtures.
+fn gen_lines(prefix: &str, n: usize) -> String {
+    let mut s = String::new();
+    for i in 1..=n {
+        let _ = writeln!(s, "{prefix}{i}");
+    }
+    s
 }
 
 // --- read_file paging tests (port of test_read_file_paging.py) ---
@@ -40,10 +51,10 @@ fn no_trailing_newline_preserved() {
 #[test]
 fn large_file_default_window_has_header() {
     let dir = tempdir().unwrap();
-    let content: String = (1..=1000).map(|i| format!("line{}\n", i)).collect();
+    let content = gen_lines("line", 1000);
     let path = write_tmp(dir.path(), "big.txt", &content);
     let out = read_file(&path, None, None, 400);
-    assert!(out.starts_with(&format!("[{}: lines 1-400 of 1000;", path)));
+    assert!(out.starts_with(&format!("[{path}: lines 1-400 of 1000;")));
     let body = out.split_once('\n').unwrap().1;
     let body_lines: Vec<&str> = body.lines().collect();
     assert_eq!(body_lines.len(), 400);
@@ -54,10 +65,10 @@ fn large_file_default_window_has_header() {
 #[test]
 fn offset_and_limit_window() {
     let dir = tempdir().unwrap();
-    let content: String = (1..=1000).map(|i| format!("line{}\n", i)).collect();
+    let content = gen_lines("line", 1000);
     let path = write_tmp(dir.path(), "big2.txt", &content);
     let out = read_file(&path, Some(500), Some(3), 400);
-    assert!(out.starts_with(&format!("[{}: lines 500-502 of 1000;", path)));
+    assert!(out.starts_with(&format!("[{path}: lines 500-502 of 1000;")));
     let body_lines: Vec<&str> = out.split_once('\n').unwrap().1.lines().collect();
     assert_eq!(
         body_lines,
@@ -68,10 +79,10 @@ fn offset_and_limit_window() {
 #[test]
 fn limit_clamps_at_eof() {
     let dir = tempdir().unwrap();
-    let content: String = (1..=10).map(|i| format!("line{}\n", i)).collect();
+    let content = gen_lines("line", 10);
     let path = write_tmp(dir.path(), "big3.txt", &content);
     let out = read_file(&path, Some(8), Some(100), 400);
-    assert!(out.starts_with(&format!("[{}: lines 8-10 of 10;", path)));
+    assert!(out.starts_with(&format!("[{path}: lines 8-10 of 10;")));
     assert!(out.trim_end().ends_with("    10\tline10"));
 }
 
@@ -82,7 +93,7 @@ fn offset_past_eof() {
     let out = read_file(&path, Some(99), None, 400);
     assert_eq!(
         out,
-        format!("[{}: 2 lines; offset 99 is past end of file]", path)
+        format!("[{path}: 2 lines; offset 99 is past end of file]")
     );
 }
 
@@ -92,18 +103,18 @@ fn empty_file_clear_marker() {
     let path = write_tmp(dir.path(), "empty.txt", "");
     assert_eq!(
         read_file(&path, None, None, 400),
-        format!("[{}: empty file]", path)
+        format!("[{path}: empty file]")
     );
     assert_eq!(
         read_file(&path, Some(5), None, 400),
-        format!("[{}: empty file]", path)
+        format!("[{path}: empty file]")
     );
 }
 
 #[test]
 fn limit_zero_reads_to_end() {
     let dir = tempdir().unwrap();
-    let content: String = (1..=50).map(|i| format!("line{}\n", i)).collect();
+    let content = gen_lines("line", 50);
     let path = write_tmp(dir.path(), "big4.txt", &content);
     let out = read_file(&path, None, Some(0), 400);
     assert!(!out.starts_with('['));
@@ -113,7 +124,7 @@ fn limit_zero_reads_to_end() {
 #[test]
 fn line_number_matches_real_position() {
     let dir = tempdir().unwrap();
-    let content: String = (1..=30).map(|i| format!("row{}\n", i)).collect();
+    let content = gen_lines("row", 30);
     let path = write_tmp(dir.path(), "map.txt", &content);
     let out = read_file(&path, Some(17), Some(1), 400);
     let body = out.split_once('\n').unwrap().1.trim_end();
@@ -137,7 +148,7 @@ fn edit_file_strips_pasted_line_numbers() {
     assert!(old_block.contains('\t') && old_block.trim_start().starts_with("1\t"));
     let new_block = "     1\tdef foo():\n     2\t    return 10";
     let res = edit_file(&path, old_block, new_block);
-    assert_eq!(res, format!("edited {}", path));
+    assert_eq!(res, format!("edited {path}"));
     let src = fs::read_to_string(&path).unwrap();
     assert!(src.contains("return 10"));
     assert!(!src.contains('\t'), "line-number prefixes must not leak");
@@ -149,7 +160,7 @@ fn edit_file_plain_old_still_works() {
     let dir = tempdir().unwrap();
     let path = write_tmp(dir.path(), "edit2.txt", "hello world\n");
     let res = edit_file(&path, "hello", "goodbye");
-    assert_eq!(res, format!("edited {}", path));
+    assert_eq!(res, format!("edited {path}"));
     assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world\n");
 }
 
@@ -158,7 +169,7 @@ fn edit_file_does_not_strip_real_numeric_content() {
     let dir = tempdir().unwrap();
     let path = write_tmp(dir.path(), "data.tsv", "1\tapple\n2\tbanana\n3\tcherry\n");
     let res = edit_file(&path, "2\tbanana", "2\tBANANA");
-    assert_eq!(res, format!("edited {}", path));
+    assert_eq!(res, format!("edited {path}"));
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "1\tapple\n2\tBANANA\n3\tcherry\n"

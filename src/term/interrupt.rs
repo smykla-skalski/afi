@@ -17,12 +17,14 @@ pub struct InterruptWatcher {
 
 impl InterruptWatcher {
     /// Create a new interrupt watcher.
+    #[must_use]
     pub fn new() -> Self {
         let (tx, rx) = watch::channel(false);
         Self { tx, rx }
     }
 
     /// Check if the user has interrupted (pressed Esc).
+    #[must_use]
     pub fn was_interrupted(&self) -> bool {
         *self.rx.borrow()
     }
@@ -38,6 +40,7 @@ impl InterruptWatcher {
     }
 
     /// Get a receiver clone for checking in async contexts.
+    #[must_use]
     pub fn receiver(&self) -> watch::Receiver<bool> {
         self.rx.clone()
     }

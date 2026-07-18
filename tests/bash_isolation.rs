@@ -5,7 +5,9 @@
 //! old `unsafe { pre_exec(setsid) }` in `src/tools/bash.rs`.
 
 use std::collections::HashMap;
-use std::process::Command;
+use std::process::{id, Command};
+
+use afi::tools::bash::run_bash;
 
 /// Process-group id of `pid` via `ps` (portable across macOS and Linux; `=`
 /// suppresses the column header on both).
@@ -33,7 +35,7 @@ fn detached_command_leads_its_own_process_group() {
     // inside both `( )` and `$( )`, so this reports that shell's own pid and
     // its process-group id. The `\n` is a printf escape, kept literal by the
     // Rust raw string.
-    let out = afi::tools::bash::run_bash(
+    let out = run_bash(
         r#"printf '%s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')""#,
         Some(10),
         &env,
@@ -46,22 +48,22 @@ fn detached_command_leads_its_own_process_group() {
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("no child pid in run_bash output: {out:?}"));
-    let child_pgid: i64 = nums
+    let child_group: i64 = nums
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("no child pgid in run_bash output: {out:?}"));
 
     // process_group(0) makes the child a group leader: pgid == pid.
     assert_eq!(
-        child_pid, child_pgid,
+        child_pid, child_group,
         "detached child must lead its own process group (out={out:?})"
     );
 
     // And that group must differ from the test runner's own group -- proof the
     // child is isolated from the foreground group a Ctrl+C would target.
-    let own_pgid = pgid_of(std::process::id());
+    let own_pgid = pgid_of(id());
     assert_ne!(
-        child_pgid, own_pgid,
+        child_group, own_pgid,
         "detached group must differ from the test process group"
     );
 }

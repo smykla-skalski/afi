@@ -66,13 +66,18 @@ fn test_cli_yolo_overrides_approval_level() {
     assert_eq!(rt.approval.default_approve_level, Some(Level::Medium));
 }
 
-// "all" / "strict" / "prompt" / "prompt-all" / "none" all mean prompt-all.
+// `--approval all` clears any env-set level back to prompt-all.
 #[test]
-fn test_prompt_all_aliases_are_accepted() {
+fn test_prompt_all_flag_clears_level() {
     let rt = build(&["afi", "--approval", "all"], &[("AFI_APPROVAL", "medium")]);
     assert!(!rt.approval.yolo);
     assert_eq!(rt.approval.approve_level, None);
     assert_eq!(rt.approval.default_approve_level, None);
+}
+
+// "all" / "strict" / "prompt" / "prompt-all" / "none" all mean prompt-all.
+#[test]
+fn test_prompt_all_aliases_normalize() {
     assert_eq!(normalize_approval("strict"), Some(ApprovalKind::PromptAll));
     assert_eq!(normalize_approval("prompt"), Some(ApprovalKind::PromptAll));
     assert_eq!(

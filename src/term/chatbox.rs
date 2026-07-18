@@ -30,6 +30,10 @@ const _: () = assert!(VIEWPORT_HEIGHT > 3);
 /// Read multi-line input from the terminal. Returns `Ok(text)` on submit,
 /// `Err(Interrupted)` on Ctrl+C, `Err(UnexpectedEof)` on Ctrl+D. Falls back to
 /// `read_line` when stdin/stdout is not a TTY.
+///
+/// # Errors
+/// Propagates terminal I/O errors; `Interrupted` / `UnexpectedEof` are the
+/// normal Ctrl+C / Ctrl+D control signals rather than failures.
 pub fn read_multiline(prompt: &str, history: &mut Vec<String>) -> io::Result<String> {
     if !io::IsTerminal::is_terminal(&io::stdin()) || !io::IsTerminal::is_terminal(&io::stdout()) {
         return read_line_fallback(prompt);
@@ -38,7 +42,7 @@ pub fn read_multiline(prompt: &str, history: &mut Vec<String>) -> io::Result<Str
 }
 
 fn read_line_fallback(prompt: &str) -> io::Result<String> {
-    print!("{}", prompt);
+    print!("{prompt}");
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().lock().read_line(&mut input)?;
@@ -66,7 +70,7 @@ fn read_multiline_tui(prompt: &str, history: &mut Vec<String>) -> io::Result<Str
     let mut terminal = ratatui::try_init_with_options(TerminalOptions {
         viewport: Viewport::Inline(VIEWPORT_HEIGHT),
     })?;
-    let _guard = TermGuard;
+    let guard = TermGuard;
     execute!(io::stdout(), EnableBracketedPaste)?;
 
     let mut editor = ChatEditor::new(prompt);
@@ -83,8 +87,8 @@ fn read_multiline_tui(prompt: &str, history: &mut Vec<String>) -> io::Result<Str
     if let Ok(text) = &outcome {
         if !text.is_empty() {
             drop(terminal);
-            drop(_guard);
-            println!("{}{}", prompt, text);
+            drop(guard);
+            println!("{prompt}{text}");
             return outcome;
         }
     }

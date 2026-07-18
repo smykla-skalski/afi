@@ -4,7 +4,8 @@
 //! in a higher-entropy, anti-repetition sampler so the model doesn't collapse
 //! back into the same broken output.
 
-use serde_json::{json, Value};
+use regex::Regex;
+use serde_json::{json, Map, Value};
 
 use crate::model::ModelConfig;
 
@@ -30,62 +31,65 @@ pub const MANUAL_RECOVERY_NUDGE: &str = "Manual recovery requested by the user b
 
 /// Build the recovery sampler opts as a JSON Value to merge into the request.
 ///
-/// `temperature` and `top_p` are standard OpenAI params (go top-level).
+/// `temperature` and `top_p` are standard `OpenAI` params (go top-level).
 /// `min_p`, `repeat_penalty`, `repeat_last_n`, and the DRY family are
 /// llama.cpp extensions that ride in `extra_body`. Non-llama.cpp endpoints
 /// ignore unknown keys. Set any `RECOVERY_*` value negative to omit it.
 /// When `AFI_BACKEND=vllm` the llama.cpp-only knobs are `None` so they're
 /// omitted automatically.
+#[must_use]
 pub fn recovery_sampling_opts(config: &ModelConfig) -> Value {
     let mut opts = json!({});
-
     if config.recovery_temperature >= 0.0 {
         opts["temperature"] = json!(config.recovery_temperature);
     }
     if config.recovery_top_p >= 0.0 {
         opts["top_p"] = json!(config.recovery_top_p);
     }
-
-    let mut extra = json!({});
-    if let Some(min_p) = config.recovery_min_p {
-        if min_p >= 0.0 {
-            extra["min_p"] = json!(min_p);
-        }
-    }
-    if let Some(rp) = config.recovery_repeat_penalty {
-        if rp >= 0.0 {
-            extra["repeat_penalty"] = json!(rp);
-            if let Some(rln) = config.recovery_repeat_last_n {
-                extra["repeat_last_n"] = json!(rln);
-            }
-        }
-    }
-    if let Some(drm) = config.recovery_dry_multiplier {
-        if drm > 0.0 {
-            extra["dry_multiplier"] = json!(drm);
-            if let Some(db) = config.recovery_dry_base {
-                extra["dry_base"] = json!(db);
-            }
-            if let Some(dal) = config.recovery_dry_allowed_length {
-                extra["dry_allowed_length"] = json!(dal);
-            }
-            // DRY sequence breakers: path/code punctuation so a long file path
-            // the model must emit verbatim is never penalized as repetition.
-            extra["dry_sequence_breakers"] = json!(["\n", ":", "\"", "*", "/", "\\", "`", "'"]);
-        }
-    }
-
-    if !extra.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+    let extra = recovery_extra_body(config);
+    if !extra.as_object().is_none_or(Map::is_empty) {
         opts["extra_body"] = extra;
     }
-
     opts
+}
+
+/// The `llama.cpp`-only `extra_body` sampling knobs (`min_p`, repeat, DRY).
+fn recovery_extra_body(config: &ModelConfig) -> Value {
+    let mut extra = json!({});
+    if let Some(min_p) = config.recovery_min_p.filter(|v| *v >= 0.0) {
+        extra["min_p"] = json!(min_p);
+    }
+    if let Some(rp) = config.recovery_repeat_penalty.filter(|v| *v >= 0.0) {
+        extra["repeat_penalty"] = json!(rp);
+        if let Some(rln) = config.recovery_repeat_last_n {
+            extra["repeat_last_n"] = json!(rln);
+        }
+    }
+    add_dry_opts(&mut extra, config);
+    extra
+}
+
+/// Add the DRY (Don't Repeat Yourself) sampling knobs when enabled.
+fn add_dry_opts(extra: &mut Value, config: &ModelConfig) {
+    let Some(drm) = config.recovery_dry_multiplier.filter(|v| *v > 0.0) else {
+        return;
+    };
+    extra["dry_multiplier"] = json!(drm);
+    if let Some(db) = config.recovery_dry_base {
+        extra["dry_base"] = json!(db);
+    }
+    if let Some(dal) = config.recovery_dry_allowed_length {
+        extra["dry_allowed_length"] = json!(dal);
+    }
+    // DRY sequence breakers: path/code punctuation so a long file path the model
+    // must emit verbatim is never penalized as repetition.
+    extra["dry_sequence_breakers"] = json!(["\n", ":", "\"", "*", "/", "\\", "`", "'"]);
 }
 
 /// Strip any prior `[Runtime note: ...]` from the latest user turn and append
 /// `nudge`. If there's no user turn, append a new one.
 pub fn nudge_current_user_turn(messages: &mut Vec<Value>, nudge: &str) {
-    let note = format!("[Runtime note: {}]", nudge);
+    let note = format!("[Runtime note: {nudge}]");
 
     // Walk backwards to find the last user message with string content.
     for msg in messages.iter_mut().rev() {
@@ -96,7 +100,7 @@ pub fn nudge_current_user_turn(messages: &mut Vec<Value>, nudge: &str) {
             // Strip any existing runtime note.
             let cleaned = strip_runtime_notes(content);
             let new_content = if cleaned.is_empty() {
-                note.clone()
+                note
             } else {
                 format!("{}\n\n{}", cleaned.trim_end(), note)
             };
@@ -111,13 +115,14 @@ pub fn nudge_current_user_turn(messages: &mut Vec<Value>, nudge: &str) {
 
 /// Remove `[Runtime note: ...]` blocks from a string.
 fn strip_runtime_notes(content: &str) -> String {
-    let re = regex::Regex::new(r#"\[Runtime note:[^\]]*\]"#).unwrap();
+    let re = Regex::new(r"\[Runtime note:[^\]]*\]").unwrap();
     re.replace_all(content, "").to_string()
 }
 
 /// True if the last message is a `tool` result with no assistant turn after it.
 /// This is the layout right after a tool ran and before the model follows up:
 /// an empty assistant turn here is most suspicious.
+#[must_use]
 pub fn last_is_dangling_tool(messages: &[Value]) -> bool {
     match messages.last() {
         Some(msg) => msg.get("role").and_then(|r| r.as_str()) == Some("tool"),
@@ -144,16 +149,19 @@ mod tests {
 
     #[test]
     fn recovery_sampling_opts_includes_llamacpp_extras() {
-        let config = make_config();
-        let opts = recovery_sampling_opts(&config);
-        let extra = &opts["extra_body"];
-        assert_eq!(extra["min_p"], json!(0.02));
-        assert_eq!(extra["repeat_penalty"], json!(1.2));
-        assert_eq!(extra["repeat_last_n"], json!(512));
-        assert_eq!(extra["dry_multiplier"], json!(0.8));
-        assert_eq!(extra["dry_base"], json!(1.75));
-        assert_eq!(extra["dry_allowed_length"], json!(2));
-        assert!(extra["dry_sequence_breakers"].is_array());
+        let opts = recovery_sampling_opts(&make_config());
+        assert_eq!(
+            opts["extra_body"],
+            json!({
+                "min_p": 0.02,
+                "repeat_penalty": 1.2,
+                "repeat_last_n": 512,
+                "dry_multiplier": 0.8,
+                "dry_base": 1.75,
+                "dry_allowed_length": 2,
+                "dry_sequence_breakers": ["\n", ":", "\"", "*", "/", "\\", "`", "'"]
+            })
+        );
     }
 
     #[test]

@@ -11,15 +11,22 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::Pid;
-use once_cell::sync::Lazy;
+use chrono::Local;
 use regex::Regex;
 use serde_json::json;
 
 use crate::sessions::afi_home;
+use std::collections::HashMap;
+use std::hash::BuildHasher;
+use std::sync::LazyLock;
+use std::thread;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+mod logs;
+pub use logs::{delete_old_bg_logs, find_bg_log_for_pid, poll_pid, read_log, PollStatus};
 
 /// Default poll window for `run_bash` (~3 s). Override with
 /// `AFI_BASH_POLL_SECONDS`.
@@ -28,8 +35,8 @@ pub const DEFAULT_POLL_SECONDS: i64 = 3;
 /// Infer a poll timeout from a `sleep N` in the command. Returns `max(N) + 10`
 /// so `sleep 30 && cat …` finishes synchronously.
 pub fn infer_timeout_from_sleep(command: &str, default: i64) -> i64 {
-    static SLEEP_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?:^|[;&|]\s*)sleep\s+(\d+)").unwrap());
+    static SLEEP_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?:^|[;&|]\s*)sleep\s+(\d+)").unwrap());
     let max_sleep = SLEEP_RE
         .captures_iter(command)
         .filter_map(|c| c.get(1).and_then(|m| m.as_str().parse::<i64>().ok()))
@@ -45,9 +52,13 @@ pub fn infer_timeout_from_sleep(command: &str, default: i64) -> i64 {
 /// Launch `command` detached in its own process group via
 /// `CommandExt::process_group`. Returns `(pid, log_path)`. The command runs in
 /// a subshell that echoes its exit status as `[exit: N]` at the end of the log.
-pub fn run_detached(
+///
+/// # Panics
+/// Panics if the detached child process cannot be spawned.
+#[must_use]
+pub fn run_detached<S: BuildHasher>(
     command: &str,
-    env: &std::collections::HashMap<String, String>,
+    env: &HashMap<String, String, S>,
 ) -> (u32, PathBuf) {
     delete_old_bg_logs(env);
 
@@ -55,20 +66,19 @@ pub fn run_detached(
     let bg_dir = home.join("bg-logs");
     let _ = fs::create_dir_all(&bg_dir);
 
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let hex: String = (0..3).map(|_| format!("{:02x}", rand_u8())).collect();
-    let log_path = bg_dir.join(format!("bg-{}-{}.log", stamp, hex));
+    let stamp = Local::now().format("%Y%m%d-%H%M%S");
+    let hex = format!("{:02x}{:02x}{:02x}", rand_u8(), rand_u8(), rand_u8());
+    let log_path = bg_dir.join(format!("bg-{stamp}-{hex}.log"));
 
-    let inner = format!("({}); echo \"[exit: $?]\"", command);
+    let inner = format!("({command}); echo \"[exit: $?]\"");
 
-    let log_file = match fs::OpenOptions::new()
+    let Ok(log_file) = fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(&log_path)
-    {
-        Ok(f) => f,
-        Err(_) => return (0, log_path),
+    else {
+        return (0, log_path);
     };
 
     let mut cmd = Command::new("sh");
@@ -94,7 +104,7 @@ pub fn run_detached(
     drop(child);
 
     // Write a pid→logpath map so wait_background can find it later.
-    let map_path = bg_dir.join(format!("bg-pid-{}.map", pid));
+    let map_path = bg_dir.join(format!("bg-pid-{pid}.map"));
     if let Ok(mut f) = fs::File::create(&map_path) {
         let _ = writeln!(f, "{}", json!({"log_path": log_path.to_string_lossy()}));
     }
@@ -118,199 +128,14 @@ fn rand_u8() -> u8 {
 }
 
 fn seed() -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0xdeadbeef);
-    let tid = std::thread::current().id();
-    let tid_hash = format!("{:?}", tid)
-        .bytes()
-        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0xdead_beef, |d| d.as_secs() ^ u64::from(d.subsec_nanos()));
+    let tid = thread::current().id();
+    let tid_hash = format!("{tid:?}").bytes().fold(0u64, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(u64::from(b))
+    });
     now ^ tid_hash
-}
-
-/// Poll `pid` up to `timeout` seconds. Returns `"exited"`, `"timeout"`, or
-/// `"interrupted"` (only if `check_esc` returns true).
-///
-/// Uses `waitpid(WNOHANG)` to reap children started by us, and `kill(pid, 0)`
-/// (signal-0 probe) as a fallback for reparented processes.
-pub fn poll_pid(pid: u32, timeout: i64, check_esc: &dyn Fn() -> bool) -> PollStatus {
-    let deadline = Instant::now() + Duration::from_secs(timeout.max(0) as u64);
-    let pid_nix = Pid::from_raw(pid as i32);
-
-    loop {
-        // Try to reap our own child.
-        match waitpid(pid_nix, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => {
-                return PollStatus::Exited
-            }
-            Ok(WaitStatus::StillAlive) => {}
-            Ok(_) => return PollStatus::Exited,
-            Err(nix::errno::Errno::ECHILD) => {
-                // Not our child (reparented to init) — fall through to kill probe.
-            }
-            Err(_) => return PollStatus::Exited,
-        }
-
-        // Signal-0 probe: ESRCH = no such process (exited); EPERM = exists but
-        // not ours (alive); success = alive.
-        match nix::sys::signal::kill(pid_nix, None) {
-            Ok(()) => {}
-            Err(nix::errno::Errno::ESRCH) => return PollStatus::Exited,
-            Err(nix::errno::Errno::EPERM) => {}
-            Err(_) => return PollStatus::Exited,
-        }
-
-        if check_esc() {
-            return PollStatus::Interrupted;
-        }
-
-        if Instant::now() >= deadline {
-            return PollStatus::Timeout;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PollStatus {
-    Exited,
-    Timeout,
-    Interrupted,
-}
-
-/// Read a log file, parse the trailing `[exit: N]` marker. Returns
-/// `(content, exit_code)`.
-pub fn read_log(log_path: &Path) -> (String, Option<i32>) {
-    let bytes = match fs::read(log_path) {
-        Ok(b) => b,
-        Err(_) => return (String::new(), None),
-    };
-    let mut out = String::from_utf8_lossy(&bytes).to_string();
-
-    // Parse the trailing [exit: N] marker.
-    static EXIT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[exit:\s*(-?\d+)\]").unwrap());
-
-    let last_nl = out.trim_end_matches('\n').rfind('\n');
-    let trailer = match last_nl {
-        Some(idx) => out[idx + 1..].trim().to_string(),
-        None => out.trim().to_string(),
-    };
-
-    if let Some(m) = EXIT_RE.captures(&trailer) {
-        let exit_code = m.get(1).and_then(|g| g.as_str().parse::<i32>().ok());
-        // Remove the trailer line from the output.
-        if let Some(idx) = last_nl {
-            out.truncate(idx);
-        } else {
-            out.clear();
-        }
-        (out, exit_code)
-    } else {
-        (out, None)
-    }
-}
-
-/// Look up the log path for a background PID via the pid→log map files.
-pub fn find_bg_log_for_pid(
-    pid: u32,
-    env: &std::collections::HashMap<String, String>,
-) -> Option<PathBuf> {
-    let bg_dir = afi_home(env).join("bg-logs");
-    let map_path = bg_dir.join(format!("bg-pid-{}.map", pid));
-    if let Ok(data) = fs::read_to_string(&map_path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-            if let Some(p) = v.get("log_path").and_then(|v| v.as_str()) {
-                return Some(PathBuf::from(p));
-            }
-        }
-    }
-    // Fallback: scan logs for one that mentions the PID in the first 1K.
-    if let Ok(entries) = fs::read_dir(&bg_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with("bg-") || name.contains(".map") {
-                continue;
-            }
-            if let Ok(bytes) = fs::read(entry.path()) {
-                let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
-                if head.contains(&pid.to_string()) {
-                    return Some(entry.path());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Trim background logs so they don't pile up. Removes logs older than
-/// `max_age_days` and caps the count at `max_logs` (keeping newest). Also
-/// cleans stale `.map` files whose target log no longer exists.
-pub fn delete_old_bg_logs(env: &std::collections::HashMap<String, String>) {
-    let bg_dir = afi_home(env).join("bg-logs");
-    let entries = match fs::read_dir(&bg_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    let mut log_entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    let mut map_entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("bg-") {
-            continue;
-        }
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        if name.ends_with(".map") {
-            map_entries.push((mtime, entry.path()));
-        } else {
-            log_entries.push((mtime, entry.path()));
-        }
-    }
-
-    let now = std::time::SystemTime::now();
-    let max_age = Duration::from_secs(7 * 86400);
-
-    // Remove logs by age.
-    for (mtime, p) in &log_entries {
-        if now.duration_since(*mtime).unwrap_or(Duration::ZERO) > max_age {
-            let _ = fs::remove_file(p);
-        }
-    }
-    // Cap log count (keep newest).
-    log_entries.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
-    for (_, p) in log_entries.iter().skip(50) {
-        let _ = fs::remove_file(p);
-    }
-    // Clean stale map files.
-    for (mtime, p) in &map_entries {
-        let should_del = match fs::read_to_string(p) {
-            Ok(data) => {
-                let target = serde_json::from_str::<serde_json::Value>(&data)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("log_path")
-                            .and_then(|v| v.as_str())
-                            .map(PathBuf::from)
-                    });
-                match target {
-                    Some(t) => {
-                        !t.exists()
-                            || now.duration_since(*mtime).unwrap_or(Duration::ZERO) > max_age
-                    }
-                    None => true,
-                }
-            }
-            Err(_) => true,
-        };
-        if should_del {
-            let _ = fs::remove_file(p);
-        }
-    }
 }
 
 /// Run a shell command. If it finishes within the poll window, output is
@@ -319,10 +144,10 @@ pub fn delete_old_bg_logs(env: &std::collections::HashMap<String, String>) {
 ///
 /// `check_esc` is polled during the wait; returning `true` backgrounds the
 /// command immediately.
-pub fn run_bash(
+pub fn run_bash<S: BuildHasher>(
     command: &str,
     timeout: Option<i64>,
-    env: &std::collections::HashMap<String, String>,
+    env: &HashMap<String, String, S>,
     check_esc: &dyn Fn() -> bool,
 ) -> String {
     let command = match command {
@@ -372,12 +197,12 @@ pub fn run_bash(
             )
         }
         PollStatus::Exited => {
-            std::thread::sleep(Duration::from_millis(200));
+            thread::sleep(Duration::from_millis(200));
             let (out, exit_code) = read_log(&log_path);
             let _ = fs::remove_file(&log_path);
             match exit_code {
-                Some(code) => format!("[exit {}]\n{}", code, out),
-                None => format!("[exited]\n{}", out),
+                Some(code) => format!("[exit {code}]\n{out}"),
+                None => format!("[exited]\n{out}"),
             }
         }
     }
@@ -386,11 +211,11 @@ pub fn run_bash(
 /// Wait for a backgrounded command to finish. Polls `pid` until it exits
 /// (default: indefinitely). Esc interrupts the wait (the command keeps
 /// running).
-pub fn wait_background(
+pub fn wait_background<S: BuildHasher>(
     pid: u32,
     log_path: Option<&Path>,
     timeout: i64,
-    env: &std::collections::HashMap<String, String>,
+    env: &HashMap<String, String, S>,
     check_esc: &dyn Fn() -> bool,
 ) -> String {
     let log_path = match log_path {
@@ -399,8 +224,7 @@ pub fn wait_background(
             Some(p) => p,
             None => {
                 return format!(
-                    "[error] No background log found for PID {}. The log may have been cleaned up already.",
-                    pid
+                    "[error] No background log found for PID {pid}. The log may have been cleaned up already."
                 );
             }
         },
@@ -427,12 +251,12 @@ pub fn wait_background(
         )
         }
         PollStatus::Exited => {
-            std::thread::sleep(Duration::from_millis(200));
+            thread::sleep(Duration::from_millis(200));
             let (out, exit_code) = read_log(&log_path);
             let _ = fs::remove_file(&log_path);
             match exit_code {
-                Some(code) => format!("[exit {}]\n{}", code, out),
-                None => format!("[exited]\n{}", out),
+                Some(code) => format!("[exit {code}]\n{out}"),
+                None => format!("[exited]\n{out}"),
             }
         }
     }
@@ -452,7 +276,7 @@ mod tests {
     #[test]
     fn run_bash_quick_command() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut env = std::collections::HashMap::new();
+        let mut env = HashMap::new();
         env.insert(
             "AFI_HOME".to_string(),
             tmp.path().to_string_lossy().to_string(),
@@ -465,7 +289,7 @@ mod tests {
     #[test]
     fn run_bash_backgrounds_long_command() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut env = std::collections::HashMap::new();
+        let mut env = HashMap::new();
         env.insert(
             "AFI_HOME".to_string(),
             tmp.path().to_string_lossy().to_string(),
@@ -478,7 +302,7 @@ mod tests {
     #[test]
     fn run_bash_esc_interrupts() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut env = std::collections::HashMap::new();
+        let mut env = HashMap::new();
         env.insert(
             "AFI_HOME".to_string(),
             tmp.path().to_string_lossy().to_string(),

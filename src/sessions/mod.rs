@@ -17,6 +17,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::Local;
+use std::hash::BuildHasher;
+use std::thread;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 /// Default page size for `afi sessions` / `/sessions`.
 pub const SESSION_LIST_DEFAULT_LIMIT: usize = 10;
@@ -25,7 +29,8 @@ pub const SESSION_LIST_MAX_LIMIT: usize = 100;
 
 /// Where session files live. Honors `AFI_SESSIONS_DIR`, then
 /// `AFI_HOME/sessions`, then `~/.afi/sessions`.
-pub fn sessions_dir(env: &HashMap<String, String>) -> PathBuf {
+#[must_use]
+pub fn sessions_dir<S: BuildHasher>(env: &HashMap<String, String, S>) -> PathBuf {
     if let Some(d) = env.get("AFI_SESSIONS_DIR") {
         return PathBuf::from(d);
     }
@@ -34,12 +39,14 @@ pub fn sessions_dir(env: &HashMap<String, String>) -> PathBuf {
 }
 
 /// Where memory files live. Always under `AFI_HOME/memories`.
-pub fn memories_dir(env: &HashMap<String, String>) -> PathBuf {
+#[must_use]
+pub fn memories_dir<S: BuildHasher>(env: &HashMap<String, String, S>) -> PathBuf {
     afi_home(env).join("memories")
 }
 
 /// `~/.afi` or `AFI_HOME`.
-pub fn afi_home(env: &HashMap<String, String>) -> PathBuf {
+#[must_use]
+pub fn afi_home<S: BuildHasher>(env: &HashMap<String, String, S>) -> PathBuf {
     if let Some(d) = env.get("AFI_HOME") {
         return PathBuf::from(d);
     }
@@ -49,10 +56,11 @@ pub fn afi_home(env: &HashMap<String, String>) -> PathBuf {
 }
 
 /// Short, unguessable, sortable-ish session id: `YYYYMMDD-HHMMSS-<6 hex>`.
+#[must_use]
 pub fn new_session_id() -> String {
     let stamp = Local::now().format("%Y%m%d-%H%M%S");
-    let hex: String = (0..3).map(|_| format!("{:02x}", rand_u8())).collect();
-    format!("{}-{}", stamp, hex)
+    let hex = format!("{:02x}{:02x}{:02x}", rand_u8(), rand_u8(), rand_u8());
+    format!("{stamp}-{hex}")
 }
 
 // Tiny, dependency-free RNG so we don't pull in `rand` for one 3-byte id.
@@ -74,14 +82,13 @@ fn rand_u8() -> u8 {
 }
 
 fn seed() -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0xdeadbeef);
-    let tid = std::thread::current().id();
-    let tid_hash = format!("{:?}", tid)
-        .bytes()
-        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0xdead_beef, |d| d.as_secs() ^ u64::from(d.subsec_nanos()));
+    let tid = thread::current().id();
+    let tid_hash = format!("{tid:?}").bytes().fold(0u64, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(u64::from(b))
+    });
     now ^ tid_hash
 }
 
@@ -89,6 +96,7 @@ fn seed() -> u64 {
 /// whitespace, strips control chars, clamps length. Returns `None` on empty
 /// input. The id (not the title) is the filename, so a weird title can't
 /// break lookup.
+#[must_use]
 pub fn safe_title(text: Option<&str>, maxlen: usize) -> Option<String> {
     let text = text?;
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -98,13 +106,14 @@ pub fn safe_title(text: Option<&str>, maxlen: usize) -> Option<String> {
     }
     if filtered.chars().count() > maxlen {
         let head: String = filtered.chars().take(maxlen - 1).collect();
-        Some(format!("{}\u{2026}", head))
+        Some(format!("{head}\u{2026}"))
     } else {
         Some(filtered)
     }
 }
 
 /// The scannable tail of a session id (the 6-hex suffix), for listings.
+#[must_use]
 pub fn short_id(session_id: &str) -> String {
     if let Some((_, tail)) = session_id.rsplit_once('-') {
         tail.to_string()
@@ -115,11 +124,13 @@ pub fn short_id(session_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
     fn new_session_id_shape_and_uniqueness() {
-        let mut ids = std::collections::HashSet::new();
+        let mut ids = HashSet::new();
         for _ in 0..50 {
             let id = new_session_id();
             assert!(id.contains('-'), "{}", id);

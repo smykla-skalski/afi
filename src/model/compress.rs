@@ -2,6 +2,7 @@
 //! verbatim. Manual `/compress` keeps 2; auto-compress keeps ~⅓.
 
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 /// How many recent turns to leave untouched in a manual `/compress`.
 pub const COMPRESS_KEEP: usize = 2;
@@ -39,21 +40,18 @@ where
     // Layout: [system?, ..., user, assistant, tool, ..., user, assistant(tool_calls)?, ...]
     let has_sys = messages
         .first()
-        .map(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-        .unwrap_or(false);
+        .is_some_and(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"));
 
     if auto {
-        let body_len = messages.len() - if has_sys { 1 } else { 0 };
-        keep = keep.max(body_len / 3);
+        keep = keep.max((messages.len() - usize::from(has_sys)) / 3);
     }
 
     if messages.len() <= 1 + keep {
         return None;
     }
 
-    let body_start = if has_sys { 1 } else { 0 };
-    let body_len = messages.len() - body_start;
-    if body_len <= keep {
+    let body_start = usize::from(has_sys);
+    if messages.len() - body_start <= keep {
         return None;
     }
 
@@ -67,39 +65,7 @@ where
     // assistant(tool_calls) turn whose result got cut off into `head` —
     // makes the template raise. Walk from the front of the tail and drop any
     // leading tool/half-tool-call turns until we land on something safe.
-    while let Some(first) = tail.first() {
-        let role = first.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        if role == "tool" {
-            tail.remove(0);
-            summarized_n += 1;
-            continue;
-        }
-        if role == "assistant" && first.get("tool_calls").is_some() {
-            // Only safe if every tool_call has its matching tool result later in the tail.
-            if let Some(tcs) = first.get("tool_calls").and_then(|t| t.as_array()) {
-                let ids: std::collections::HashSet<&str> = tcs
-                    .iter()
-                    .filter_map(|tc| tc.get("id").and_then(|i| i.as_str()))
-                    .collect();
-                let seen: std::collections::HashSet<&str> = tail
-                    .iter()
-                    .filter_map(|m| {
-                        if m.get("role").and_then(|r| r.as_str()) == Some("tool") {
-                            m.get("tool_call_id").and_then(|i| i.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if !ids.is_empty() && !ids.is_subset(&seen) {
-                    tail.remove(0);
-                    summarized_n += 1;
-                    continue;
-                }
-            }
-        }
-        break;
-    }
+    summarized_n += trim_unrenderable_tail_head(&mut tail);
 
     // Render the head as plain text for the model to summarize.
     let rendered = render_messages(head);
@@ -110,8 +76,7 @@ where
         any unresolved questions. Drop: raw tool outputs, full file contents, \
         and verbose back-and-forth - keep it dense and information-rich. \
         Write in the same language as the conversation. Output ONLY the \
-        summary, no preamble.\n\n---\n{}\n---",
-        rendered
+        summary, no preamble.\n\n---\n{rendered}\n---"
     );
 
     let summary = summarize(&summary_prompt)?;
@@ -121,8 +86,7 @@ where
     }
 
     let header = format!(
-        "[Compressed context - {} earlier turns summarized; last {} turns kept verbatim]",
-        summarized_n, keep
+        "[Compressed context - {summarized_n} earlier turns summarized; last {keep} turns kept verbatim]"
     );
     let new_mid = json!({"role": "user", "content": format!("{}\n\n{}", header, summary)});
 
@@ -145,49 +109,99 @@ where
     })
 }
 
+/// Drop leading tail turns the chat template can't render on their own: orphan
+/// `tool` turns, or an assistant `tool_calls` turn whose matching results were
+/// cut into the head. Returns how many extra turns were folded into the summary.
+fn trim_unrenderable_tail_head(tail: &mut Vec<Value>) -> usize {
+    let mut dropped = 0;
+    while let Some(first) = tail.first() {
+        let role = first.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let drop_leading = role == "tool"
+            || (role == "assistant"
+                && first.get("tool_calls").is_some()
+                && tail_head_has_orphan_calls(first, tail));
+        if !drop_leading {
+            break;
+        }
+        tail.remove(0);
+        dropped += 1;
+    }
+    dropped
+}
+
+/// True when `first`'s `tool_calls` have any id without a matching `tool` result
+/// later in `tail` (so rendering the tail as-is would break the chat template).
+fn tail_head_has_orphan_calls(first: &Value, tail: &[Value]) -> bool {
+    let Some(tcs) = first.get("tool_calls").and_then(|t| t.as_array()) else {
+        return false;
+    };
+    let ids: HashSet<&str> = tcs
+        .iter()
+        .filter_map(|tc| tc.get("id").and_then(|i| i.as_str()))
+        .collect();
+    let seen: HashSet<&str> = tail
+        .iter()
+        .filter_map(|m| {
+            if m.get("role").and_then(|r| r.as_str()) == Some("tool") {
+                m.get("tool_call_id").and_then(|i| i.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    !ids.is_empty() && !ids.is_subset(&seen)
+}
+
 /// Render messages as plain text for the summary prompt. Tool outputs are
-/// truncated to 2000 chars each so a single huge read_file doesn't blow up
+/// truncated to 2000 chars each so a single huge `read_file` doesn't blow up
 /// the summary prompt itself.
 fn render_messages(msgs: &[Value]) -> String {
-    let mut out: Vec<String> = Vec::new();
-    for m in msgs {
-        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("?");
-        if m.get("content").is_none() && m.get("tool_calls").is_some() {
-            if let Some(tcs) = m.get("tool_calls").and_then(|t| t.as_array()) {
-                let calls: Vec<String> = tcs
-                    .iter()
-                    .filter_map(|tc| {
-                        tc.get("function").map(|f| {
-                            let name = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                            let args = f.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-                            format!("{}({})", name, args)
-                        })
-                    })
-                    .collect();
-                out.push(format!("[{}] -> {}", role, calls.join(", ")));
-            }
-        } else if let Some(content) = m.get("content").and_then(|c| c.as_str()) {
-            let truncated = if content.len() > 2000 {
-                &content[..2000]
-            } else {
-                content
-            };
-            out.push(format!("[{}] {}", role, truncated));
-        } else if let Some(arr) = m.get("content").and_then(|c| c.as_array()) {
-            let joined: String = arr
-                .iter()
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(String::from))
-                .collect::<Vec<_>>()
-                .join("");
-            let truncated = if joined.len() > 2000 {
-                &joined[..2000]
-            } else {
-                &joined
-            };
-            out.push(format!("[{}] {}", role, truncated));
-        }
+    msgs.iter()
+        .filter_map(render_message_line)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Truncate a rendered turn to 2000 bytes on a char boundary.
+fn truncate_2000(s: &str) -> &str {
+    if s.len() <= 2000 {
+        return s;
     }
-    out.join("\n\n")
+    let mut end = 2000;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Render one message as a `[role] ...` line, or `None` when there is nothing
+/// renderable (e.g. an assistant turn whose `tool_calls` is not an array).
+fn render_message_line(m: &Value) -> Option<String> {
+    let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+    if m.get("content").is_none() && m.get("tool_calls").is_some() {
+        let tcs = m.get("tool_calls").and_then(|t| t.as_array())?;
+        let calls: Vec<String> = tcs.iter().filter_map(render_tool_call).collect();
+        return Some(format!("[{role}] -> {}", calls.join(", ")));
+    }
+    if let Some(content) = m.get("content").and_then(|c| c.as_str()) {
+        return Some(format!("[{role}] {}", truncate_2000(content)));
+    }
+    if let Some(arr) = m.get("content").and_then(|c| c.as_array()) {
+        let joined: String = arr
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect();
+        return Some(format!("[{role}] {}", truncate_2000(&joined)));
+    }
+    None
+}
+
+/// Render one `tool_calls` entry as `name(args)`.
+fn render_tool_call(tc: &Value) -> Option<String> {
+    let f = tc.get("function")?;
+    let name = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    let args = f.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+    Some(format!("{name}({args})"))
 }
 
 /// Silently compress when context usage crosses the `autocompress_percent`
@@ -215,8 +229,10 @@ where
         Some(m) if m > 0 => m,
         _ => return false,
     };
-    let ratio = prompt_tokens as f64 / mx as f64;
-    if ratio * 100.0 < autocompress_percent as f64 {
+    // Compress once prompt_tokens reaches autocompress_percent of the window.
+    // Integer math avoids u64 -> f64 precision loss: tokens/mx*100 >= pct is
+    // equivalent to tokens*100 >= pct*mx (u128 guards the multiplication).
+    if u128::from(prompt_tokens) * 100 < u128::from(autocompress_percent) * u128::from(mx) {
         return false;
     }
     compress_fn(messages).is_some()
@@ -282,8 +298,8 @@ mod tests {
     fn compress_auto_keeps_third() {
         let mut messages = vec![json!({"role": "system", "content": "sys"})];
         for i in 0..20 {
-            messages.push(msg("user", &format!("turn {}", i)));
-            messages.push(msg("assistant", &format!("reply {}", i)));
+            messages.push(msg("user", &format!("turn {i}")));
+            messages.push(msg("assistant", &format!("reply {i}")));
         }
         // 1 system + 40 body = 41 total. body_len=40, keep = max(2, 40/3) = 13
         let result = compress(&mut messages, COMPRESS_KEEP, true, |_| {
@@ -314,9 +330,10 @@ mod tests {
         assert!(result.is_some());
         // Check no tool message is in the result
         for m in &messages {
-            if m.get("role").and_then(|r| r.as_str()) == Some("tool") {
-                panic!("tool message should have been dropped from tail");
-            }
+            assert!(
+                m.get("role").and_then(|r| r.as_str()) != Some("tool"),
+                "tool message should have been dropped from tail"
+            );
         }
     }
 
@@ -331,16 +348,14 @@ mod tests {
             msg("user", "step 3"),
             msg("assistant", "done"),
         ];
-        let result = compress(&mut messages, COMPRESS_KEEP, false, |_| {
-            Some("".to_string())
-        });
+        let result = compress(&mut messages, COMPRESS_KEEP, false, |_| Some(String::new()));
         assert!(result.is_none());
     }
 
     #[test]
     fn maybe_autocompress_disabled() {
         let mut messages = vec![msg("user", "hi")];
-        let result = maybe_autocompress(&mut messages, 100000, 0, Some(200000), |_| {
+        let result = maybe_autocompress(&mut messages, 100_000, 0, Some(200_000), |_| {
             Some(CompressResult {
                 kept_n: 2,
                 summarized_n: 3,
@@ -353,33 +368,33 @@ mod tests {
     #[test]
     fn maybe_autocompress_below_threshold() {
         let mut messages = vec![msg("user", "hi")];
-        let result = maybe_autocompress(&mut messages, 1000, 85, Some(200000), |_| {
+        let result = maybe_autocompress(&mut messages, 1000, 85, Some(200_000), |_| {
             Some(CompressResult {
                 kept_n: 2,
                 summarized_n: 3,
                 summary_chars: 42,
             })
         });
-        assert!(!result); // 1000/200000 = 0.5% << 85%
+        assert!(!result); // 1000/200_000 = 0.5% << 85%
     }
 
     #[test]
     fn maybe_autocompress_above_threshold() {
         let mut messages = vec![msg("user", "hi")];
-        let result = maybe_autocompress(&mut messages, 180000, 85, Some(200000), |_| {
+        let result = maybe_autocompress(&mut messages, 180_000, 85, Some(200_000), |_| {
             Some(CompressResult {
                 kept_n: 2,
                 summarized_n: 3,
                 summary_chars: 42,
             })
         });
-        assert!(result); // 180000/200000 = 90% > 85%
+        assert!(result); // 180_000/200_000 = 90% > 85%
     }
 
     #[test]
     fn maybe_autocompress_no_context_window() {
         let mut messages = vec![msg("user", "hi")];
-        let result = maybe_autocompress(&mut messages, 180000, 85, None, |_| {
+        let result = maybe_autocompress(&mut messages, 180_000, 85, None, |_| {
             Some(CompressResult {
                 kept_n: 2,
                 summarized_n: 3,
@@ -392,7 +407,7 @@ mod tests {
     #[test]
     fn maybe_autocompress_zero_prompt_tokens() {
         let mut messages = vec![msg("user", "hi")];
-        let result = maybe_autocompress(&mut messages, 0, 85, Some(200000), |_| {
+        let result = maybe_autocompress(&mut messages, 0, 85, Some(200_000), |_| {
             Some(CompressResult {
                 kept_n: 2,
                 summarized_n: 3,

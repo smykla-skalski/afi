@@ -12,6 +12,7 @@
 use std::future::Future;
 use std::io::{self, IsTerminal};
 use std::time::Duration;
+use tokio::time::interval;
 
 use ratatui::crossterm::cursor::MoveTo;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -64,11 +65,10 @@ where
     if !io::stdout().is_terminal() {
         return Generation::Completed(fut.await);
     }
-    let terminal = match ratatui::try_init_with_options(TerminalOptions {
+    let Ok(terminal) = ratatui::try_init_with_options(TerminalOptions {
         viewport: Viewport::Inline(1),
-    }) {
-        Ok(t) => t,
-        Err(_) => return Generation::Completed(fut.await),
+    }) else {
+        return Generation::Completed(fut.await);
     };
     spinner_loop(terminal, interrupt, label, fut).await
 }
@@ -84,7 +84,7 @@ where
 {
     let _guard = RestoreGuard;
     let mut spinner = LifeSpinner::new(label);
-    let mut ticker = tokio::time::interval(Duration::from_millis(TICK_MS));
+    let mut ticker = interval(Duration::from_millis(TICK_MS));
     tokio::pin!(fut);
 
     let outcome = loop {
@@ -96,7 +96,7 @@ where
                     break Generation::Interrupted;
                 }
                 let _ = terminal.draw(|frame| spinner.render(frame, frame.area()));
-                crate::term::set_working_title(spinner.frame());
+                super::set_working_title(spinner.frame());
                 spinner.tick();
             }
         }

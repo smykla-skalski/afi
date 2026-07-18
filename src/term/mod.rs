@@ -30,10 +30,10 @@ pub const SHOW_CURSOR: &str = "\x1b[?25h";
 
 /// Set the terminal-tab title via OSC 0.
 pub fn set_title(text: &str) {
-    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        print!("\x1b]0;{}\x07", text);
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
+    use std::io::{IsTerminal, Write};
+    if io::stdout().is_terminal() {
+        print!("\x1b]0;{text}\x07");
+        let _ = io::stdout().flush();
     }
 }
 
@@ -49,14 +49,16 @@ pub fn set_working_title(frame: usize) {
         .chars()
         .nth(frame % frames.chars().count())
         .unwrap_or('⠋');
-    set_title(&format!("{} afi working", glyph));
+    set_title(&format!("{glyph} afi working"));
 }
 
 // --- char width helpers ------------------------------------------------------
 
+use std::io;
 use unicode_width::UnicodeWidthChar;
 
 /// Display width of a character (0 for combining, 2 for wide CJK).
+#[must_use]
 pub fn char_width(ch: char) -> usize {
     UnicodeWidthChar::width(ch).unwrap_or(0)
 }
@@ -67,6 +69,7 @@ pub fn str_width(s: &str) -> usize {
 }
 
 /// Slice a string by display width (returns the longest prefix that fits).
+#[must_use]
 pub fn str_slice_by_width(s: &str, max_width: usize) -> String {
     let mut width = 0;
     let mut result = String::new();

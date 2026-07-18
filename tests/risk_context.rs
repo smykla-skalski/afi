@@ -1,9 +1,10 @@
 //! Port of `tests/test_risk_context.py` and the approval tests from
-//! `tests/test_esc_approval.py` (the _confirm / _ask_approval portions).
-//! The model_turn and REPL tests are deferred to phases 5 and 8.
+//! `tests/test_esc_approval.py` (the _confirm / _`ask_approval` portions).
+//! The `model_turn` and REPL tests are deferred to phases 5 and 8.
 
 use afi::approval::{ApprovalState, Level};
 use afi::risk::{confirm, extract_action_path, risk_user_message, ApprovalChoice, RiskClassifier};
+use std::env;
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -151,7 +152,7 @@ fn extract_unknown_action() {
 fn downloads_project_file_is_in_project() {
     let _guard = home_lock().lock().unwrap();
     let home = tempdir().unwrap();
-    std::env::set_var("HOME", home.path());
+    env::set_var("HOME", home.path());
     let project = home.path().join("Downloads").join("didenstuff");
     fs::create_dir_all(&project).unwrap();
     let target = project.join("pose_editor.py");
@@ -178,7 +179,7 @@ fn downloads_project_file_is_in_project() {
 fn downloads_file_outside_project_is_outside() {
     let _guard = home_lock().lock().unwrap();
     let home = tempdir().unwrap();
-    std::env::set_var("HOME", home.path());
+    env::set_var("HOME", home.path());
     let project = home.path().join("code").join("app");
     let downloads_project = home.path().join("Downloads").join("didenstuff");
     fs::create_dir_all(&project).unwrap();

@@ -13,7 +13,7 @@ use afi::Runtime;
 /// optional - pass `Some(path)` to exercise the `~/.env` loader.
 #[allow(dead_code)]
 pub fn build(args: &[&str], env: &[(&str, &str)]) -> Runtime {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let env_map: HashMap<String, String> = env
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -28,7 +28,7 @@ pub fn build_with_env_file(
     env: &[(&str, &str)],
     env_file: Option<&Path>,
 ) -> Runtime {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let env_map: HashMap<String, String> = env
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))

@@ -4,15 +4,22 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
+
+use crate::util::now_secs_f64;
+use std::cmp::Ordering;
+use std::io;
+use std::path::PathBuf;
+use std::time::Duration;
+use std::time::UNIX_EPOCH;
 
 /// Returns true if `msg` is an assistant turn with neither visible content
 /// nor tool calls - such turns are pruned before save/load/stream so they
 /// don't break chat templates on the next request.
+#[must_use]
 pub fn is_empty_assistant_message(msg: &Value) -> bool {
-    let obj = match msg.as_object() {
-        Some(o) => o,
-        None => return false,
+    let Some(obj) = msg.as_object() else {
+        return false;
     };
     if obj.get("role").and_then(|v| v.as_str()) != Some("assistant") {
         return false;
@@ -22,8 +29,7 @@ pub fn is_empty_assistant_message(msg: &Value) -> bool {
         return false;
     }
     match obj.get("content") {
-        None => true,
-        Some(Value::Null) => true,
+        None | Some(Value::Null) => true,
         Some(Value::String(s)) => s.trim().is_empty(),
         Some(Value::Array(arr)) => {
             // empty if no part has non-whitespace text
@@ -49,8 +55,77 @@ pub fn prune_empty_assistant_messages(messages: &mut Vec<Value>) -> usize {
 }
 
 /// Session file path inside `dir`.
-pub fn session_path(dir: &Path, session_id: &str) -> std::path::PathBuf {
-    dir.join(format!("{}.json", session_id))
+#[must_use]
+pub fn session_path(dir: &Path, session_id: &str) -> PathBuf {
+    dir.join(format!("{session_id}.json"))
+}
+
+/// Read the existing session file's top-level object, or an empty map when the
+/// file is missing or unparsable. Preserves `created_at` and untouched meta.
+fn read_existing_meta(path: &Path) -> Map<String, Value> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default(),
+        Err(_) => Map::new(),
+    }
+}
+
+/// Build the session JSON object: schema / id / messages plus a preserved
+/// `created_at`, a refreshed `updated_at`, and any non-null `meta` overrides.
+fn build_session_data(
+    mut data: Map<String, Value>,
+    session_id: &str,
+    messages: &[Value],
+    now: f64,
+    meta: Option<&Value>,
+) -> Map<String, Value> {
+    let now_num = Value::Number(Number::from_f64(now).unwrap_or_else(|| Number::from(0)));
+    data.insert("schema".to_string(), Value::String("afi-1".to_string()));
+    data.insert("id".to_string(), Value::String(session_id.to_string()));
+    data.insert("messages".to_string(), Value::Array(messages.to_vec()));
+    let created_at = data
+        .get("created_at")
+        .cloned()
+        .unwrap_or_else(|| now_num.clone());
+    data.insert("created_at".to_string(), created_at);
+    data.insert("updated_at".to_string(), now_num);
+
+    if let Some(Value::Object(meta_obj)) = meta {
+        for (k, v) in meta_obj {
+            if !v.is_null() {
+                data.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    data
+}
+
+/// Write `data` to `path` atomically: temp file, fsync, then rename.
+fn write_atomic(path: &Path, data: &Value) -> io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    let serialized = serde_json::to_string(data)?;
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(serialized.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)
+}
+
+/// Align the file mtime with `updated_at` so newest-first listing stays cheap.
+/// Best-effort: a non-finite timestamp or any IO error is silently ignored.
+/// Uses std `FileTimes` (stable since 1.75) to avoid a `filetime` dependency.
+fn align_mtime(path: &Path, updated_at: Option<f64>) {
+    let Some(updated) = updated_at.filter(|u| u.is_finite() && *u >= 0.0) else {
+        return;
+    };
+    let Ok(f) = fs::OpenOptions::new().write(true).open(path) else {
+        return;
+    };
+    let times = fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs_f64(updated));
+    let _ = f.set_times(times);
 }
 
 /// Persist `messages` to `<dir>/<session_id>.json`. Atomic (temp + rename).
@@ -59,80 +134,34 @@ pub fn session_path(dir: &Path, session_id: &str) -> std::path::PathBuf {
 /// values in `meta` are skipped (so a partial write doesn't clobber fields a
 /// prior save wrote). Existing `created_at` is preserved. `updated_at` is set
 /// to now (or the value in `meta`).
+///
+/// # Errors
+/// Returns an error if the session directory can't be created or the file can't
+/// be written/renamed.
 pub fn write_session(
     dir: &Path,
     session_id: &str,
     messages: &mut Vec<Value>,
     meta: Option<&Value>,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     prune_empty_assistant_messages(messages);
 
     let path = session_path(dir, session_id);
-    let now = chrono::Local::now().timestamp_millis() as f64 / 1000.0;
+    let now = now_secs_f64();
 
-    // Read existing file to preserve `created_at` and any other meta not
-    // touched by this write.
-    let existing: Map<String, Value> = match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default(),
-        Err(_) => Map::new(),
-    };
+    let existing = read_existing_meta(&path);
+    let data = build_session_data(existing, session_id, messages, now, meta);
+    let updated_at = data.get("updated_at").and_then(Value::as_f64);
 
-    let mut data = existing;
-    data.insert("schema".to_string(), Value::String("afi-1".to_string()));
-    data.insert("id".to_string(), Value::String(session_id.to_string()));
-    data.insert("messages".to_string(), Value::Array(messages.clone()));
-    let created_at = data.get("created_at").cloned().unwrap_or(Value::Number(
-        serde_json::Number::from_f64(now).unwrap_or_else(|| serde_json::Number::from(0)),
-    ));
-    data.insert("created_at".to_string(), created_at);
-    data.insert(
-        "updated_at".to_string(),
-        Value::Number(
-            serde_json::Number::from_f64(now).unwrap_or_else(|| serde_json::Number::from(0)),
-        ),
-    );
-
-    if let Some(Value::Object(meta_obj)) = meta {
-        for (k, v) in meta_obj {
-            if v.is_null() {
-                continue;
-            }
-            data.insert(k.clone(), v.clone());
-        }
-    }
-
-    // Deterministic key ordering isn't required but helps diffs. We keep the
-    // insertion order (existing keys preserved, new keys appended).
-    let updated_at_val = data.get("updated_at").cloned();
-    let tmp = path.with_extension("json.tmp");
-    let serialized = serde_json::to_string(&Value::Object(data))?;
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(serialized.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, &path)?;
-
-    // Align mtime with updated_at so newest-first listing is cheap. Use std
-    // FileTimes (stable since 1.75) to avoid pulling in a `filetime` crate.
-    if let Some(updated) = updated_at_val.as_ref().and_then(|v| v.as_f64()) {
-        if let Ok(f) = fs::OpenOptions::new().write(true).open(&path) {
-            let secs = updated as i64;
-            let nanos = ((updated - secs as f64) * 1e9) as u32;
-            let times = fs::FileTimes::new()
-                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos));
-            let _ = f.set_times(times);
-        }
-    }
+    write_atomic(&path, &Value::Object(data))?;
+    align_mtime(&path, updated_at);
     Ok(())
 }
 
 /// Read a session file. Returns the parsed object (with `messages` pruned)
 /// or `None` on missing / parse error.
+#[must_use]
 pub fn load_session(dir: &Path, session_id: &str) -> Option<Value> {
     let path = session_path(dir, session_id);
     let bytes = fs::read(&path).ok()?;
@@ -145,18 +174,21 @@ pub fn load_session(dir: &Path, session_id: &str) -> Option<Value> {
 
 /// List `*.json` filenames newest-first using filesystem mtimes. Cheap index
 /// for recent-session browsing - no parsing required.
+#[must_use]
 pub fn session_files_newest(dir: &Path) -> Vec<String> {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return vec![],
+    let Ok(entries) = fs::read_dir(dir) else {
+        return vec![];
     };
     let mut files: Vec<(f64, String)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with(".json") {
+        if !Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        {
             continue;
         }
-        let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+        let is_file = entry.file_type().is_ok_and(|t| t.is_file());
         if !is_file {
             continue;
         }
@@ -164,21 +196,21 @@ pub fn session_files_newest(dir: &Path) -> Vec<String> {
             .metadata()
             .and_then(|m| m.modified())
             .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0.0, |d| d.as_secs_f64());
         files.push((mtime, name));
     }
     // Sort newest-first; ties broken by name for determinism.
     files.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .unwrap_or(Ordering::Equal)
             .then_with(|| b.1.cmp(&a.1))
     });
     files.into_iter().map(|(_, n)| n).collect()
 }
 
 /// Remove a session file. Returns true if something was deleted.
+#[must_use]
 pub fn delete_session(dir: &Path, session_id: &str) -> bool {
     fs::remove_file(session_path(dir, session_id)).is_ok()
 }
@@ -278,8 +310,8 @@ mod tests {
             let p = dir.join(name);
             fs::write(&p, "{}").unwrap();
             let f = fs::OpenOptions::new().write(true).open(&p).unwrap();
-            let times = fs::FileTimes::new()
-                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::new(100 + i as u64, 0));
+            let times =
+                fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::new(100 + i as u64, 0));
             f.set_times(times).unwrap();
         }
         let files = session_files_newest(dir);

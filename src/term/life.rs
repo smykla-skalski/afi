@@ -1,4 +1,4 @@
-//! Conway's Game of Life spinner - a 1-row toroidal GoL that actually does
+//! Conway's Game of Life spinner - a 1-row toroidal `GoL` that actually does
 //! something (patterns glide, blinkers flash) instead of just spinning.
 //!
 //! The simulation is pure (`seed`/`step`) and the spinner state renders through
@@ -10,6 +10,8 @@ use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 const GOL_W: usize = 24;
 const GOL_ALIVE: char = '\u{2588}'; // full block
@@ -28,6 +30,7 @@ pub struct LifeSpinner {
 
 impl LifeSpinner {
     /// Create a spinner seeded from the wall clock, labelled `label`.
+    #[must_use]
     pub fn new(label: &str) -> Self {
         Self {
             row: seed(&mut SimpleRng::from_clock()),
@@ -43,12 +46,14 @@ impl LifeSpinner {
     }
 
     /// The current frame index (drives the OSC title glyph).
+    #[must_use]
     pub fn frame(&self) -> usize {
         self.frame
     }
 
     /// The current row rendered as a styled Ratatui line: dim label, then the
     /// live/dead cells.
+    #[must_use]
     pub fn line(&self) -> Line<'static> {
         let cells: String = self
             .row
@@ -90,7 +95,7 @@ fn seed(rng: &mut SimpleRng) -> Vec<u8> {
     row
 }
 
-/// Advance one generation. A 1-row GoL is degenerate (cells have only two
+/// Advance one generation. A 1-row `GoL` is degenerate (cells have only two
 /// neighbours), so we treat the row as the middle of a 3-row toroidal world
 /// whose top and bottom rows mirror it, giving every cell the standard eight
 /// neighbours so gliders and blinkers behave.
@@ -104,7 +109,7 @@ fn step(row: &[u8]) -> Vec<u8> {
         // left/right counted in all three mirrored rows; center in top+bottom.
         let n = left * 3 + right * 3 + center * 2;
         let alive = row[x] != 0;
-        nxt[x] = u8::from((alive && (n == 2 || n == 3)) || (!alive && n == 3));
+        nxt[x] = u8::from(n == 3 || (n == 2 && alive));
     }
     nxt
 }
@@ -116,10 +121,9 @@ struct SimpleRng {
 
 impl SimpleRng {
     fn from_clock() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0xdead_beef);
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0xdead_beef, |d| d.as_secs() ^ u64::from(d.subsec_nanos()));
         Self::from_seed(seed)
     }
 

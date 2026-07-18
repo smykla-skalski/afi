@@ -6,10 +6,18 @@
 //! a live server.
 
 use async_trait::async_trait;
+use regex::Regex;
+use reqwest::Client;
+
+use crate::model::stream::parse_sse_body;
 use serde_json::Value;
 
 use crate::config::Source;
 use crate::model::stream::StreamChunk;
+use reqwest::header::HeaderMap;
+use reqwest::header::HeaderName;
+use reqwest::header::HeaderValue;
+use std::time::Duration;
 
 /// Bundles the parameters for a streaming chat completion request.
 #[derive(Debug, Clone)]
@@ -50,7 +58,7 @@ pub trait ChatClient: Send + Sync {
     /// GET /props (llama.cpp). Returns the parsed JSON.
     async fn get_props(&self, source: &Source) -> Result<Value, ClientError>;
 
-    /// POST /v1/chat/completions with a deliberately over-large max_tokens
+    /// POST /v1/chat/completions with a deliberately over-large `max_tokens`
     /// to trigger the "maximum context length is N tokens" error.
     async fn overrun_probe(&self, source: &Source, model: &str) -> Result<String, ClientError>;
 }
@@ -78,22 +86,25 @@ impl Default for ReqwestClient {
 }
 
 impl ReqwestClient {
+    /// Build a client with the default TLS backend.
+    ///
+    /// # Panics
+    /// Panics if the underlying reqwest client cannot be built (e.g. the TLS
+    /// backend fails to initialize).
+    #[must_use]
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::builder()
+            client: Client::builder()
                 .build()
                 .expect("failed to build reqwest client"),
         }
     }
 
-    fn build_headers(source: &Source) -> Option<reqwest::header::HeaderMap> {
+    fn build_headers(source: &Source) -> Option<HeaderMap> {
         source.http_headers.as_ref().map(|h| {
-            let mut map = reqwest::header::HeaderMap::new();
+            let mut map = HeaderMap::new();
             for (k, v) in h {
-                if let (Ok(name), Ok(val)) = (
-                    reqwest::header::HeaderName::try_from(k),
-                    reqwest::header::HeaderValue::try_from(v),
-                ) {
+                if let (Ok(name), Ok(val)) = (HeaderName::try_from(k), HeaderValue::try_from(v)) {
                     map.insert(name, val);
                 }
             }
@@ -112,7 +123,7 @@ impl ReqwestClient {
     fn props_url(source: &Source) -> String {
         // /props is at the root, not under /v1
         let root = source.base_url.trim_end_matches('/');
-        let re = regex::Regex::new(r"/v\d+/?$").unwrap();
+        let re = Regex::new(r"/v\d+/?$").unwrap();
         let root = re.replace(root, "");
         format!("{}/props", root.trim_end_matches('/'))
     }
@@ -149,7 +160,7 @@ impl ChatClient for ReqwestClient {
         }
         if let Some(mt) = max_tokens {
             if mt > 0 {
-                body["max_tokens"] = serde_json::Value::from(mt);
+                body["max_tokens"] = Value::from(mt);
             }
         }
         if let Some(eb) = extra_body {
@@ -181,7 +192,7 @@ impl ChatClient for ReqwestClient {
             .text()
             .await
             .map_err(|e| ClientError::Connection(e.to_string()))?;
-        Ok(crate::model::stream::parse_sse_body(&text))
+        Ok(parse_sse_body(&text))
     }
 
     async fn chat_completions(
@@ -208,7 +219,7 @@ impl ChatClient for ReqwestClient {
             .client
             .post(Self::chat_url(source))
             .header("Authorization", format!("Bearer {}", source.api_key))
-            .timeout(std::time::Duration::from_secs(timeout))
+            .timeout(Duration::from_secs(timeout))
             .json(&body);
         if let Some(h) = Self::build_headers(source) {
             req = req.headers(h);
@@ -232,7 +243,7 @@ impl ChatClient for ReqwestClient {
             .client
             .get(Self::models_url(source))
             .header("Authorization", format!("Bearer {}", source.api_key))
-            .timeout(std::time::Duration::from_secs(10));
+            .timeout(Duration::from_secs(10));
         if let Some(h) = Self::build_headers(source) {
             req = req.headers(h);
         }
@@ -254,7 +265,7 @@ impl ChatClient for ReqwestClient {
         let resp = self
             .client
             .get(Self::props_url(source))
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(Duration::from_secs(5))
             .send()
             .await
             .map_err(|e| ClientError::Connection(e.to_string()))?;
@@ -279,7 +290,7 @@ impl ChatClient for ReqwestClient {
             .client
             .post(Self::chat_url(source))
             .header("Authorization", format!("Bearer {}", source.api_key))
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(Duration::from_secs(30))
             .json(&body);
         if let Some(h) = Self::build_headers(source) {
             req = req.headers(h);

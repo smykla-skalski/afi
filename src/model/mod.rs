@@ -12,6 +12,7 @@ pub mod recovery;
 pub mod stream;
 pub mod turn;
 pub mod turn_dispatch;
+pub mod turn_finalize;
 pub mod turn_loop;
 pub mod turn_stats;
 pub mod turn_stream;
@@ -28,10 +29,11 @@ pub const TURN_STALL: &str = "stall";
 
 // --- forced-final tool schema -----------------------------------------------
 
-use once_cell::sync::Lazy;
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
-pub static FINAL_ANSWER_TOOL: Lazy<serde_json::Value> = Lazy::new(|| {
+pub static FINAL_ANSWER_TOOL: LazyLock<serde_json::Value> = LazyLock::new(|| {
     json!({
         "type": "function",
         "function": {
@@ -54,7 +56,7 @@ pub static FINAL_ANSWER_TOOL: Lazy<serde_json::Value> = Lazy::new(|| {
     })
 });
 
-pub static FINAL_ANSWER_TOOL_CHOICE: Lazy<serde_json::Value> = Lazy::new(|| {
+pub static FINAL_ANSWER_TOOL_CHOICE: LazyLock<serde_json::Value> = LazyLock::new(|| {
     json!({
         "type": "function",
         "function": {"name": "final_answer"}
@@ -117,7 +119,8 @@ impl Default for ModelConfig {
 impl ModelConfig {
     /// Resolve from an env map (typically `Runtime::env`). Falls back to
     /// defaults when vars are missing or invalid.
-    pub fn from_env(env: &std::collections::HashMap<String, String>) -> Self {
+    #[must_use]
+    pub fn from_env(env: &HashMap<String, String>) -> Self {
         let backend = env
             .get("AFI_BACKEND")
             .map(|v| v.trim().to_lowercase())
@@ -125,15 +128,15 @@ impl ModelConfig {
         let is_vllm = backend == "vllm";
 
         Self {
-            reasoning_only_char_limit: env_int(env, "AFI_REASONING_ONLY_CHARS", 36000) as usize,
-            reasoning_only_time_limit: env_int(env, "AFI_REASONING_ONLY_TIME", 120) as u64,
-            reasoning_only_retry_limit: env_int(env, "AFI_REASONING_ONLY_RETRIES", 3) as u32,
-            malformed_stream_retry_limit: env_int(env, "AFI_MALFORMED_STREAM_RETRIES", 2) as u32,
-            empty_turn_retry_limit: env_int(env, "AFI_EMPTY_TURN_RETRIES", 3) as u32,
-            forced_final_max_tokens: env_int(env, "AFI_FORCED_FINAL_MAX_TOKENS", 2048) as u32,
-            max_completion_tokens: env_int(env, "AFI_MAX_TOKENS", 16000) as u32,
-            tool_result_chars: env_int(env, "AFI_TOOL_RESULT_CHARS", 20000) as usize,
-            session_desc_refresh: env_int(env, "AFI_SESSION_DESC_REFRESH", 6) as u32,
+            reasoning_only_char_limit: env_usize(env, "AFI_REASONING_ONLY_CHARS", 36000),
+            reasoning_only_time_limit: env_u64(env, "AFI_REASONING_ONLY_TIME", 120),
+            reasoning_only_retry_limit: env_u32(env, "AFI_REASONING_ONLY_RETRIES", 3),
+            malformed_stream_retry_limit: env_u32(env, "AFI_MALFORMED_STREAM_RETRIES", 2),
+            empty_turn_retry_limit: env_u32(env, "AFI_EMPTY_TURN_RETRIES", 3),
+            forced_final_max_tokens: env_u32(env, "AFI_FORCED_FINAL_MAX_TOKENS", 2048),
+            max_completion_tokens: env_u32(env, "AFI_MAX_TOKENS", 16000),
+            tool_result_chars: env_usize(env, "AFI_TOOL_RESULT_CHARS", 20000),
+            session_desc_refresh: env_u32(env, "AFI_SESSION_DESC_REFRESH", 6),
             recovery_temperature: env_float(env, "AFI_RECOVERY_TEMPERATURE", 1.0),
             recovery_top_p: env_float(env, "AFI_RECOVERY_TOP_P", 0.95),
             recovery_min_p: if is_vllm {
@@ -166,20 +169,38 @@ impl ModelConfig {
             } else {
                 Some(env_int(env, "AFI_RECOVERY_DRY_ALLOWED_LENGTH", 2))
             },
-            autocompress_percent: env_int(env, "AFI_AUTOCOMPRESS_PERCENT", 85).clamp(0, 100) as u32,
+            autocompress_percent: env_u32(env, "AFI_AUTOCOMPRESS_PERCENT", 85).min(100),
             read_file_lines: env_int(env, "AFI_READ_FILE_LINES", 400),
         }
     }
 }
 
-fn env_int(env: &std::collections::HashMap<String, String>, name: &str, default: i64) -> i64 {
+fn env_int(env: &HashMap<String, String>, name: &str, default: i64) -> i64 {
     env.get(name)
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(default)
 }
 
-fn env_float(env: &std::collections::HashMap<String, String>, name: &str, default: f64) -> f64 {
+fn env_float(env: &HashMap<String, String>, name: &str, default: f64) -> f64 {
     env.get(name)
         .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u32(env: &HashMap<String, String>, name: &str, default: u32) -> u32 {
+    env.get(name)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(env: &HashMap<String, String>, name: &str, default: u64) -> u64 {
+    env.get(name)
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(env: &HashMap<String, String>, name: &str, default: usize) -> usize {
+    env.get(name)
+        .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(default)
 }

@@ -7,11 +7,14 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+use crate::term::approve::prompt_choice;
+
 use crate::approval::ApprovalState;
 use crate::model::ModelConfig;
 use crate::risk::{confirm, RiskClassifier};
 use crate::tools;
 use crate::tools::protocol::sanitize_tool_result;
+use std::path::PathBuf;
 
 /// Accumulates the streamed fragments of a single tool call.
 #[derive(Default)]
@@ -24,7 +27,7 @@ pub(crate) struct ToolCallAccum {
 /// Return the accumulated tool calls ordered by their stream index.
 pub(crate) fn order_tool_calls(tcs: &HashMap<u32, ToolCallAccum>) -> Vec<ToolCallAccum> {
     let mut indices: Vec<u32> = tcs.keys().copied().collect();
-    indices.sort();
+    indices.sort_unstable();
     indices
         .into_iter()
         .filter_map(|i| {
@@ -80,7 +83,7 @@ pub(crate) fn dispatch_tool(name: &str, args: &Value, da: &DispatchArgs<'_>) -> 
     };
 
     if matches!(name, "write_file" | "edit_file" | "run_bash") {
-        let ask = crate::term::approve::prompt_choice;
+        let ask = prompt_choice;
         match confirm(
             &action,
             da.approval,
@@ -98,8 +101,8 @@ pub(crate) fn dispatch_tool(name: &str, args: &Value, da: &DispatchArgs<'_>) -> 
     let result = match name {
         "read_file" => tools::read_file(
             args.get("path").and_then(|p| p.as_str()).unwrap_or(""),
-            args.get("offset").and_then(|o| o.as_i64()),
-            args.get("limit").and_then(|l| l.as_i64()),
+            args.get("offset").and_then(Value::as_i64),
+            args.get("limit").and_then(Value::as_i64),
             da.config.read_file_lines,
         ),
         "write_file" => tools::write_file(
@@ -119,18 +122,22 @@ pub(crate) fn dispatch_tool(name: &str, args: &Value, da: &DispatchArgs<'_>) -> 
             }
             tools::bash::run_bash(
                 command,
-                args.get("timeout").and_then(|t| t.as_i64()),
+                args.get("timeout").and_then(Value::as_i64),
                 da.env,
                 &|| false,
             )
         }
         "wait_background" => {
-            let pid = args.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
-            let timeout = args.get("timeout").and_then(|t| t.as_i64()).unwrap_or(0);
+            let pid = args
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0);
+            let timeout = args.get("timeout").and_then(Value::as_i64).unwrap_or(0);
             let log_path = args
                 .get("log_path")
                 .and_then(|l| l.as_str())
-                .map(std::path::PathBuf::from);
+                .map(PathBuf::from);
             tools::bash::wait_background(pid, log_path.as_deref(), timeout, da.env, &|| false)
         }
         "final_answer" => {
@@ -141,7 +148,7 @@ pub(crate) fn dispatch_tool(name: &str, args: &Value, da: &DispatchArgs<'_>) -> 
                     .to_string(),
             )
         }
-        _ => format!("ERROR: unknown tool {}", name),
+        _ => format!("ERROR: unknown tool {name}"),
     };
     ToolDispatchResult::Ok(result)
 }
@@ -186,11 +193,11 @@ pub(crate) fn dispatch_text(
     for (name, args) in calls {
         match dispatch_tool(name, args, da) {
             ToolDispatchResult::Ok(r) => {
-                observations.push(format!("Observation ({}): {}", name, r));
+                observations.push(format!("Observation ({name}): {r}"));
             }
             ToolDispatchResult::Escaped(action) => {
                 escaped = Some(action);
-                observations.push(format!("Observation ({}): CANCELLED", name));
+                observations.push(format!("Observation ({name}): CANCELLED"));
                 break;
             }
         }

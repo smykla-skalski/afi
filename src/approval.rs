@@ -2,7 +2,7 @@
 //! state, and YOLO mode.
 //!
 //! `approve_level` is the maximum risk level to AUTO-APPROVE: actions
-//! classified at <= approve_level run without prompting; anything strictly
+//! classified at <= `approve_level` run without prompting; anything strictly
 //! above prompts. `approve_level == None` means prompt for every classified
 //! action (the "prompt all" state). `yolo == true` short-circuits entirely
 //! and skips the classifier call.
@@ -49,6 +49,7 @@ pub struct ApprovalState {
 /// Accept full words and common abbreviations (med, hi, lo, m, h, l ...).
 ///
 /// Returns the canonical level name or `None` if the input isn't recognised.
+#[must_use]
 pub fn normalize_level(arg: &str) -> Option<Level> {
     match arg.trim().to_lowercase().as_str() {
         "l" | "lo" | "low" => Some(Level::Low),
@@ -103,6 +104,7 @@ pub fn apply_approval(state: &mut ApprovalState, kind: ApprovalKind, update_defa
 }
 
 /// Short human-readable label for the approval mode, used by the banner.
+#[must_use]
 pub fn approval_display(state: &ApprovalState) -> &'static str {
     if state.yolo {
         "off (yolo)"

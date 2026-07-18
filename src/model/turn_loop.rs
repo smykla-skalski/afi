@@ -31,6 +31,64 @@ pub struct LoopRequest<'a> {
     pub recovery_sampling: bool,
 }
 
+/// Retry/recovery counters carried across turns of the loop.
+struct TurnCounters {
+    reasoning_loop_cuts: u32,
+    malformed_stream_cuts: u32,
+    empty_turn_cuts: u32,
+    force_final: bool,
+    recovery_sampling: bool,
+}
+
+/// Build a `TurnRequest` from the loop request and current counters.
+fn build_request<'a>(
+    lr: &LoopRequest<'a>,
+    c: &TurnCounters,
+    forced_final: bool,
+) -> TurnRequest<'a> {
+    TurnRequest {
+        config: lr.config,
+        client: lr.client,
+        source: lr.source,
+        model: lr.model,
+        approval: lr.approval,
+        classifier: lr.classifier,
+        cwd: lr.cwd,
+        project_root: lr.project_root,
+        env: lr.env,
+        reasoning_loop_cut_count: c.reasoning_loop_cuts,
+        malformed_stream_cut_count: c.malformed_stream_cuts,
+        empty_turn_count: c.empty_turn_cuts,
+        forced_final,
+        recovery_sampling: c.recovery_sampling,
+    }
+}
+
+/// Update counters based on the returned TURN_* status.
+fn transition(status: &str, c: &mut TurnCounters) {
+    match status {
+        TURN_STREAM_CUT => {
+            c.malformed_stream_cuts += 1;
+            c.recovery_sampling = true;
+        }
+        TURN_EMPTY => {
+            c.empty_turn_cuts += 1;
+            c.recovery_sampling = true;
+        }
+        TURN_FORCE_FINAL => {
+            c.reasoning_loop_cuts += 1;
+            c.empty_turn_cuts = 0;
+            c.force_final = true;
+            c.recovery_sampling = true;
+        }
+        TURN_TOOL => {
+            c.malformed_stream_cuts = 0;
+            c.empty_turn_cuts = 0;
+        }
+        _ => {}
+    }
+}
+
 /// The model turn loop: retries based on TURN_* status until DONE/ESC.
 pub async fn run_model_turn_loop(messages: &mut Vec<Value>, lr: LoopRequest<'_>) {
     let max_turns: u32 = lr
@@ -39,83 +97,27 @@ pub async fn run_model_turn_loop(messages: &mut Vec<Value>, lr: LoopRequest<'_>)
         .and_then(|v| v.parse().ok())
         .unwrap_or(200);
     let mut steps: u32 = 0;
-    let mut reasoning_loop_cuts: u32 = 0;
-    let mut malformed_stream_cuts: u32 = 0;
-    let mut empty_turn_cuts: u32 = 0;
-    let mut force_final = lr.force_final;
-    let mut recovery_sampling = lr.recovery_sampling;
+    let mut c = TurnCounters {
+        reasoning_loop_cuts: 0,
+        malformed_stream_cuts: 0,
+        empty_turn_cuts: 0,
+        force_final: lr.force_final,
+        recovery_sampling: lr.recovery_sampling,
+    };
 
     while steps < max_turns {
-        let status = model_turn(
-            messages,
-            TurnRequest {
-                config: lr.config,
-                client: lr.client,
-                source: lr.source,
-                model: lr.model,
-                approval: lr.approval,
-                classifier: lr.classifier,
-                cwd: lr.cwd,
-                project_root: lr.project_root,
-                env: lr.env,
-                reasoning_loop_cut_count: reasoning_loop_cuts,
-                malformed_stream_cut_count: malformed_stream_cuts,
-                empty_turn_count: empty_turn_cuts,
-                forced_final: force_final,
-                recovery_sampling,
-            },
-        )
-        .await;
-
-        force_final = false;
-        recovery_sampling = false;
-
+        let status = model_turn(messages, build_request(&lr, &c, c.force_final)).await;
+        c.force_final = false;
+        c.recovery_sampling = false;
         if status == TURN_DONE || status == TURN_ESC {
             break;
         }
         steps += 1;
-
-        if status == TURN_STREAM_CUT {
-            malformed_stream_cuts += 1;
-            recovery_sampling = true;
-        } else if status == TURN_EMPTY {
-            empty_turn_cuts += 1;
-            recovery_sampling = true;
-        } else if status == TURN_FORCE_FINAL {
-            reasoning_loop_cuts += 1;
-            empty_turn_cuts = 0;
-            force_final = true;
-            recovery_sampling = true;
-        } else if status == TURN_TOOL {
-            malformed_stream_cuts = 0;
-            empty_turn_cuts = 0;
-        }
+        transition(&status, &mut c);
     }
 
-    if steps >= max_turns && !force_final {
-        eprintln!(
-            "\x1b[33m  \u{26a0} MODEL TURN LIMIT ({}) - forcing final\x1b[0m",
-            max_turns
-        );
-        let _ = model_turn(
-            messages,
-            TurnRequest {
-                config: lr.config,
-                client: lr.client,
-                source: lr.source,
-                model: lr.model,
-                approval: lr.approval,
-                classifier: lr.classifier,
-                cwd: lr.cwd,
-                project_root: lr.project_root,
-                env: lr.env,
-                reasoning_loop_cut_count: reasoning_loop_cuts,
-                malformed_stream_cut_count: malformed_stream_cuts,
-                empty_turn_count: empty_turn_cuts,
-                forced_final: true,
-                recovery_sampling,
-            },
-        )
-        .await;
+    if steps >= max_turns && !c.force_final {
+        eprintln!("\x1b[33m  \u{26a0} MODEL TURN LIMIT ({max_turns}) - forcing final\x1b[0m");
+        let _ = model_turn(messages, build_request(&lr, &c, true)).await;
     }
 }

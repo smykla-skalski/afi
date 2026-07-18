@@ -33,3 +33,20 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Highest-strict Harness-equivalent lint policy, adapted for AFI. Strictness
+# is delivered through the manifest (no `-D warnings` needed): `pedantic` denies
+# the whole group at priority 1, with targeted restriction/nursery/perf lints
+# promoted to deny at priority 2. `unexpected_cfgs` from Harness is omitted --
+# AFI defines no Cargo features and no custom `cfg` values (only `cfg(test)`).
+[lints.clippy]
+pedantic = { level = "deny", priority = 1 }
+absolute_paths = { level = "deny", priority = 2 }
+cognitive_complexity = { level = "deny", priority = 2 }
+needless_pass_by_value = { level = "deny", priority = 2 }
+ptr_arg = { level = "deny", priority = 2 }
+redundant_clone = { level = "deny", priority = 2 }
+unnecessary_to_owned = { level = "deny", priority = 2 }
+
+[lints.rust]
+unused = { level = "deny", priority = 1 }

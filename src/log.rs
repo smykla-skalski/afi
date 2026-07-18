@@ -10,10 +10,13 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 
-use chrono::Local;
 use serde_json::Value;
 
+use crate::util::now_secs_f64;
+use std::fs;
+
 /// Where the traffic log lives: `~/.afi/logs/traffic.jsonl`.
+#[must_use]
 pub fn log_path() -> PathBuf {
     let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     p.push(".afi");
@@ -28,11 +31,11 @@ pub fn log_path() -> PathBuf {
 pub fn log_event(direction: &str, payload: &Value) {
     let path = log_path();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = fs::create_dir_all(parent);
     }
-    let ts = Local::now().timestamp_millis() as f64 / 1000.0;
+    let ts = now_secs_f64();
     let line = serde_json::json!({"ts": ts, "dir": direction, "data": payload});
     if let Ok(mut f) = OpenOptions::new().append(true).create(true).open(&path) {
-        let _ = writeln!(f, "{}", line);
+        let _ = writeln!(f, "{line}");
     }
 }

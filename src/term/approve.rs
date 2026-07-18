@@ -17,11 +17,12 @@ use crate::risk::ApprovalChoice;
 
 /// Prompt the user to approve `action`. Returns their choice; denies when no
 /// TTY is available.
+#[must_use]
 pub fn prompt_choice(action: &str) -> ApprovalChoice {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return ApprovalChoice::No;
     }
-    print!("\r\x1b[33m  approve {}? [y/N/esc]\x1b[0m ", action);
+    print!("\r\x1b[33m  approve {action}? [y/N/esc]\x1b[0m ");
     let _ = io::stdout().flush();
     let choice = read_choice().unwrap_or(ApprovalChoice::No);
     println!();
@@ -62,9 +63,8 @@ fn classify_key(key: KeyEvent) -> Option<ApprovalChoice> {
         return None;
     }
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => Some(ApprovalChoice::Yes),
-        KeyCode::Char('n') | KeyCode::Char('N') => Some(ApprovalChoice::No),
-        KeyCode::Enter => Some(ApprovalChoice::No),
+        KeyCode::Char('y' | 'Y') => Some(ApprovalChoice::Yes),
+        KeyCode::Char('n' | 'N') | KeyCode::Enter => Some(ApprovalChoice::No),
         KeyCode::Esc => Some(ApprovalChoice::Esc),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(ApprovalChoice::Esc)

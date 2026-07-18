@@ -8,16 +8,20 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::sessions::memories_dir;
+use std::cmp::Reverse;
+use std::hash::BuildHasher;
+use std::sync::LazyLock;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 /// Turn a title into a filesystem-safe slug.
 pub fn slugify(text: &str, maxlen: usize) -> String {
-    static NON_ALNUM: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^a-z0-9]+").unwrap());
+    static NON_ALNUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9]+").unwrap());
     let s = text.to_lowercase().trim().to_string();
     let s = NON_ALNUM.replace_all(&s, "-");
     let s = s.trim_matches('-').to_string();
@@ -34,51 +38,56 @@ pub fn slugify(text: &str, maxlen: usize) -> String {
 }
 
 /// List all saved memories. Returns `(filename, title)` pairs sorted newest-first.
-pub fn list_memories(env: &HashMap<String, String>) -> Vec<(String, String)> {
+#[must_use]
+pub fn list_memories<S: BuildHasher>(env: &HashMap<String, String, S>) -> Vec<(String, String)> {
     let dir = memories_dir(env);
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return vec![],
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return vec![];
     };
-    let mut memories: Vec<(std::time::SystemTime, String, String)> = Vec::new();
+    let mut memories: Vec<(SystemTime, String, String)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with(".md") {
+        if !Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
             continue;
         }
         let mtime = entry
             .metadata()
             .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
+            .unwrap_or(UNIX_EPOCH);
         let content = fs::read_to_string(entry.path()).unwrap_or_default();
-        let title = content
-            .lines()
-            .find(|l| l.starts_with("# "))
-            .map(|l| l.trim_start_matches("# ").to_string())
-            .unwrap_or_else(|| name.trim_end_matches(".md").to_string());
+        let title = content.lines().find(|l| l.starts_with("# ")).map_or_else(
+            || name.trim_end_matches(".md").to_string(),
+            |l| l.trim_start_matches("# ").to_string(),
+        );
         memories.push((mtime, name, title));
     }
-    memories.sort_by_key(|(m, _, _)| std::cmp::Reverse(*m));
+    memories.sort_by_key(|(m, _, _)| Reverse(*m));
     memories.into_iter().map(|(_, n, t)| (n, t)).collect()
 }
 
 /// Search saved memories by keyword (case-insensitive). Returns matching
 /// `(filename, title, first_line)` tuples.
-pub fn remember_memories(
-    env: &HashMap<String, String>,
+#[must_use]
+pub fn remember_memories<S: BuildHasher>(
+    env: &HashMap<String, String, S>,
     query: &str,
 ) -> Vec<(String, String, String)> {
     let dir = memories_dir(env);
     let q = query.to_lowercase();
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return vec![],
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return vec![];
     };
-    let mut results: Vec<(std::time::SystemTime, String, String, String)> = Vec::new();
+    let mut results: Vec<(SystemTime, String, String, String)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with(".md") {
+        if !Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
             continue;
         }
         let content = fs::read_to_string(&path).unwrap_or_default();
@@ -88,25 +97,29 @@ pub fn remember_memories(
         let mtime = entry
             .metadata()
             .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        let title = content
-            .lines()
-            .find(|l| l.starts_with("# "))
-            .map(|l| l.trim_start_matches("# ").to_string())
-            .unwrap_or_else(|| name.trim_end_matches(".md").to_string());
+            .unwrap_or(UNIX_EPOCH);
+        let title = content.lines().find(|l| l.starts_with("# ")).map_or_else(
+            || name.trim_end_matches(".md").to_string(),
+            |l| l.trim_start_matches("# ").to_string(),
+        );
         let first_line = content.lines().take(3).collect::<Vec<_>>().join("\n");
         results.push((mtime, name, title, first_line));
     }
-    results.sort_by_key(|(m, _, _, _)| std::cmp::Reverse(*m));
+    results.sort_by_key(|(m, _, _, _)| Reverse(*m));
     results.into_iter().map(|(_, n, t, f)| (n, t, f)).collect()
 }
 
 /// Save a memory markdown file to `~/.afi/memories/<slug>.md`.
 /// Returns the path of the saved file.
-pub fn save_memory_file(env: &HashMap<String, String>, slug: &str, content: &str) -> PathBuf {
+#[must_use]
+pub fn save_memory_file<S: BuildHasher>(
+    env: &HashMap<String, String, S>,
+    slug: &str,
+    content: &str,
+) -> PathBuf {
     let dir = memories_dir(env);
     let _ = fs::create_dir_all(&dir);
-    let path = dir.join(format!("{}.md", slug));
+    let path = dir.join(format!("{slug}.md"));
     let _ = fs::write(&path, content);
     path
 }
@@ -146,7 +159,7 @@ mod tests {
     fn save_and_list_memory() {
         let tmp = tempfile::tempdir().unwrap();
         let env = env_for(tmp.path());
-        save_memory_file(&env, "test-memory", "# Test Memory\n\nSome content here.\n");
+        let _ = save_memory_file(&env, "test-memory", "# Test Memory\n\nSome content here.\n");
         let memories = list_memories(&env);
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].0, "test-memory.md");
@@ -157,12 +170,12 @@ mod tests {
     fn remember_searches_content() {
         let tmp = tempfile::tempdir().unwrap();
         let env = env_for(tmp.path());
-        save_memory_file(
+        let _ = save_memory_file(
             &env,
             "rust-tips",
             "# Rust Tips\n\nAlways use cargo clippy.\n",
         );
-        save_memory_file(&env, "python-tips", "# Python Tips\n\nUse type hints.\n");
+        let _ = save_memory_file(&env, "python-tips", "# Python Tips\n\nUse type hints.\n");
         let results = remember_memories(&env, "cargo");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "rust-tips.md");

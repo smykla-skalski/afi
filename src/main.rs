@@ -22,8 +22,8 @@ fn main() {
         return;
     }
 
-    let mut rt = afi::Runtime::build(&args, env_map.clone(), env_file.as_deref());
+    let mut rt = afi::Runtime::build(&args, env_map, env_file.as_deref());
 
     // Run the REPL.
-    run_repl(&mut rt, env_map);
+    run_repl(&mut rt);
 }

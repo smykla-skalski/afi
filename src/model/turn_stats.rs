@@ -28,8 +28,7 @@ pub(crate) fn handle_reasoning_stall(
     let retry_limit = config.reasoning_only_retry_limit;
     if cut_count >= retry_limit {
         eprintln!(
-            "\x1b[31m  \u{2702} REASONING-ONLY RESCUE FAILED - gave up after {} stalls\x1b[0m",
-            cut_count
+            "\x1b[31m  \u{2702} REASONING-ONLY RESCUE FAILED - gave up after {cut_count} stalls\x1b[0m"
         );
         return TURN_DONE.to_string();
     }
@@ -66,7 +65,7 @@ pub(crate) fn print_stats_footer(
     let dim = "\x1b[2m";
     let reset = "\x1b[0m";
     if completion_tokens > 0 && elapsed > 0.0 {
-        let tps = completion_tokens as f64 / elapsed;
+        let tps = f64::from(u32::try_from(completion_tokens).unwrap_or(u32::MAX)) / elapsed;
         let mut parts = vec![
             format!("{} tok", completion_tokens),
             format!("{:5.1} tok/s", tps),
@@ -75,12 +74,12 @@ pub(crate) fn print_stats_footer(
         if let Some(ttft) = t_first {
             parts.push(format!("{:4.0}ms ttft", ttft * 1000.0));
         }
-        parts.push(format!("{:4.1}s wall", elapsed));
+        parts.push(format!("{elapsed:4.1}s wall"));
         println!("{}  \u{2514} {}{}", dim, parts.join(" \u{00b7} "), reset);
     } else if streamed_chars > 0 {
         let gen_n = (streamed_chars / 4).max(1);
         let tps = if elapsed > 0.0 {
-            gen_n as f64 / elapsed
+            f64::from(u32::try_from(gen_n).unwrap_or(u32::MAX)) / elapsed
         } else {
             0.0
         };
@@ -93,6 +92,6 @@ pub(crate) fn print_stats_footer(
             reset
         );
     } else if !text.is_empty() || !tool_calls.is_empty() {
-        println!("{}  \u{2514} {:4.1}s wall{}", dim, elapsed, reset);
+        println!("{dim}  \u{2514} {elapsed:4.1}s wall{reset}");
     }
 }

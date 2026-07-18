@@ -7,6 +7,8 @@ use serde_json::Value;
 
 use super::store::session_files_newest;
 use super::{safe_title, short_id};
+use std::cmp::Ordering;
+use std::fs;
 
 /// A scannable one-line summary of a saved session, used by
 /// `afi sessions` / `/sessions` / `/resume`.
@@ -28,15 +30,14 @@ pub struct SessionSummary {
 /// missing/parse error.
 pub fn session_summary_from_file(dir: &Path, fname: &str) -> Option<SessionSummary> {
     let path = dir.join(fname);
-    let bytes = std::fs::read(&path).ok()?;
+    let bytes = fs::read(&path).ok()?;
     let data: Value = serde_json::from_slice(&bytes).ok()?;
     data.get("messages")?;
 
     let sid = data
         .get("id")
         .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_else(|| fname.trim_end_matches(".json").to_string());
+        .map_or_else(|| fname.trim_end_matches(".json").to_string(), String::from);
     let msgs = data.get("messages").and_then(|m| m.as_array());
 
     let mut preview = String::new();
@@ -64,13 +65,11 @@ pub fn session_summary_from_file(dir: &Path, fname: &str) -> Option<SessionSumma
         })
         .unwrap_or_else(|| "(empty)".to_string());
 
-    let n = msgs
-        .map(|arr| {
-            arr.iter()
-                .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
-                .count()
-        })
-        .unwrap_or(0);
+    let n = msgs.map_or(0, |arr| {
+        arr.iter()
+            .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+            .count()
+    });
 
     Some(SessionSummary {
         id: sid.clone(),
@@ -83,7 +82,7 @@ pub fn session_summary_from_file(dir: &Path, fname: &str) -> Option<SessionSumma
         preview,
         updated_at: data
             .get("updated_at")
-            .and_then(|v| v.as_f64())
+            .and_then(Value::as_f64)
             .unwrap_or(0.0),
         n,
         model: data.get("model").and_then(|v| v.as_str()).map(String::from),
@@ -97,13 +96,13 @@ pub fn session_summary_from_file(dir: &Path, fname: &str) -> Option<SessionSumma
 
 /// True if `query` (lowercased) appears in any of the summary's searchable
 /// fields. Empty query matches everything.
+#[must_use]
 pub fn session_matches_query(summary: &SessionSummary, query: Option<&str>) -> bool {
     let q = match query {
         Some(q) if !q.is_empty() => q.to_lowercase(),
         _ => return true,
     };
-    let in_field =
-        |s: Option<&str>| -> bool { s.map(|v| v.to_lowercase().contains(&q)).unwrap_or(false) };
+    let in_field = |s: Option<&str>| -> bool { s.is_some_and(|v| v.to_lowercase().contains(&q)) };
     in_field(Some(&summary.title))
         || in_field(summary.description.as_deref())
         || in_field(Some(&summary.preview))
@@ -117,6 +116,7 @@ pub fn session_matches_query(summary: &SessionSummary, query: Option<&str>) -> b
 /// (filtering can match older sessions beyond the first page); without a
 /// query, parsing stops as soon as `offset + limit` matches are collected
 /// so listing many sessions doesn't require parsing every transcript.
+#[must_use]
 pub fn list_sessions(
     dir: &Path,
     limit: Option<usize>,
@@ -126,9 +126,8 @@ pub fn list_sessions(
     let files = session_files_newest(dir);
     let mut out: Vec<SessionSummary> = Vec::new();
     for fname in files {
-        let summary = match session_summary_from_file(dir, &fname) {
-            Some(s) => s,
-            None => continue,
+        let Some(summary) = session_summary_from_file(dir, &fname) else {
+            continue;
         };
         if !session_matches_query(&summary, query) {
             continue;
@@ -146,12 +145,12 @@ pub fn list_sessions(
         out.sort_by(|a, b| {
             b.updated_at
                 .partial_cmp(&a.updated_at)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(Ordering::Equal)
         });
     }
     let end = limit.map(|l| offset + l);
     let start = offset.min(out.len());
-    let end = end.map(|e| e.min(out.len())).unwrap_or(out.len());
+    let end = end.map_or(out.len(), |e| e.min(out.len()));
     out[start..end].to_vec()
 }
 
@@ -160,6 +159,7 @@ pub fn list_sessions(
 /// Accepts: a full id, a numeric index into the recent-sessions list, a
 /// unique id prefix, a short id (the 6-hex suffix), or an exact title.
 /// Returns `None` if nothing matches or the input is ambiguous.
+#[must_use]
 pub fn resolve_session(target: &str, sessions: &[SessionSummary]) -> Option<String> {
     let target = target.trim();
     if target.is_empty() {
@@ -190,7 +190,7 @@ pub fn resolve_session(target: &str, sessions: &[SessionSummary]) -> Option<Stri
     let suffixed: Vec<&str> = ids
         .iter()
         .copied()
-        .filter(|i| i.ends_with(&format!("-{}", target)) || short_id(i) == target)
+        .filter(|i| i.ends_with(&format!("-{target}")) || short_id(i) == target)
         .collect();
     if suffixed.len() == 1 {
         return Some(suffixed[0].to_string());
@@ -209,16 +209,21 @@ pub fn resolve_session(target: &str, sessions: &[SessionSummary]) -> Option<Stri
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use serde_json::json;
+
+    use crate::sessions::new_session_id;
+    use crate::sessions::store::write_session;
 
     fn msg(role: &str, content: &str) -> Value {
         json!({"role": role, "content": content})
     }
 
-    fn write(dir: &Path, sid: &str, msgs: &[Value], meta: Option<Value>) {
+    fn write(dir: &Path, sid: &str, msgs: &[Value], meta: Option<&Value>) {
         let mut msgs = msgs.to_vec();
-        crate::sessions::store::write_session(dir, sid, &mut msgs, meta.as_ref()).unwrap();
+        write_session(dir, sid, &mut msgs, meta).unwrap();
     }
 
     #[test]
@@ -226,12 +231,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         for (i, txt) in ["aaa", "bbb", "ccc"].iter().enumerate() {
-            let sid = format!("20250101-12000{}-order{}", i, i);
+            let sid = format!("20250101-12000{i}-order{i}");
             write(
                 dir,
                 &sid,
                 &[msg("user", txt)],
-                Some(json!({"updated_at": 100 + i})),
+                Some(&json!({"updated_at": 100 + i})),
             );
             // Force mtime ordering since updated_at in JSON doesn't set mtime
             // on its own; we rely on write_session aligning mtime to updated_at.
@@ -240,8 +245,7 @@ mod tests {
         assert!(!sessions.is_empty());
         // newest (last written) should be first
         assert!(sessions[0].id.ends_with("-order2"));
-        let previews: std::collections::HashSet<&str> =
-            sessions.iter().map(|s| s.preview.as_str()).collect();
+        let previews: HashSet<&str> = sessions.iter().map(|s| s.preview.as_str()).collect();
         assert!(previews.contains("aaa"));
         assert!(previews.contains("bbb"));
         assert!(previews.contains("ccc"));
@@ -252,12 +256,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         for i in 0..20 {
-            let sid = format!("20250101-1300{:02}-lim{:02}", i, i);
+            let sid = format!("20250101-1300{i:02}-lim{i:02}");
             write(
                 dir,
                 &sid,
-                &[msg("user", &format!("limited {:02}", i))],
-                Some(json!({"updated_at": 200 + i})),
+                &[msg("user", &format!("limited {i:02}"))],
+                Some(&json!({"updated_at": 200 + i})),
             );
         }
         let sessions = list_sessions(dir, Some(5), 0, None);
@@ -268,12 +272,12 @@ mod tests {
     fn resolve_session_supports_index_prefix_title() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        let sid = crate::sessions::new_session_id();
+        let sid = new_session_id();
         write(
             dir,
             &sid,
             &[msg("user", "unique title here")],
-            Some(json!({"title": "unique title here"})),
+            Some(&json!({"title": "unique title here"})),
         );
         let sessions = list_sessions(dir, Some(50), 0, None);
         assert_eq!(
@@ -291,10 +295,7 @@ mod tests {
             Some(sessions[0].id.clone())
         );
         // exact title
-        assert_eq!(
-            resolve_session("unique title here", &sessions),
-            Some(sid.clone())
-        );
+        assert_eq!(resolve_session("unique title here", &sessions), Some(sid));
         // unknown → None
         assert_eq!(resolve_session("nope-no-such", &sessions), None);
     }

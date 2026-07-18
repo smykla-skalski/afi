@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::term::char_width;
+use std::mem;
 
 /// What the driver should do after a key was handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub struct ChatEditor {
 
 impl ChatEditor {
     /// Create an empty editor. `title` is shown on the box border.
+    #[must_use]
     pub fn new(title: &str) -> Self {
         Self {
             buffer: String::new(),
@@ -49,6 +51,7 @@ impl ChatEditor {
     }
 
     /// The current buffer contents.
+    #[must_use]
     pub fn input(&self) -> &str {
         &self.buffer
     }
@@ -132,30 +135,24 @@ impl ChatEditor {
         self.buffer[..i]
             .chars()
             .next_back()
-            .map(|c| i - c.len_utf8())
-            .unwrap_or(0)
+            .map_or(0, |c| i - c.len_utf8())
     }
 
     fn next_boundary(&self, i: usize) -> usize {
         self.buffer[i..]
             .chars()
             .next()
-            .map(|c| i + c.len_utf8())
-            .unwrap_or(i)
+            .map_or(i, |c| i + c.len_utf8())
     }
 
     fn line_start(&self) -> usize {
-        self.buffer[..self.cursor]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0)
+        self.buffer[..self.cursor].rfind('\n').map_or(0, |i| i + 1)
     }
 
     fn line_end(&self) -> usize {
         self.buffer[self.cursor..]
             .find('\n')
-            .map(|i| self.cursor + i)
-            .unwrap_or(self.buffer.len())
+            .map_or(self.buffer.len(), |i| self.cursor + i)
     }
 
     fn history_prev(&mut self, history: &[String]) {
@@ -182,7 +179,7 @@ impl ChatEditor {
 
     fn set_from_history(&mut self, history: &[String], idx: usize) {
         self.history_idx = Some(idx);
-        self.buffer = history[idx].clone();
+        self.buffer.clone_from(&history[idx]);
         self.cursor = self.buffer.len();
     }
 
@@ -198,7 +195,7 @@ impl ChatEditor {
         let height = inner.height.max(1) as usize;
 
         let (rows, cur_row, cur_col) = wrap(&self.buffer, self.cursor, width);
-        let scroll = cur_row.saturating_sub(height - 1) as u16;
+        let scroll = u16::try_from(cur_row.saturating_sub(height - 1)).unwrap_or(u16::MAX);
         let text = Text::from(rows.into_iter().map(Line::from).collect::<Vec<_>>());
         frame.render_widget(
             Paragraph::new(text).block(block).scroll((scroll, 0)),
@@ -210,11 +207,15 @@ impl ChatEditor {
 
         let cx = inner
             .x
-            .saturating_add(cur_col as u16)
+            .saturating_add(u16::try_from(cur_col).unwrap_or(u16::MAX))
             .min(inner.right().saturating_sub(1));
         let cy = inner
             .y
-            .saturating_add((cur_row as u16).saturating_sub(scroll))
+            .saturating_add(
+                u16::try_from(cur_row)
+                    .unwrap_or(u16::MAX)
+                    .saturating_sub(scroll),
+            )
             .min(inner.bottom().saturating_sub(1));
         frame.set_cursor_position((cx, cy));
     }
@@ -236,7 +237,7 @@ fn wrap(buffer: &str, cursor: usize, width: usize) -> (Vec<String>, usize, usize
         if c != '\n' {
             let w = char_width(c);
             if line_w + w > width && line_w > 0 {
-                rows.push(std::mem::take(&mut line));
+                rows.push(mem::take(&mut line));
                 line_w = 0;
             }
         }
@@ -246,7 +247,7 @@ fn wrap(buffer: &str, cursor: usize, width: usize) -> (Vec<String>, usize, usize
             found = true;
         }
         if c == '\n' {
-            rows.push(std::mem::take(&mut line));
+            rows.push(mem::take(&mut line));
             line_w = 0;
         } else {
             line.push(c);

@@ -5,80 +5,75 @@
 //! - Local (llama.cpp etc.): /v1/models meta -> /props -> overrun probe
 //! - Remote (Together, Z.ai, ...): overrun probe -> /v1/models -> /props
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 
 use crate::config::Source;
+use std::sync::LazyLock;
 
-/// Pull n_ctx / context_length from GET /v1/models. llama.cpp stashes it
+/// Pull `n_ctx` / `context_length` from GET /v1/models. llama.cpp stashes it
 /// under `data[0].meta.n_ctx`; some hosts expose `context_length` as a
 /// top-level model field.
+#[must_use]
 pub fn ctx_from_models(models_data: &Value, mid: &str) -> Option<u64> {
     let data = models_data.get("data")?.as_array()?;
-    if data.is_empty() {
-        return None;
-    }
-
-    // Prefer the entry whose id matches the active model.
     let mtail = mid.rsplit('/').next()?.to_lowercase();
     let pick = data
         .iter()
-        .find(|m| {
-            m.get("id")
-                .and_then(|v| v.as_str())
-                .map(|id| {
-                    id.to_lowercase() == mid.to_lowercase()
-                        || id.rsplit('/').next().map(|t| t.to_lowercase()) == Some(mtail.clone())
-                })
-                .unwrap_or(false)
-        })
+        .find(|m| model_id_matches(m, mid, &mtail))
         .or_else(|| data.first())?;
 
-    // Check meta dict (llama.cpp style).
-    if let Some(meta) = pick.get("meta").and_then(|m| m.as_object()) {
-        for key in &[
-            "n_ctx",
+    // Prefer the llama.cpp-style `meta` dict, then top-level OpenAI-compat keys.
+    if let Some(meta) = pick.get("meta") {
+        if let Some(n) = first_positive(
+            meta,
+            &[
+                "n_ctx",
+                "context_length",
+                "context_window",
+                "max_context_length",
+                "max_input_tokens",
+            ],
+        ) {
+            return Some(n);
+        }
+    }
+    first_positive(
+        pick,
+        &[
             "context_length",
             "context_window",
             "max_context_length",
             "max_input_tokens",
-        ] {
-            if let Some(v) = meta.get(*key).and_then(|v| v.as_u64()) {
-                if v > 0 {
-                    return Some(v);
-                }
-            }
-        }
-    }
+            "max_tokens",
+            "max_model_len",
+        ],
+    )
+}
 
-    // Check top-level model fields (OpenAI-compat extra).
-    for key in &[
-        "context_length",
-        "context_window",
-        "max_context_length",
-        "max_input_tokens",
-        "max_tokens",
-        "max_model_len",
-    ] {
-        if let Some(v) = pick.get(*key).and_then(|v| v.as_u64()) {
-            if v > 0 {
-                return Some(v);
-            }
-        }
-    }
+/// True when model entry `m`'s id equals `mid` or shares its `/`-tail.
+fn model_id_matches(m: &Value, mid: &str, mtail: &str) -> bool {
+    m.get("id").and_then(|v| v.as_str()).is_some_and(|id| {
+        id.to_lowercase() == mid.to_lowercase()
+            || id.rsplit('/').next().map(str::to_lowercase).as_deref() == Some(mtail)
+    })
+}
 
-    None
+/// The first `> 0` `u64` value among `keys` on the object-valued `obj`.
+fn first_positive(obj: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|k| obj.get(*k).and_then(Value::as_u64).filter(|v| *v > 0))
 }
 
 /// llama.cpp /props fallback: `default_generation_settings.n_ctx`.
+#[must_use]
 pub fn ctx_from_props(props: &Value) -> Option<u64> {
     if let Some(dgs) = props
         .get("default_generation_settings")
         .and_then(|v| v.as_object())
     {
         for key in &["n_ctx", "context_length", "context_window"] {
-            if let Some(v) = dgs.get(*key).and_then(|v| v.as_u64()) {
+            if let Some(v) = dgs.get(*key).and_then(Value::as_u64) {
                 if v > 0 {
                     return Some(v);
                 }
@@ -86,7 +81,7 @@ pub fn ctx_from_props(props: &Value) -> Option<u64> {
         }
     }
     for key in &["n_ctx", "context_length", "context_window"] {
-        if let Some(v) = props.get(*key).and_then(|v| v.as_u64()) {
+        if let Some(v) = props.get(*key).and_then(Value::as_u64) {
             if v > 0 {
                 return Some(v);
             }
@@ -98,8 +93,8 @@ pub fn ctx_from_props(props: &Value) -> Option<u64> {
 /// Parse the "maximum context length is N tokens" error message from an
 /// over-max_tokens chat request.
 pub fn ctx_from_error_message(msg: &str) -> Option<u64> {
-    static RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)maximum context length is (\d+) tokens").unwrap());
+    static RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)maximum context length is (\d+) tokens").unwrap());
     RE.captures(msg)
         .and_then(|c| c.get(1).and_then(|m| m.as_str().parse::<u64>().ok()))
 }
@@ -109,6 +104,7 @@ pub fn ctx_from_error_message(msg: &str) -> Option<u64> {
 ///
 /// This is a pure function that takes the pre-fetched data; the actual HTTP
 /// fetching is done by the caller (the `Client` in `client.rs`).
+#[must_use]
 pub fn resolve_context_window(
     source: &Source,
     mid: &str,
@@ -116,42 +112,16 @@ pub fn resolve_context_window(
     props_data: Option<&Value>,
     error_msg: Option<&str>,
 ) -> Option<u64> {
+    let from_models = || models_data.and_then(|d| ctx_from_models(d, mid));
+    let from_props = || props_data.and_then(ctx_from_props);
+    let from_error = || error_msg.and_then(ctx_from_error_message);
     if source.is_local() {
         // Local: /v1/models -> /props -> overrun probe
-        if let Some(data) = models_data {
-            if let Some(n) = ctx_from_models(data, mid) {
-                return Some(n);
-            }
-        }
-        if let Some(props) = props_data {
-            if let Some(n) = ctx_from_props(props) {
-                return Some(n);
-            }
-        }
-        if let Some(msg) = error_msg {
-            if let Some(n) = ctx_from_error_message(msg) {
-                return Some(n);
-            }
-        }
+        from_models().or_else(from_props).or_else(from_error)
     } else {
         // Remote: overrun probe -> /v1/models -> /props
-        if let Some(msg) = error_msg {
-            if let Some(n) = ctx_from_error_message(msg) {
-                return Some(n);
-            }
-        }
-        if let Some(data) = models_data {
-            if let Some(n) = ctx_from_models(data, mid) {
-                return Some(n);
-            }
-        }
-        if let Some(props) = props_data {
-            if let Some(n) = ctx_from_props(props) {
-                return Some(n);
-            }
-        }
+        from_error().or_else(from_models).or_else(from_props)
     }
-    None
 }
 
 #[cfg(test)]

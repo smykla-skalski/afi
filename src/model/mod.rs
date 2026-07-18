@@ -6,7 +6,9 @@
 //! recovery, and compression) lands across phases 5-8.
 
 pub mod client;
+pub mod compress;
 pub mod context_window;
+pub mod recovery;
 pub mod stream;
 
 // --- turn status constants (match the Python TURN_* values) ---------------

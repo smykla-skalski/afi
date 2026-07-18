@@ -185,4 +185,20 @@ mod tests {
         sp.tick();
         assert_eq!(sp.frame(), f0 + 1);
     }
+
+    #[test]
+    fn renders_label_into_a_test_backend_buffer() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let sp = LifeSpinner {
+            row: vec![0u8; GOL_W],
+            label: "thinking".to_string(),
+            frame: 0,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal.draw(|f| sp.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_owned()).collect();
+        assert!(row.contains("thinking"), "spinner row: {row:?}");
+    }
 }

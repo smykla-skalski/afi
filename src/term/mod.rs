@@ -6,6 +6,8 @@
 //! constants and width helpers below serve the remaining non-Ratatui output
 //! (banner, streamed model tokens, Life spinner).
 
+pub mod activity;
+pub mod approve;
 pub mod chatbox;
 pub mod editor;
 pub mod interrupt;

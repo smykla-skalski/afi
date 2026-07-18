@@ -1,122 +1,81 @@
 //! Conway's Game of Life spinner - a 1-row toroidal GoL that actually does
 //! something (patterns glide, blinkers flash) instead of just spinning.
 //!
-//! Runs in a background thread; the main loop stops it when the first token
-//! arrives.
+//! The simulation is pure (`seed`/`step`) and the spinner state renders through
+//! Ratatui as a single styled line. The `activity` event loop owns a
+//! `LifeSpinner`, advancing it one generation per animation tick while a model
+//! request is in flight; there is no background thread writing raw escapes.
 
-use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-
-use super::{CLEAR_LINE, DIM, HIDE_CURSOR, RESET, SHOW_CURSOR};
+use ratatui::layout::Rect;
+use ratatui::style::Stylize;
+use ratatui::text::{Line, Span};
+use ratatui::Frame;
 
 const GOL_W: usize = 24;
-const GOL_ALIVE: &str = "█";
-const GOL_DEAD: &str = "·";
+const GOL_ALIVE: char = '\u{2588}'; // full block
+const GOL_DEAD: char = '\u{b7}'; // middle dot
 
 /// Glider pattern: 5 cells, period-4.
 const GLIDER: [(usize, usize); 5] = [(0, 0), (1, 1), (2, 1), (0, 2), (1, 0)];
 
-/// A Conway's Game of Life spinner. Start it before a long operation; stop
-/// it when the operation completes.
+/// Animated Game-of-Life spinner state. Advance it with [`LifeSpinner::tick`]
+/// and draw it with [`LifeSpinner::render`].
 pub struct LifeSpinner {
-    stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
+    row: Vec<u8>,
+    label: String,
+    frame: usize,
 }
 
 impl LifeSpinner {
-    /// Create a new spinner with the given label (shown before the cells).
+    /// Create a spinner seeded from the wall clock, labelled `label`.
     pub fn new(label: &str) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
-        let label = label.to_string();
-
-        let handle = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            Some(thread::spawn(move || {
-                run(&label, &stop_clone);
-            }))
-        } else {
-            None
-        };
-
-        LifeSpinner { stop, handle }
-    }
-
-    /// Start the spinner (alias for `new` with "thinking" label).
-    pub fn start(label: &str) -> Self {
-        Self::new(label)
-    }
-
-    /// Stop the spinner and clean up the terminal line.
-    pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            print!("{}{}", CLEAR_LINE, SHOW_CURSOR);
-            let _ = std::io::stdout().flush();
+        Self {
+            row: seed(&mut SimpleRng::from_clock()),
+            label: label.to_string(),
+            frame: 0,
         }
     }
-}
 
-impl Drop for LifeSpinner {
-    fn drop(&mut self) {
-        self.stop();
+    /// Advance the simulation one generation and bump the frame counter.
+    pub fn tick(&mut self) {
+        self.row = step(&self.row);
+        self.frame = self.frame.wrapping_add(1);
+    }
+
+    /// The current frame index (drives the OSC title glyph).
+    pub fn frame(&self) -> usize {
+        self.frame
+    }
+
+    /// The current row rendered as a styled Ratatui line: dim label, then the
+    /// live/dead cells.
+    pub fn line(&self) -> Line<'static> {
+        let cells: String = self
+            .row
+            .iter()
+            .map(|&c| if c != 0 { GOL_ALIVE } else { GOL_DEAD })
+            .collect();
+        Line::from(vec![
+            Span::from(format!("  {} ", self.label)).dim(),
+            Span::from(cells),
+        ])
+    }
+
+    /// Draw the spinner into `area`.
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        frame.render_widget(self.line(), area);
     }
 }
 
-fn run(label: &str, stop: &AtomicBool) {
-    use std::io::Write;
-    let mut stdout = std::io::stdout();
-    let _ = write!(stdout, "{}", HIDE_CURSOR);
-
-    let mut row = seed();
-    let mut frame = 0;
-
-    // Initial render.
-    render(&mut stdout, label, &row);
-    let _ = stdout.flush();
-    super::set_working_title(frame);
-
-    while !stop.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_millis(90));
-        if stop.load(Ordering::Relaxed) {
-            break;
-        }
-        frame += 1;
-        super::set_working_title(frame);
-        row = step(&row);
-        render(&mut stdout, label, &row);
-        let _ = stdout.flush();
-    }
-}
-
-fn render(stdout: &mut impl Write, label: &str, row: &[u8]) {
-    let cells: String = row
-        .iter()
-        .map(|&c| if c != 0 { GOL_ALIVE } else { GOL_DEAD })
-        .collect();
-    let _ = write!(
-        stdout,
-        "{}  {}{} {}{}",
-        CLEAR_LINE, DIM, label, RESET, cells
-    );
-}
-
-fn seed() -> Vec<u8> {
+/// Seed a fresh row: one glider, two blinkers, and a little noise.
+fn seed(rng: &mut SimpleRng) -> Vec<u8> {
     let mut row = vec![0u8; GOL_W];
-    let mut rng = SimpleRng::new();
 
-    // Place a glider.
     let x = rng.next() as usize % GOL_W;
     for &(dx, _) in &GLIDER {
         row[(x + dx) % GOL_W] = 1;
     }
 
-    // Two blinkers.
     for _ in 0..2 {
         let x = rng.next() as usize % GOL_W;
         row[x % GOL_W] = 1;
@@ -124,7 +83,6 @@ fn seed() -> Vec<u8> {
         row[(x + 2) % GOL_W] = 1;
     }
 
-    // Random noise.
     for _ in 0..(GOL_W / 6) {
         row[rng.next() as usize % GOL_W] = 1;
     }
@@ -132,28 +90,21 @@ fn seed() -> Vec<u8> {
     row
 }
 
+/// Advance one generation. A 1-row GoL is degenerate (cells have only two
+/// neighbours), so we treat the row as the middle of a 3-row toroidal world
+/// whose top and bottom rows mirror it, giving every cell the standard eight
+/// neighbours so gliders and blinkers behave.
 fn step(row: &[u8]) -> Vec<u8> {
     let w = row.len();
     let mut nxt = vec![0u8; w];
     for x in 0..w {
-        // A 1-row GoL is degenerate (cells have only 2 neighbors). Cheat:
-        // treat the row as the middle of a 3-row toroidal world where the
-        // rows above and below mirror the current one. Gives every cell the
-        // standard 8 neighbors, so gliders/blinkers work.
-        let n = row[(x + w - 1) % w] as usize
-            + row[x] as usize
-            + row[(x + 1) % w] as usize
-            + row[(x + w - 1) % w] as usize
-            + row[(x + 1) % w] as usize
-            + row[(x + w - 1) % w] as usize
-            + row[x] as usize
-            + row[(x + 1) % w] as usize;
-        let cur = row[x] != 0;
-        nxt[x] = if (cur && (n == 2 || n == 3)) || (!cur && n == 3) {
-            1
-        } else {
-            0
-        };
+        let left = row[(x + w - 1) % w] as usize;
+        let right = row[(x + 1) % w] as usize;
+        let center = row[x] as usize;
+        // left/right counted in all three mirrored rows; center in top+bottom.
+        let n = left * 3 + right * 3 + center * 2;
+        let alive = row[x] != 0;
+        nxt[x] = u8::from((alive && (n == 2 || n == 3)) || (!alive && n == 3));
     }
     nxt
 }
@@ -164,12 +115,18 @@ struct SimpleRng {
 }
 
 impl SimpleRng {
-    fn new() -> Self {
+    fn from_clock() -> Self {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0xdeadbeef);
-        Self { state: seed }
+            .unwrap_or(0xdead_beef);
+        Self::from_seed(seed)
+    }
+
+    fn from_seed(seed: u64) -> Self {
+        Self {
+            state: seed | 1, // avoid the all-zero fixed point
+        }
     }
 
     fn next(&mut self) -> u8 {
@@ -179,5 +136,53 @@ impl SimpleRng {
         x ^= x << 17;
         self.state = x;
         (x & 0xff) as u8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_is_deterministic() {
+        let mut rng = SimpleRng::from_seed(42);
+        let row = seed(&mut rng);
+        assert_eq!(step(&row), step(&row));
+    }
+
+    #[test]
+    fn all_dead_stays_dead() {
+        let row = vec![0u8; GOL_W];
+        assert_eq!(step(&row), row);
+    }
+
+    #[test]
+    fn seed_is_reproducible_for_a_fixed_seed() {
+        let a = seed(&mut SimpleRng::from_seed(7));
+        let b = seed(&mut SimpleRng::from_seed(7));
+        assert_eq!(a, b);
+        assert_eq!(a.len(), GOL_W);
+        assert!(a.iter().any(|&c| c != 0), "seed should place live cells");
+    }
+
+    #[test]
+    fn line_has_label_and_full_width_cells() {
+        let sp = LifeSpinner {
+            row: vec![0u8; GOL_W],
+            label: "thinking".to_string(),
+            frame: 0,
+        };
+        let rendered = sp.line().to_string();
+        assert!(rendered.contains("thinking"));
+        let cells = rendered.matches(GOL_DEAD).count();
+        assert_eq!(cells, GOL_W);
+    }
+
+    #[test]
+    fn tick_advances_frame() {
+        let mut sp = LifeSpinner::new("x");
+        let f0 = sp.frame();
+        sp.tick();
+        assert_eq!(sp.frame(), f0 + 1);
     }
 }

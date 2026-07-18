@@ -11,6 +11,10 @@ pub mod context_window;
 pub mod recovery;
 pub mod stream;
 pub mod turn;
+pub mod turn_dispatch;
+pub mod turn_loop;
+pub mod turn_stats;
+pub mod turn_stream;
 
 // --- turn status constants (match the Python TURN_* values) ---------------
 

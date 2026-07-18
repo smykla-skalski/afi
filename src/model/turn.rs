@@ -1,5 +1,10 @@
 //! The model turn: one streamed turn (open stream, process SSE chunks,
 //! dispatch tools, return a TURN_* status) and the retry loop that wraps it.
+//!
+//! The request is awaited under `term::activity::run_during_generation`, which
+//! animates the Life spinner and lets Esc interrupt generation; chunk folding,
+//! tool dispatch, and reporting live in the `turn_stream`, `turn_dispatch`, and
+//! `turn_stats` sibling modules.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,20 +15,28 @@ use serde_json::{json, Value};
 use crate::approval::ApprovalState;
 use crate::config::Source;
 use crate::log::log_event;
-use crate::metrics::abbr;
 use crate::model::client::{ChatClient, ClientError, StreamRequest};
 use crate::model::recovery::{
     last_is_dangling_tool, nudge_current_user_turn, recovery_sampling_opts, EMPTY_TURN_NUDGE,
     FORCED_FINAL_NUDGE,
 };
 use crate::model::stream::normalize_usage;
+use crate::model::turn_dispatch::{
+    dispatch_structured, dispatch_text, order_tool_calls, DispatchArgs, ToolRunOutcome,
+};
+use crate::model::turn_stats::{handle_reasoning_stall, print_stats_footer};
+use crate::model::turn_stream::{accumulate, Accumulated, StreamResult};
 use crate::model::{
     ModelConfig, FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, TURN_DONE, TURN_EMPTY, TURN_ESC,
     TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL,
 };
-use crate::risk::{confirm, ApprovalChoice, RiskClassifier};
+use crate::risk::RiskClassifier;
+use crate::term::activity::{run_during_generation, Generation};
+use crate::term::interrupt::InterruptWatcher;
 use crate::tools;
-use crate::tools::protocol::{parse_text_calls, sanitize_tool_result};
+use crate::tools::protocol::parse_text_calls;
+
+pub use crate::model::turn_loop::{run_model_turn_loop, LoopRequest};
 
 /// Bundles the parameters for a single model turn.
 pub struct TurnRequest<'a> {
@@ -95,138 +108,62 @@ pub async fn model_turn(messages: &mut Vec<Value>, tr: TurnRequest<'_>) -> Strin
         &json!({"model": tr.model, "stream": true, "forced_final": tr.forced_final, "recovery_sampling": tr.recovery_sampling}),
     );
 
-    let chunks = match tr.client.chat_completions_stream(stream_req).await {
-        Ok(c) => c,
-        Err(ClientError::Connection(msg)) => {
+    let interrupt = InterruptWatcher::new();
+    let stream_fut = tr.client.chat_completions_stream(stream_req);
+    let chunks = match run_during_generation(&interrupt, "thinking", stream_fut).await {
+        Generation::Completed(Ok(c)) => c,
+        Generation::Completed(Err(ClientError::Connection(msg))) => {
             eprintln!(
                 "\x1b[31m  \u{2717} can't reach {} - is the server up?\n    {}\x1b[0m",
                 tr.source.base_url, msg
             );
             return TURN_DONE.to_string();
         }
-        Err(ClientError::Http { status, body }) => {
+        Generation::Completed(Err(ClientError::Http { status, body })) => {
             let body_short = &body[..body.len().min(200)];
             eprintln!("\x1b[31m  \u{2717} HTTP {}: {}\x1b[0m", status, body_short);
             return TURN_DONE.to_string();
         }
-        Err(ClientError::Parse(msg)) => {
+        Generation::Completed(Err(ClientError::Parse(msg))) => {
             eprintln!("\x1b[31m  \u{2717} parse error: {}\x1b[0m", msg);
             return TURN_DONE.to_string();
+        }
+        Generation::Interrupted => {
+            eprintln!("\x1b[33m  \u{21b3} interrupted by Esc\x1b[0m");
+            messages.push(json!({"role": "user", "content": "[User pressed Esc to interrupt generation. Acknowledge briefly and wait.]"}));
+            return TURN_ESC.to_string();
         }
     };
 
     log_event("resp", &json!({"chunks": chunks.len()}));
 
-    let mut content_parts: Vec<String> = Vec::new();
-    let mut tool_calls: HashMap<u32, ToolCallAccum> = HashMap::new();
-    let mut reasoning_parts: Vec<String> = Vec::new();
-    let mut usage = None;
-    let mut timings = None;
-    let mut finish_reasons: Vec<String> = Vec::new();
-    let mut streamed_chars: u64 = 0;
-    let mut reasoning_only_chars: usize = 0;
-    let mut t_first: Option<f64> = None;
-    let mut mode = TurnMode::Idle;
-
-    for chunk in &chunks {
-        if chunk.usage.is_some() {
-            usage = chunk.usage.clone();
+    let acc = match accumulate(&chunks, tr.config, t0) {
+        StreamResult::Done(a) => a,
+        StreamResult::ReasoningStall {
+            chars,
+            reasoning_parts,
+        } => {
+            return handle_reasoning_stall(
+                messages,
+                tr.config,
+                tr.reasoning_loop_cut_count,
+                chars,
+                &reasoning_parts,
+                tr.forced_final,
+            );
         }
-        if chunk.timings.is_some() {
-            timings = chunk.timings.clone();
-        }
-        if chunk.finish_reason.is_some() {
-            finish_reasons.push(chunk.finish_reason.clone().unwrap_or_default());
-        }
-        if t_first.is_none()
-            && (chunk.content.is_some()
-                || !chunk.tool_calls.is_empty()
-                || chunk.reasoning_content.is_some())
-        {
-            t_first = Some(t0.elapsed().as_secs_f64());
-        }
-
-        if let Some(rc) = &chunk.reasoning_content {
-            if !matches!(mode, TurnMode::Think) {
-                println!("\x1b[2m  -- reasoning --\x1b[0m");
-                mode = TurnMode::Think;
-            }
-            if !rc.trim().is_empty() {
-                print!("\x1b[2m{}\x1b[0m", rc);
-                reasoning_parts.push(rc.clone());
-            }
-            if content_parts.is_empty() && tool_calls.is_empty() {
-                reasoning_only_chars += rc.len();
-            }
-            if tr.config.reasoning_only_char_limit > 0
-                && content_parts.is_empty()
-                && tool_calls.is_empty()
-                && reasoning_only_chars >= tr.config.reasoning_only_char_limit
-            {
-                println!();
-                eprintln!(
-                    "\x1b[31m  \u{26a0} REASONING-ONLY LIMIT - {} chars; cutting\x1b[0m",
-                    abbr(reasoning_only_chars as u64)
-                );
-                return handle_reasoning_stall(
-                    messages,
-                    tr.config,
-                    tr.reasoning_loop_cut_count,
-                    reasoning_only_chars,
-                    &reasoning_parts,
-                    tr.forced_final,
-                );
-            }
-        }
-
-        if let Some(c) = &chunk.content {
-            if matches!(mode, TurnMode::Think) {
-                println!();
-                println!("\x1b[2m  ---------------\x1b[0m");
-            }
-            if !matches!(mode, TurnMode::Say) {
-                print!("\x1b[32m");
-            }
-            mode = TurnMode::Say;
-            if !c.trim().is_empty() {
-                print!("{}", c);
-                content_parts.push(c.clone());
-                streamed_chars += c.len() as u64;
-            }
-        }
-
-        for tc in &chunk.tool_calls {
-            if matches!(mode, TurnMode::Think) {
-                println!();
-                println!("\x1b[2m  ---------------\x1b[0m");
-                mode = TurnMode::Idle;
-            } else if matches!(mode, TurnMode::Say) {
-                println!("\x1b[0m");
-                mode = TurnMode::Idle;
-            }
-            let entry = tool_calls.entry(tc.index).or_default();
-            if tc.id.is_some() {
-                entry.id = tc.id.clone();
-            }
-            if tc.name.is_some() {
-                entry.name = tc.name.clone();
-            }
-            if let Some(args) = &tc.arguments {
-                entry.args.push_str(args);
-                streamed_chars += args.len() as u64;
-            }
-        }
-    }
-
-    if matches!(mode, TurnMode::Think) {
-        println!();
-        println!("\x1b[2m  ---------------\x1b[0m");
-    }
-    if matches!(mode, TurnMode::Say) {
-        println!("\x1b[0m");
-    }
-    println!("\x1b[0m");
-
+    };
+    let Accumulated {
+        content_parts,
+        tool_calls,
+        reasoning_parts,
+        usage,
+        timings,
+        finish_reasons,
+        streamed_chars,
+        reasoning_only_chars,
+        t_first,
+    } = acc;
     let text = content_parts.join("");
     let elapsed = t0.elapsed().as_secs_f64();
 
@@ -341,72 +278,48 @@ pub async fn model_turn(messages: &mut Vec<Value>, tr: TurnRequest<'_>) -> Strin
         let tool_calls_json: Vec<Value> = ordered.iter().map(|c| json!({"id": c.id.clone().unwrap_or_default(), "type": "function", "function": {"name": c.name.clone().unwrap_or_default(), "arguments": c.args.clone()}})).collect();
         messages.push(json!({"role": "assistant", "content": if text.trim().is_empty() { Value::Null } else { json!(text) }, "tool_calls": tool_calls_json}));
 
-        let mut esc_action: Option<String> = None;
-        for (idx, (c, args)) in ordered.iter().zip(parsed_args.iter()).enumerate() {
-            let name = c.name.as_deref().unwrap_or("tool");
-            let da = DispatchArgs {
-                approval: tr.approval,
-                classifier: tr.classifier,
-                cwd: tr.cwd,
-                project_root: tr.project_root,
-                env: tr.env,
-                config: tr.config,
-            };
-            match dispatch_tool(name, args, &da) {
-                ToolDispatchResult::Ok(result) => {
-                    let sanitized = sanitize_tool_result(&result, tr.config.tool_result_chars);
-                    messages.push(json!({"role": "tool", "tool_call_id": c.id.clone().unwrap_or_default(), "content": sanitized}));
-                }
-                ToolDispatchResult::Escaped(action) => {
-                    esc_action = Some(action);
-                    messages.push(json!({"role": "tool", "tool_call_id": c.id.clone().unwrap_or_default(), "content": "CANCELLED by user (Esc)"}));
-                    for c2 in &ordered[idx + 1..] {
-                        messages.push(json!({"role": "tool", "tool_call_id": c2.id.clone().unwrap_or_default(), "content": "SKIPPED"}));
-                    }
-                    break;
-                }
+        let da = DispatchArgs {
+            approval: tr.approval,
+            classifier: tr.classifier,
+            cwd: tr.cwd,
+            project_root: tr.project_root,
+            env: tr.env,
+            config: tr.config,
+        };
+        match dispatch_structured(
+            messages,
+            &ordered,
+            &parsed_args,
+            &da,
+            tr.config.tool_result_chars,
+        ) {
+            ToolRunOutcome::Escaped(action) => {
+                eprintln!("\x1b[33m  \u{21b3} escaped approval of {:?}\x1b[0m", action);
+                messages.push(json!({"role": "user", "content": "[User pressed Esc at a tool approval prompt. Acknowledge briefly and wait.]"}));
+                return TURN_ESC.to_string();
             }
+            ToolRunOutcome::Ran => return TURN_TOOL.to_string(),
         }
-        if let Some(action) = esc_action {
-            eprintln!("\x1b[33m  \u{21b3} escaped approval of {:?}\x1b[0m", action);
-            messages.push(json!({"role": "user", "content": "[User pressed Esc at a tool approval prompt. Acknowledge briefly and wait.]"}));
-            return TURN_ESC.to_string();
-        }
-        return TURN_TOOL.to_string();
     }
 
     let calls = parse_text_calls(&text);
     if !calls.is_empty() {
         messages.push(json!({"role": "assistant", "content": text}));
-        let mut observations: Vec<String> = Vec::new();
-        let mut esc_action: Option<String> = None;
-        for (name, args) in &calls {
-            let da2 = DispatchArgs {
-                approval: tr.approval,
-                classifier: tr.classifier,
-                cwd: tr.cwd,
-                project_root: tr.project_root,
-                env: tr.env,
-                config: tr.config,
-            };
-            match dispatch_tool(name, args, &da2) {
-                ToolDispatchResult::Ok(r) => {
-                    observations.push(format!("Observation ({}): {}", name, r));
-                }
-                ToolDispatchResult::Escaped(action) => {
-                    esc_action = Some(action);
-                    observations.push(format!("Observation ({}): CANCELLED", name));
-                    break;
-                }
+        let da = DispatchArgs {
+            approval: tr.approval,
+            classifier: tr.classifier,
+            cwd: tr.cwd,
+            project_root: tr.project_root,
+            env: tr.env,
+            config: tr.config,
+        };
+        match dispatch_text(messages, &calls, &da) {
+            ToolRunOutcome::Escaped(action) => {
+                eprintln!("\x1b[33m  \u{21b3} escaped approval of {:?}\x1b[0m", action);
+                return TURN_ESC.to_string();
             }
+            ToolRunOutcome::Ran => return TURN_TOOL.to_string(),
         }
-        if let Some(action) = esc_action {
-            eprintln!("\x1b[33m  \u{21b3} escaped approval of {:?}\x1b[0m", action);
-            messages.push(json!({"role": "user", "content": observations.join("\n")}));
-            return TURN_ESC.to_string();
-        }
-        messages.push(json!({"role": "user", "content": observations.join("\n")}));
-        return TURN_TOOL.to_string();
     }
 
     if text.trim().is_empty() {
@@ -438,327 +351,4 @@ pub async fn model_turn(messages: &mut Vec<Value>, tr: TurnRequest<'_>) -> Strin
 
     messages.push(json!({"role": "assistant", "content": text}));
     TURN_DONE.to_string()
-}
-
-#[derive(Default)]
-struct ToolCallAccum {
-    id: Option<String>,
-    name: Option<String>,
-    args: String,
-}
-
-fn order_tool_calls(tcs: &HashMap<u32, ToolCallAccum>) -> Vec<ToolCallAccum> {
-    let mut indices: Vec<u32> = tcs.keys().copied().collect();
-    indices.sort();
-    indices
-        .into_iter()
-        .filter_map(|i| {
-            tcs.get(&i).map(|c| ToolCallAccum {
-                id: c.id.clone(),
-                name: c.name.clone(),
-                args: c.args.clone(),
-            })
-        })
-        .collect()
-}
-
-#[derive(PartialEq)]
-enum TurnMode {
-    Idle,
-    Think,
-    Say,
-}
-
-enum ToolDispatchResult {
-    Ok(String),
-    Escaped(String),
-}
-
-/// Bundles the parameters for dispatching a tool call.
-struct DispatchArgs<'a> {
-    approval: &'a ApprovalState,
-    classifier: &'a dyn RiskClassifier,
-    cwd: &'a Path,
-    project_root: &'a Path,
-    env: &'a HashMap<String, String>,
-    config: &'a ModelConfig,
-}
-
-fn dispatch_tool(name: &str, args: &Value, da: &DispatchArgs<'_>) -> ToolDispatchResult {
-    let action = match name {
-        "write_file" => format!(
-            "write {} ({} bytes)",
-            args.get("path").and_then(|p| p.as_str()).unwrap_or("?"),
-            args.get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .len()
-        ),
-        "edit_file" => format!(
-            "edit {}",
-            args.get("path").and_then(|p| p.as_str()).unwrap_or("?")
-        ),
-        "run_bash" => format!(
-            "run: {}",
-            args.get("command").and_then(|c| c.as_str()).unwrap_or("?")
-        ),
-        _ => name.to_string(),
-    };
-
-    if matches!(name, "write_file" | "edit_file" | "run_bash") {
-        let ask: fn(&str) -> ApprovalChoice = |_| ApprovalChoice::Yes;
-        match confirm(
-            &action,
-            da.approval,
-            da.classifier,
-            da.cwd,
-            da.project_root,
-            &ask,
-        ) {
-            Ok(true) => {}
-            Ok(false) => return ToolDispatchResult::Ok("DENIED by user".to_string()),
-            Err(e) => return ToolDispatchResult::Escaped(e.0),
-        }
-    }
-
-    let result = match name {
-        "read_file" => tools::read_file(
-            args.get("path").and_then(|p| p.as_str()).unwrap_or(""),
-            args.get("offset").and_then(|o| o.as_i64()),
-            args.get("limit").and_then(|l| l.as_i64()),
-            da.config.read_file_lines,
-        ),
-        "write_file" => tools::write_file(
-            args.get("path").and_then(|p| p.as_str()).unwrap_or(""),
-            args.get("content").and_then(|c| c.as_str()).unwrap_or(""),
-        ),
-        "edit_file" => tools::edit_file(
-            args.get("path").and_then(|p| p.as_str()).unwrap_or(""),
-            args.get("old").and_then(|o| o.as_str()).unwrap_or(""),
-            args.get("new").and_then(|n| n.as_str()).unwrap_or(""),
-        ),
-        "list_dir" => tools::list_dir(args.get("path").and_then(|p| p.as_str()).unwrap_or(".")),
-        "run_bash" => {
-            let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
-            if command.is_empty() {
-                return ToolDispatchResult::Ok("ERROR: run_bash requires 'command'.".to_string());
-            }
-            tools::bash::run_bash(
-                command,
-                args.get("timeout").and_then(|t| t.as_i64()),
-                da.env,
-                &|| false,
-            )
-        }
-        "wait_background" => {
-            let pid = args.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
-            let timeout = args.get("timeout").and_then(|t| t.as_i64()).unwrap_or(0);
-            let log_path = args
-                .get("log_path")
-                .and_then(|l| l.as_str())
-                .map(std::path::PathBuf::from);
-            tools::bash::wait_background(pid, log_path.as_deref(), timeout, da.env, &|| false)
-        }
-        "final_answer" => {
-            return ToolDispatchResult::Ok(
-                args.get("answer")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            )
-        }
-        _ => format!("ERROR: unknown tool {}", name),
-    };
-    ToolDispatchResult::Ok(result)
-}
-
-fn handle_reasoning_stall(
-    messages: &mut Vec<Value>,
-    config: &ModelConfig,
-    cut_count: u32,
-    chars: usize,
-    _reasoning_parts: &[String],
-    forced_final: bool,
-) -> String {
-    if forced_final {
-        eprintln!(
-            "\x1b[31m  \u{2702} FORCED FINAL FAILED - {} reasoning chars\x1b[0m",
-            abbr(chars as u64)
-        );
-        return TURN_DONE.to_string();
-    }
-    let retry_limit = config.reasoning_only_retry_limit;
-    if cut_count >= retry_limit {
-        eprintln!(
-            "\x1b[31m  \u{2702} REASONING-ONLY RESCUE FAILED - gave up after {} stalls\x1b[0m",
-            cut_count
-        );
-        return TURN_DONE.to_string();
-    }
-    let is_last = cut_count == retry_limit - 1;
-    if is_last {
-        eprintln!(
-            "\x1b[33m  \u{2702} REASONING-ONLY STALL - {} chars; forcing final ({}/{})\x1b[0m",
-            abbr(chars as u64),
-            cut_count + 1,
-            retry_limit
-        );
-        nudge_current_user_turn(messages, FORCED_FINAL_NUDGE);
-        return TURN_FORCE_FINAL.to_string();
-    }
-    eprintln!(
-        "\x1b[33m  \u{2702} REASONING-ONLY STALL - {} chars; nudging ({}/{})\x1b[0m",
-        abbr(chars as u64),
-        cut_count + 1,
-        retry_limit
-    );
-    nudge_current_user_turn(messages, "Now act - emit a tool call now.");
-    TURN_FORCE_FINAL.to_string()
-}
-
-fn print_stats_footer(
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    elapsed: f64,
-    t_first: Option<f64>,
-    streamed_chars: u64,
-    text: &str,
-    tool_calls: &HashMap<u32, ToolCallAccum>,
-) {
-    let dim = "\x1b[2m";
-    let reset = "\x1b[0m";
-    if completion_tokens > 0 && elapsed > 0.0 {
-        let tps = completion_tokens as f64 / elapsed;
-        let mut parts = vec![
-            format!("{} tok", completion_tokens),
-            format!("{:5.1} tok/s", tps),
-            format!("{} ctx", abbr(prompt_tokens)),
-        ];
-        if let Some(ttft) = t_first {
-            parts.push(format!("{:4.0}ms ttft", ttft * 1000.0));
-        }
-        parts.push(format!("{:4.1}s wall", elapsed));
-        println!("{}  \u{2514} {}{}", dim, parts.join(" \u{00b7} "), reset);
-    } else if streamed_chars > 0 {
-        let gen_n = (streamed_chars / 4).max(1);
-        let tps = if elapsed > 0.0 {
-            gen_n as f64 / elapsed
-        } else {
-            0.0
-        };
-        println!(
-            "{}  \u{2514} \u{2248}{} tok \u{00b7} {:5.1} tok/s \u{00b7} {:4.1}s wall{}",
-            dim,
-            abbr(gen_n),
-            tps,
-            elapsed,
-            reset
-        );
-    } else if !text.is_empty() || !tool_calls.is_empty() {
-        println!("{}  \u{2514} {:4.1}s wall{}", dim, elapsed, reset);
-    }
-}
-
-/// Bundles the parameters for the model turn loop.
-pub struct LoopRequest<'a> {
-    pub config: &'a ModelConfig,
-    pub client: &'a dyn ChatClient,
-    pub source: &'a Source,
-    pub model: &'a str,
-    pub approval: &'a ApprovalState,
-    pub classifier: &'a dyn RiskClassifier,
-    pub cwd: &'a Path,
-    pub project_root: &'a Path,
-    pub env: &'a HashMap<String, String>,
-    pub force_final: bool,
-    pub recovery_sampling: bool,
-}
-
-/// The model turn loop: retries based on TURN_* status until DONE/ESC.
-pub async fn run_model_turn_loop(messages: &mut Vec<Value>, lr: LoopRequest<'_>) {
-    let max_turns: u32 = lr
-        .env
-        .get("AFI_MAX_MODEL_TURNS")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(200);
-    let mut steps: u32 = 0;
-    let mut reasoning_loop_cuts: u32 = 0;
-    let mut malformed_stream_cuts: u32 = 0;
-    let mut empty_turn_cuts: u32 = 0;
-    let mut force_final = lr.force_final;
-    let mut recovery_sampling = lr.recovery_sampling;
-
-    while steps < max_turns {
-        let status = model_turn(
-            messages,
-            TurnRequest {
-                config: lr.config,
-                client: lr.client,
-                source: lr.source,
-                model: lr.model,
-                approval: lr.approval,
-                classifier: lr.classifier,
-                cwd: lr.cwd,
-                project_root: lr.project_root,
-                env: lr.env,
-                reasoning_loop_cut_count: reasoning_loop_cuts,
-                malformed_stream_cut_count: malformed_stream_cuts,
-                empty_turn_count: empty_turn_cuts,
-                forced_final: force_final,
-                recovery_sampling,
-            },
-        )
-        .await;
-
-        force_final = false;
-        recovery_sampling = false;
-
-        if status == TURN_DONE || status == TURN_ESC {
-            break;
-        }
-        steps += 1;
-
-        if status == TURN_STREAM_CUT {
-            malformed_stream_cuts += 1;
-            recovery_sampling = true;
-        } else if status == TURN_EMPTY {
-            empty_turn_cuts += 1;
-            recovery_sampling = true;
-        } else if status == TURN_FORCE_FINAL {
-            reasoning_loop_cuts += 1;
-            empty_turn_cuts = 0;
-            force_final = true;
-            recovery_sampling = true;
-        } else if status == TURN_TOOL {
-            malformed_stream_cuts = 0;
-            empty_turn_cuts = 0;
-        }
-    }
-
-    if steps >= max_turns && !force_final {
-        eprintln!(
-            "\x1b[33m  \u{26a0} MODEL TURN LIMIT ({}) - forcing final\x1b[0m",
-            max_turns
-        );
-        let _ = model_turn(
-            messages,
-            TurnRequest {
-                config: lr.config,
-                client: lr.client,
-                source: lr.source,
-                model: lr.model,
-                approval: lr.approval,
-                classifier: lr.classifier,
-                cwd: lr.cwd,
-                project_root: lr.project_root,
-                env: lr.env,
-                reasoning_loop_cut_count: reasoning_loop_cuts,
-                malformed_stream_cut_count: malformed_stream_cuts,
-                empty_turn_count: empty_turn_cuts,
-                forced_final: true,
-                recovery_sampling,
-            },
-        )
-        .await;
-    }
 }

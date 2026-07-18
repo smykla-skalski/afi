@@ -4,14 +4,14 @@
 
 mod common;
 
-use minion::config::{parse_extra_body, ParsedArgs};
-use minion::{ApprovalKind, Source};
+use afi::config::{parse_extra_body, ParsedArgs};
+use afi::{ApprovalKind, Source};
 use serde_json::json;
 
 // Test 1: legacy fallback (no MINION_SOURCE_* vars)
 #[test]
 fn test_1_legacy_fallback() {
-    let rt = common::build(&["minion"], &[]);
+    let rt = common::build(&["afi"], &[]);
     let names: Vec<&str> = rt.source_order.iter().map(|s| s.as_str()).collect();
     assert_eq!(names, vec!["local"]);
     assert_eq!(rt.active.as_deref(), Some("local"));
@@ -22,7 +22,7 @@ fn test_1_legacy_fallback() {
 #[test]
 fn test_2_multi_source_discovery() {
     let rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCES", "local,zai"),
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
@@ -44,7 +44,7 @@ fn test_2_multi_source_discovery() {
 #[test]
 fn test_3_switch_source() {
     let mut rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCES", "local,zai"),
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
@@ -63,7 +63,7 @@ fn test_3_switch_source() {
 #[test]
 fn test_4_switch_back() {
     let mut rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCES", "local,zai"),
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
@@ -79,7 +79,7 @@ fn test_4_switch_back() {
 #[test]
 fn test_5_unknown_source() {
     let mut rt = common::build(
-        &["minion"],
+        &["afi"],
         &[("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1")],
     );
     assert!(!rt.switch_source("nonexistent", None));
@@ -89,7 +89,7 @@ fn test_5_unknown_source() {
 #[test]
 fn test_6_source_flag() {
     let rt = common::build(
-        &["minion", "--source", "zai"],
+        &["afi", "--source", "zai"],
         &[
             ("MINION_SOURCES", "local,zai"),
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
@@ -104,7 +104,7 @@ fn test_6_source_flag() {
 #[test]
 fn test_7_auto_discover() {
     let rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
             ("MINION_SOURCE_ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"),
@@ -118,7 +118,7 @@ fn test_7_auto_discover() {
 #[test]
 fn test_8_banner_reflects_source() {
     let mut rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCES", "local,zai"),
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
@@ -126,7 +126,7 @@ fn test_8_banner_reflects_source() {
         ],
     );
     rt.switch_source("zai", None);
-    let banner = minion::banner(&rt);
+    let banner = afi::banner(&rt);
     assert!(banner.contains("zai"));
 }
 
@@ -134,7 +134,7 @@ fn test_8_banner_reflects_source() {
 #[test]
 fn test_9_builtin_together() {
     let rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
             ("TOGETHER_API_KEY", "fake-together-key"),
@@ -160,7 +160,7 @@ fn test_9_builtin_together() {
 #[test]
 fn test_10_no_together_without_key() {
     let rt = common::build(
-        &["minion"],
+        &["afi"],
         &[("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1")],
     );
     assert!(!rt.sources.contains_key("together"));
@@ -170,7 +170,7 @@ fn test_10_no_together_without_key() {
 #[test]
 fn test_11_explicit_together_overrides_builtin() {
     let rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCES", "together"),
             (
@@ -197,7 +197,7 @@ fn test_11_explicit_together_overrides_builtin() {
 #[test]
 fn test_12_switch_source_model_override() {
     let mut rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCES", "together"),
             (
@@ -220,7 +220,7 @@ fn test_12_switch_source_model_override() {
 #[test]
 fn test_13_builtin_openrouter() {
     let rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
             ("OPENROUTER_API_KEY", "fake-or-key"),
@@ -249,7 +249,7 @@ fn test_13_builtin_openrouter() {
 #[test]
 fn test_14_no_openrouter_without_key() {
     let rt = common::build(
-        &["minion"],
+        &["afi"],
         &[("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1")],
     );
     assert!(!rt.sources.contains_key("openrouter"));
@@ -259,7 +259,7 @@ fn test_14_no_openrouter_without_key() {
 #[test]
 fn test_15_explicit_openrouter_overrides_builtin() {
     let rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCES", "openrouter"),
             (
@@ -294,7 +294,7 @@ fn test_15_explicit_openrouter_overrides_builtin() {
 #[test]
 fn test_16_bad_extra_body_ignored() {
     let rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCES", "openrouter"),
             (
@@ -315,7 +315,7 @@ fn test_16_bad_extra_body_ignored() {
 #[test]
 fn test_17_provider_order_helpers() {
     let mut rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
             ("OPENROUTER_API_KEY", "k"),
@@ -347,7 +347,7 @@ fn test_17_provider_order_helpers() {
 #[test]
 fn test_18_extra_request_kwargs_plumbing() {
     let mut rt = common::build(
-        &["minion"],
+        &["afi"],
         &[
             ("MINION_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
             ("OPENROUTER_API_KEY", "k"),
@@ -435,15 +435,15 @@ fn is_local_classification() {
 #[test]
 fn parse_args_resume_bare_vs_target() {
     let mk = |args: &[&str]| -> ParsedArgs {
-        minion::config::parse_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        afi::config::parse_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     };
-    assert_eq!(mk(&["minion", "--resume"]).resume, Some(None));
+    assert_eq!(mk(&["afi", "--resume"]).resume, Some(None));
     assert_eq!(
-        mk(&["minion", "--resume", "deadbe"]).resume,
+        mk(&["afi", "--resume", "deadbe"]).resume,
         Some(Some("deadbe".to_string()))
     );
     // --resume --yolo does NOT swallow --yolo as the target.
-    let p = mk(&["minion", "--resume", "--yolo"]);
+    let p = mk(&["afi", "--resume", "--yolo"]);
     assert_eq!(p.resume, Some(None));
     assert!(p.yolo);
 }

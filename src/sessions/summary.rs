@@ -9,7 +9,7 @@ use super::store::session_files_newest;
 use super::{safe_title, short_id};
 
 /// A scannable one-line summary of a saved session, used by
-/// `minion sessions` / `/sessions` / `/resume`.
+/// `afi sessions` / `/sessions` / `/resume`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: String,

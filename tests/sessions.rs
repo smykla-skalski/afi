@@ -6,11 +6,11 @@ mod common;
 use std::collections::HashMap;
 use std::io::Cursor;
 
-use minion::cli::{
+use afi::cli::{
     cli_sessions, fmt_when, print_session_list, session_id_from_args, session_list_page_options,
     PageOptions,
 };
-use minion::sessions::{
+use afi::sessions::{
     delete_session, list_sessions, load_session, new_session_id, resolve_session, safe_title,
     short_id, write_session, SessionSummary,
 };
@@ -46,7 +46,7 @@ fn test_write_load_roundtrip() {
     assert_eq!(loaded["messages"], json!(messages));
     assert_eq!(loaded["title"], "greeting");
     assert_eq!(loaded["id"], sid);
-    assert_eq!(loaded["schema"], "minion-rs-1");
+    assert_eq!(loaded["schema"], "afi-1");
 }
 
 #[test]
@@ -420,6 +420,6 @@ fn test_print_session_list_renders_title_and_meta() {
 // Silence unused imports in `common` if a later phase hasn't wired them yet.
 #[allow(dead_code)]
 fn _silence() {
-    let _ = common::build(&["minion"], &[]);
-    let _ = common::build_with_env_file(&["minion"], &[], None);
+    let _ = common::build(&["afi"], &[]);
+    let _ = common::build_with_env_file(&["afi"], &[], None);
 }

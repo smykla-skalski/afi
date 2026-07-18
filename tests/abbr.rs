@@ -1,6 +1,6 @@
 //! Port of `tests/test_abbr.py`.
 
-use minion::metrics::{abbr, precise_abbr};
+use afi::metrics::{abbr, precise_abbr};
 
 #[test]
 fn abbr_ranges() {

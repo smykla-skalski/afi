@@ -2,10 +2,8 @@
 //! `tests/test_esc_approval.py` (the _confirm / _ask_approval portions).
 //! The model_turn and REPL tests are deferred to phases 5 and 8.
 
-use minion::approval::{ApprovalState, Level};
-use minion::risk::{
-    confirm, extract_action_path, risk_user_message, ApprovalChoice, RiskClassifier,
-};
+use afi::approval::{ApprovalState, Level};
+use afi::risk::{confirm, extract_action_path, risk_user_message, ApprovalChoice, RiskClassifier};
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};

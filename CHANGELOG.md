@@ -1,12 +1,12 @@
 # Changelog
 
-All notable changes to `minion` from this point forward.
+All notable changes to `afi` from this point forward.
 
 ### Changed — Rust port
 
-`minion` is now a Rust binary. The Python implementation (`minion.py`) at
+`afi` is now a Rust binary. The Python implementation (`minion.py`) at
 `Sentdex/minion` is superseded by a from-scratch Rust port at
-`smykla-skalski/minion-rs`. Behavior is intended to be identical except for
+`smykla-skalski/afi`. Behavior is intended to be identical except for
 the documented breaking changes below. The CLI flags, env vars, slash
 commands, system prompt, tool schemas, recovery knobs, session auto-save,
 multi-source system, approval gating, and TUI chatbox all behave as before.
@@ -14,13 +14,13 @@ multi-source system, approval gating, and TUI chatbox all behave as before.
 **Breaking — traffic log moved to `~/.minion/logs/traffic.jsonl`.**
 The old `llamacpp.log` next to the script is gone — an installed binary has
 no "next to the script" location, and `llamacpp` was always a misnomer
-(minion talks to vLLM, SGLang, Z.ai, OpenAI, OpenRouter, Bedrock-via-LiteLLM,
+(afi talks to vLLM, SGLang, Z.ai, OpenAI, OpenRouter, Bedrock-via-LiteLLM,
 not just llama.cpp). Same JSONL event schema (`{"ts","dir","data"}`), so
 anything tailing the old file keeps working after a path update.
 
 **Breaking — session format changed.** `~/.minion/sessions/<id>.json` files
 written by the Python version will not resume — the Rust port uses a fresh,
-version-tagged schema (`"schema": "minion-rs-1"`). A one-shot importer was
+version-tagged schema (`"schema": "afi-1"`). A one-shot importer was
 deferred; start a fresh session on first run.
 
 ### Added — OSC terminal title status
@@ -30,7 +30,7 @@ status — e.g. Orca (github.com/stablyai/orca), whose custom-CLI-agent docs
 say a title containing "working" or "idle" is picked up automatically —
 show a live status dot for this pane. The title cycles a braille spinner
 glyph on every `LifeSpinner` tick while a turn runs, and resets to
-`minion idle` at the chat prompt. Always on; opt out with `MINION_TITLE=0`.
+`afi idle` at the chat prompt. Always on; opt out with `MINION_TITLE=0`.
 A stray title escape is harmless in a terminal that ignores it.
 
 ### Fixed — text-protocol tool calls dropped when surrounded by prose
@@ -137,8 +137,8 @@ case termios was never changed and there's nothing to restore).
 
 In sessions that ran for many turns, the terminal would get progressively
 laggy — 50–75% of keystrokes silently dropped, so you had to hammer each key
-several times before it registered. Only the minion terminal was affected;
-Ctrl+C and `/save` then `minion --resume` "fixed" it because restarting tore
+several times before it registered. Only the afi terminal was affected;
+Ctrl+C and `/save` then `afi --resume` "fixed" it because restarting tore
 down the leaked threads. Nothing else on the machine slowed down.
 
 Root cause: the Esc-to-interrupt watcher. Each `model_turn` spawned a fresh
@@ -198,7 +198,7 @@ the sole keystroke consumer. No spawn/join window exists to leak through.
 
 ### Added — automatic context compression (`MINION_AUTOCOMPRESS_PERCENT`, `/autocompress`)
 
-minion can now fold older context automatically when the conversation gets
+afi can now fold older context automatically when the conversation gets
 close to the context limit, instead of waiting for a manual `/compress`.
 Triggered after each settled model turn: if the last request's
 `prompt_tokens` filled at least `MINION_AUTOCOMPRESS_PERCENT` of the active
@@ -335,7 +335,7 @@ watcher exits cleanly when stdin isn't a real fd — purely cosmetic, no behavio
 change in the REPL (where stdin is a tty).
 
 ### Added — built-in `together` source + per-switch model override
-minion now ships a built-in `together` source for the Together AI API. When
+afi now ships a built-in `together` source for the Together AI API. When
 `TOGETHER_API_KEY` is set (in `~/.env` or the shell), a `together` source is
 auto-registered at `https://api.together.xyz/v1`, defaulting to the
 `zai-org/GLM-5.2` model. It's appended last, so it never displaces your
@@ -453,10 +453,10 @@ bounded visible answer instead of continuing free-form.
 
 ### Added — gibberish recovery escalates to a visible checkpoint
 Previously, if the gibberish detector cut the stream and the recovery retry
-also collapsed into noise, minion gave up and waited for user input —
+also collapsed into noise, afi gave up and waited for user input —
 leaving the user staring at a dead turn with no answer. Now, after
 `MINION_REASONING_GIBBERISH_RETRIES` (default 1) recovery attempts fail,
-minion escalates: it nudges the model with `GIBBERISH_CHECKPOINT_NUDGE`
+afi escalates: it nudges the model with `GIBBERISH_CHECKPOINT_NUDGE`
 (asking for a bounded visible checkpoint: last valid result, next step,
 blockers) and returns `TURN_FORCE_FINAL`, which re-enters the turn with
 `force_final=True` + `recovery_sampling=True` so the model emits a
@@ -519,7 +519,7 @@ checkpoint, and manual-recovery are now module-level constants
 so the tests can assert against stable wording.
 
 > **Note:** the file was previously called `miniagent.py` and configured via
-> `AGENT_BASE_URL` / `AGENT_MODEL` / `AGENT_API_KEY`. Renamed to `minion` /
+> `AGENT_BASE_URL` / `AGENT_MODEL` / `AGENT_API_KEY`. Renamed to `afi` /
 > `MINION_*` for clarity. The old env vars are silently ignored — set the new
 > ones.
 
@@ -540,7 +540,7 @@ first prompt, so you immediately re-orient on what the chat was about.
   near-duplicate of the same render loop; now shares one code path).
 
 ### Added — short ids + model-generated descriptions in session listings
-Session listings (`minion sessions`, `/sessions`, bare `/resume`) now show
+Session listings (`afi sessions`, `/sessions`, bare `/resume`) now show
 two things they didn't before: a scannable **short id** and a
 **model-generated description** that evolves as the conversation progresses.
 
@@ -548,7 +548,7 @@ two things they didn't before: a scannable **short id** and a
   → `XXXXXX`) since the date+time prefix is shared/redundant across sessions
   created in the same minute. Shown in magenta in every listing.
 - `_resolve_session` now matches on that short id (the tail segment) in
-  addition to full id / prefix / index / title — so `minion --resume deadbe`
+  addition to full id / prefix / index / title — so `afi --resume deadbe`
   works.
 - `_maybe_refresh_description(id, messages)` makes one cheap non-streaming
   call every `SESSION_DESC_REFRESH` (default **6**, override with
@@ -562,15 +562,15 @@ two things they didn't before: a scannable **short id** and a
 - New `DESC_SYSTEM` prompt and `_DESC_REFRESH_DEFAULT` sentinel (resolved
   lazily to `SESSION_DESC_REFRESH` after `_env_int()` is defined, since the
   sessions section sits above `_env_int` in the file).
-- Listings updated in all three spots: `_cli_sessions` (the `minion sessions`
+- Listings updated in all three spots: `_cli_sessions` (the `afi sessions`
   subcommand), `_cmd_sessions` (the in-session `/sessions`), and the bare
   `/resume` picker — all show `index  short-id  title · N msg · when · source`
   with the description (or preview fallback) on a second dim line.
 
 ### Added — Ctrl+C exit shows a grey resume hint
-On Ctrl-D / Ctrl-C exit, after flushing the session, minion now prints
-`resume with: minion --resume <full-id>` in grey — so you can copy-paste
-straight back into the session you just left without running `minion sessions`
+On Ctrl-D / Ctrl-C exit, after flushing the session, afi now prints
+`resume with: afi --resume <full-id>` in grey — so you can copy-paste
+straight back into the session you just left without running `afi sessions`
 first.
 
 ### Fixed — plain `minion` run never saved its session
@@ -603,7 +603,7 @@ array the model sees plus light metadata (id, title, source, cwd, timestamps).
 Greppable, human-readable, and trivially round-trippable. A deliberately
 lightweight take on session persistence — inspired by how Hermes
 (`hermes_state.py`) stores sessions, but flat JSON files instead of SQLite,
-since minion is a single local agent rather than a multi-platform gateway.
+since afi is a single local agent rather than a multi-platform gateway.
 
 **Persistence layer** (new section in `minion.py`):
 - `_write_session(id, messages, meta)` — atomic write (temp file + rename)
@@ -766,7 +766,7 @@ clean slate).
   `MINION_API_KEY` / `MINION_MODEL` vars.
 
 ### Added — `~/.env` auto-loading (`MINION_ENV_FILE`)
-minion now reads `~/.env` at startup (before source discovery) and populates
+afi now reads `~/.env` at startup (before source discovery) and populates
 `os.environ` from it, without clobbering vars already set in the shell.
 Sources, API keys, and other config can live in one place instead of being
 exported in every terminal.
@@ -785,7 +785,7 @@ firing the same nudge repeatedly.
   concrete action"); third is a hard stop ("emit only a tool call now").
   The nudge index is clamped to `len(nudges) - 1`.
 - New `MINION_REASONING_LOOP_RETRIES` env var (default: number of nudges)
-  — after this many cuts, minion stops retrying, prints a "max retries hit"
+  — after this many cuts, afi stops retrying, prints a "max retries hit"
   message, and drops back to the prompt for user input.
 - New `TURN_LOOP_CUT` return status from `model_turn`; the REPL increments
   `reasoning_loop_cuts` and retries with the next nudge (resets to 0 on a
@@ -795,7 +795,7 @@ firing the same nudge repeatedly.
 - New `RUNTIME_NOTE_RE` to clean up stale runtime notes before re-nudging.
 
 ### Added — reasoning-loop milestone warnings
-As "ready-to-act" signals accumulate during reasoning, minion now prints
+As "ready-to-act" signals accumulate during reasoning, afi now prints
 visible warnings at 25 / 50 / 75 / 100% of the cut threshold — so you can
 see the model spiraling before it gets cut, not just at the cut itself.
 
@@ -820,8 +820,8 @@ the standard OpenAI `usage` object (not just llama.cpp's `timings`).
   wall-clock only.
 
 ### Added — `pip install` support
-- New `setup.py` / `pyproject.toml` — registers a `minion` console script
-  pointing at `minion:main()`. `pip install -e .` for editable (picks up
+- New `setup.py` / `pyproject.toml` — registers a `afi` console script
+  pointing at `afi:main()`. `pip install -e .` for editable (picks up
   edits immediately), `pip install .` for non-editable.
 - New `requirements.txt` (`openai>=1.0`).
 
@@ -867,7 +867,7 @@ to context so the model knows what happened on its next turn.
 Reasoning models sometimes spin in place — they keep saying "let me
 implement…" / "start coding…" / "now I'll write the code…" without ever
 emitting content or a tool call, burning tokens and stalling the turn.
-minion counts how many of those "ready to act" phrases appear during the
+afi counts how many of those "ready to act" phrases appear during the
 reasoning phase and, after the threshold, cuts the stream and appends a
 one-shot nudge to the latest user turn telling the model to stop planning
 and take a concrete action.

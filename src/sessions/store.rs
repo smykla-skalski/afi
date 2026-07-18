@@ -82,10 +82,7 @@ pub fn write_session(
     };
 
     let mut data = existing;
-    data.insert(
-        "schema".to_string(),
-        Value::String("minion-rs-1".to_string()),
-    );
+    data.insert("schema".to_string(), Value::String("afi-1".to_string()));
     data.insert("id".to_string(), Value::String(session_id.to_string()));
     data.insert("messages".to_string(), Value::Array(messages.clone()));
     let created_at = data.get("created_at").cloned().unwrap_or(Value::Number(
@@ -211,7 +208,7 @@ mod tests {
         assert_eq!(loaded["messages"], Value::Array(messages));
         assert_eq!(loaded["title"], "greeting");
         assert_eq!(loaded["id"], sid);
-        assert_eq!(loaded["schema"], "minion-rs-1");
+        assert_eq!(loaded["schema"], "afi-1");
     }
 
     #[test]

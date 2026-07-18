@@ -7,18 +7,18 @@
 
 mod common;
 
-use minion::approval::{normalize_approval, ApprovalKind, ApprovalState, Level};
-use minion::banner;
+use afi::approval::{normalize_approval, ApprovalKind, ApprovalState, Level};
+use afi::banner;
 use std::io::Write;
 
-fn build(args: &[&str], env: &[(&str, &str)]) -> minion::Runtime {
+fn build(args: &[&str], env: &[(&str, &str)]) -> afi::Runtime {
     common::build(args, env)
 }
 
 // Default: prompts for everything.
 #[test]
 fn test_default_prompts_for_everything() {
-    let rt = build(&["minion"], &[]);
+    let rt = build(&["afi"], &[]);
     assert!(!rt.approval.yolo);
     assert_eq!(rt.approval.approve_level, None);
     assert_eq!(rt.approval.default_approve_level, None);
@@ -28,7 +28,7 @@ fn test_default_prompts_for_everything() {
 // MINION_APPROVAL env var sets a persistent default.
 #[test]
 fn test_minion_approval_env_sets_persistent_default() {
-    let rt = build(&["minion"], &[("MINION_APPROVAL", "medium")]);
+    let rt = build(&["afi"], &[("MINION_APPROVAL", "medium")]);
     assert!(!rt.approval.yolo);
     assert_eq!(rt.approval.approve_level, Some(Level::Medium));
     assert_eq!(rt.approval.default_approve_level, Some(Level::Medium));
@@ -39,7 +39,7 @@ fn test_minion_approval_env_sets_persistent_default() {
 fn test_minion_approval_can_come_from_env_file() {
     let mut f = tempfile::NamedTempFile::new().unwrap();
     writeln!(f, "MINION_APPROVAL=low").unwrap();
-    let rt = common::build_with_env_file(&["minion"], &[], Some(f.path()));
+    let rt = common::build_with_env_file(&["afi"], &[], Some(f.path()));
     assert!(!rt.approval.yolo);
     assert_eq!(rt.approval.approve_level, Some(Level::Low));
     assert_eq!(rt.approval.default_approve_level, Some(Level::Low));
@@ -49,7 +49,7 @@ fn test_minion_approval_can_come_from_env_file() {
 #[test]
 fn test_cli_approval_overrides_env_yolo() {
     let rt = build(
-        &["minion", "--approval", "low"],
+        &["afi", "--approval", "low"],
         &[("MINION_APPROVAL", "yolo")],
     );
     assert!(!rt.approval.yolo);
@@ -61,7 +61,7 @@ fn test_cli_approval_overrides_env_yolo() {
 #[test]
 fn test_cli_yolo_overrides_approval_level() {
     let rt = build(
-        &["minion", "--approval", "medium", "--yolo"],
+        &["afi", "--approval", "medium", "--yolo"],
         &[("MINION_APPROVAL", "low")],
     );
     assert!(rt.approval.yolo);
@@ -73,7 +73,7 @@ fn test_cli_yolo_overrides_approval_level() {
 #[test]
 fn test_prompt_all_aliases_are_accepted() {
     let rt = build(
-        &["minion", "--approval", "all"],
+        &["afi", "--approval", "all"],
         &[("MINION_APPROVAL", "medium")],
     );
     assert!(!rt.approval.yolo);
@@ -91,7 +91,7 @@ fn test_prompt_all_aliases_are_accepted() {
 // A bad MINION_APPROVAL value doesn't crash; it leaves the default (prompt all).
 #[test]
 fn test_bad_minion_approval_falls_back_safely() {
-    let rt = build(&["minion"], &[("MINION_APPROVAL", "nonsense")]);
+    let rt = build(&["afi"], &[("MINION_APPROVAL", "nonsense")]);
     assert!(!rt.approval.yolo);
     assert_eq!(rt.approval.approve_level, None);
     // ApprovalState::default() is all-None.
@@ -102,7 +102,7 @@ fn test_bad_minion_approval_falls_back_safely() {
 #[test]
 fn test_bad_cli_approval_falls_back_safely() {
     let rt = build(
-        &["minion", "--approval", "nonsense"],
+        &["afi", "--approval", "nonsense"],
         &[("MINION_APPROVAL", "medium")],
     );
     // The env-applied medium survives the bad CLI flag.

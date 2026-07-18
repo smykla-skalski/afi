@@ -1,10 +1,10 @@
-# minion
+# afi
 
-![minion](minion.png)
+![afi](minion.png)
 
 A no-nonsense coding agent that doesn't use 50K tokens of context to say "hello."
 
-`minion` is a Rust binary that talks to any OpenAI-compatible endpoint - a local
+`afi` is a Rust binary that talks to any OpenAI-compatible endpoint - a local
 llama.cpp / vLLM / SGLang server, or a remote API like Z.ai or OpenAI itself -
 and starts chatting with an agent that can read, write, edit, and run shell
 commands in your project.
@@ -26,14 +26,14 @@ cargo install --path .
 export MINION_BASE_URL=http://localhost:8080/v1
 export MINION_MODEL=your-model-name
 export MINION_API_KEY=sk-noop        # any string; local servers ignore it
-minion
+afi
 ```
 
-If `MINION_MODEL` is unset, minion asks the server what it's serving.
+If `MINION_MODEL` is unset, afi asks the server what it's serving.
 
 ## Configuration
 
-minion reads configuration from environment variables, and automatically loads
+afi reads configuration from environment variables, and automatically loads
 `~/.env` at startup (so you don't have to export things in every terminal).
 
 ### Single source (simple)
@@ -94,8 +94,8 @@ Switch at runtime with `/source [name]`.
 
 | subcommand          | what it does                                          |
 | ------------------- | ---------------------------------------------------- |
-| `minion`            | start the REPL                                        |
-| `minion sessions [query]` | list saved sessions, 10 per page (prints + exits); optional substring filter |
+| `afi`               | start the REPL                                        |
+| `afi sessions [query]` | list saved sessions, 10 per page (prints + exits); optional substring filter |
 
 ## Commands
 
@@ -143,7 +143,7 @@ human-readable/greppable.
   `/save <title>`
 - A **short id** (the 6-hex suffix) is shown in listings and accepted by
   `--resume` / `/resume`
-- **Resume** a session at startup with `minion --resume <target>` or mid-chat
+- **Resume** a session at startup with `afi --resume <target>` or mid-chat
   with `/resume <target>`
 
 ## Tools

@@ -33,9 +33,9 @@ pub fn set_title(text: &str) {
     }
 }
 
-/// Set the idle title: "minion idle".
+/// Set the idle title: "afi idle".
 pub fn set_idle_title() {
-    set_title("minion idle");
+    set_title("afi idle");
 }
 
 /// Set the working title with a spinner glyph.
@@ -45,7 +45,7 @@ pub fn set_working_title(frame: usize) {
         .chars()
         .nth(frame % frames.chars().count())
         .unwrap_or('⠋');
-    set_title(&format!("{} minion working", glyph));
+    set_title(&format!("{} afi working", glyph));
 }
 
 // --- char width helpers ------------------------------------------------------

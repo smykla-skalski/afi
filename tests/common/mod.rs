@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use minion::Runtime;
+use afi::Runtime;
 
 /// Build a runtime with a clean env (only the vars you pass in).
 ///

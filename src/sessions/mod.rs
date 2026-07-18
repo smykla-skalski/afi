@@ -1,7 +1,7 @@
 //! Chat-session persistence: one JSON file per session under
 //! `~/.minion/sessions/` (or `MINION_SESSIONS_DIR` / `MINION_HOME`).
 //!
-//! Fresh, version-tagged schema (`"schema": "minion-rs-1"`) - the Python
+//! Fresh, version-tagged schema (`"schema": "afi-1"`) - the Python
 //! version's files will not resume. The file stores the exact `messages`
 //! array the model sees plus a little metadata (id, title, description,
 //! source, cwd, timestamps, optional metrics). Greppable, human-readable,
@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use chrono::Local;
 
-/// Default page size for `minion sessions` / `/sessions`.
+/// Default page size for `afi sessions` / `/sessions`.
 pub const SESSION_LIST_DEFAULT_LIMIT: usize = 10;
 /// Upper bound on the page size (matches the Python `SESSION_LIST_MAX_LIMIT`).
 pub const SESSION_LIST_MAX_LIMIT: usize = 100;

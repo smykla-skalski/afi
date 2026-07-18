@@ -1,10 +1,10 @@
-//! CLI helpers: the `minion sessions` subcommand, `--resume`/`--session`
+//! CLI helpers: the `afi sessions` subcommand, `--resume`/`--session`
 //! resolution, and the listing/transcript printers.
 //!
 //! Two entrypoints:
 //! - `session_id_from_args(args, dir)` — resolves the starting session id
 //!   from `--resume` / `--session` flags (used at startup)
-//! - `cli_sessions(args, dir, out)` — handles `minion sessions [query]` and
+//! - `cli_sessions(args, dir, out)` — handles `afi sessions [query]` and
 //!   returns `true` if it consumed the request (caller should then exit)
 
 use std::io::Write;
@@ -235,7 +235,7 @@ pub fn print_session_list<W: Write>(
     }
 }
 
-/// `minion sessions --page N+1 ...` hint string for the "next page" line.
+/// `afi sessions --page N+1 ...` hint string for the "next page" line.
 pub fn session_next_hint(command: &str, page: usize, limit: usize, query: Option<&str>) -> String {
     let q = query
         .map(|q| format!(" {}", shell_quote(q)))
@@ -308,7 +308,7 @@ pub fn print_transcript<W: Write>(out: &mut W, messages: &[Value], max_chars: us
     printed
 }
 
-/// Handle `minion sessions [query] [--page N] [--limit N]` (or the
+/// Handle `afi sessions [query] [--page N] [--limit N]` (or the
 /// `--sessions` / `ls` / `list` aliases). Returns `true` if this was a
 /// sessions invocation (and `out` has been written); `false` if `args`
 /// isn't a sessions request and the caller should proceed normally.
@@ -363,13 +363,13 @@ pub fn cli_sessions<W: Write>(
     print_session_list(out, &sessions, offset + 1, None);
     let _ = writeln!(
         out,
-        "{DIM}  resume with: minion --resume <n|short-id|title>{RESET}"
+        "{DIM}  resume with: afi --resume <n|short-id|title>{RESET}"
     );
     if has_next {
         let _ = writeln!(
             out,
             "{DIM}  next page: {}{RESET}",
-            session_next_hint("minion sessions", page, limit, query.as_deref())
+            session_next_hint("afi sessions", page, limit, query.as_deref())
         );
     }
     true

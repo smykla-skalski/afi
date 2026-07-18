@@ -30,10 +30,7 @@ pub const RESET: &str = "\x1b[0m";
 pub fn banner(rt: &Runtime) -> String {
     let sep = format!("{DIM} \u{00b7} {RESET}");
     let model = rt.model.clone().unwrap_or_else(|| "auto".to_string());
-    let mut parts = vec![
-        format!("{BOLD}minion{RESET}"),
-        format!("{CYAN}{model}{RESET}"),
-    ];
+    let mut parts = vec![format!("{BOLD}afi{RESET}"), format!("{CYAN}{model}{RESET}")];
     if rt.sources.len() > 1 {
         if let Some(active) = &rt.active {
             parts.push(format!("{MAGENTA}{active}{RESET}"));
@@ -571,7 +568,7 @@ pub fn run_repl(rt: &mut Runtime, env: HashMap<String, String>) {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 // Ctrl+D: exit gracefully.
                 println!();
-                println!("{DIM}  resume with: minion --resume {session_id}{RESET}");
+                println!("{DIM}  resume with: afi --resume {session_id}{RESET}");
                 break;
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
@@ -603,7 +600,7 @@ pub fn run_repl(rt: &mut Runtime, env: HashMap<String, String>) {
                 // Save and exit.
                 let meta = json!({});
                 let _ = sessions::write_session(&dir, &session_id, &mut messages, Some(&meta));
-                println!("{DIM}  resume with: minion --resume {session_id}{RESET}");
+                println!("{DIM}  resume with: afi --resume {session_id}{RESET}");
                 break;
             }
             CommandResult::Continue => {

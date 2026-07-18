@@ -1,14 +1,14 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::Block;
-use ratatui_textarea::{CursorMove, TextArea, WrapMode};
+use ratatui_textarea::{CursorMove, TextArea};
 use throbber_widgets_tui::ThrobberState;
 
 use crate::risk::ApprovalChoice;
-use crate::term::{MessageKind, OutputEvent, StreamKind};
 
+use super::transcript::{self, EntryKind, TranscriptEntry};
 use super::{composer, view};
+
+mod output;
 
 const SCROLL_STEP: usize = 5;
 
@@ -19,19 +19,6 @@ pub enum InputAction {
     Submit(String),
     Quit,
     CancelTask,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EntryKind {
-    User,
-    Message(MessageKind),
-    Stream(StreamKind),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct TranscriptEntry {
-    pub(super) kind: EntryKind,
-    pub(super) text: String,
 }
 
 /// Stateful, terminal-independent REPL presentation model.
@@ -45,15 +32,16 @@ pub struct TuiApp {
     pub(super) throbber: ThrobberState,
     pub(super) approval: Option<String>,
     pub(super) approval_scroll: usize,
+    pub(super) approval_scroll_limit: Option<usize>,
     approval_choice: Option<ApprovalChoice>,
     active_stream: Option<usize>,
     history: Vec<String>,
     history_index: Option<usize>,
     history_draft: Option<TextArea<'static>>,
     pub(super) scroll_from_bottom: usize,
+    pub(super) transcript_scroll_limit: Option<usize>,
     pub(super) transcript_revision: u64,
-    pub(super) rendered_transcript_revision: u64,
-    pub(super) rendered_transcript_lines: usize,
+    pub(super) transcript_view: transcript::ViewCache,
 }
 
 impl TuiApp {
@@ -62,45 +50,23 @@ impl TuiApp {
         Self {
             header: String::new(),
             transcript: Vec::new(),
-            composer: make_composer(Vec::new()),
+            composer: composer::new(),
             composer_view: composer::ViewState::default(),
             activity: None,
             task_running: false,
             throbber: ThrobberState::default(),
             approval: None,
             approval_scroll: 0,
+            approval_scroll_limit: None,
             approval_choice: None,
             active_stream: None,
             history: Vec::new(),
             history_index: None,
             history_draft: None,
             scroll_from_bottom: 0,
+            transcript_scroll_limit: None,
             transcript_revision: 0,
-            rendered_transcript_revision: 0,
-            rendered_transcript_lines: 0,
-        }
-    }
-
-    pub fn apply_output(&mut self, event: OutputEvent) {
-        match event {
-            OutputEvent::Header(text) => self.header = text,
-            OutputEvent::Message { kind, text } => {
-                self.push_entry(EntryKind::Message(kind), text);
-            }
-            OutputEvent::Stream { kind, delta } => self.append_stream(kind, &delta),
-            OutputEvent::StreamFinished => self.active_stream = None,
-            OutputEvent::ToolStarted { name, action } => {
-                self.push_entry(
-                    EntryKind::Message(MessageKind::Tool),
-                    format!("{name}: {action}"),
-                );
-            }
-            OutputEvent::ToolFinished { name, summary } => {
-                self.push_entry(
-                    EntryKind::Message(MessageKind::Tool),
-                    format!("{name}: {summary}"),
-                );
-            }
+            transcript_view: transcript::ViewCache::default(),
         }
     }
 
@@ -109,12 +75,19 @@ impl TuiApp {
     }
 
     pub fn set_activity(&mut self, activity: Option<String>) {
+        let _ = self.set_activity_with_redraw(activity);
+    }
+
+    pub(crate) fn set_activity_with_redraw(&mut self, activity: Option<String>) -> bool {
+        let changed = self.activity != activity;
         self.activity = activity;
+        changed
     }
 
     pub fn set_approval(&mut self, approval: Option<String>) {
         self.approval = approval;
         self.approval_scroll = 0;
+        self.approval_scroll_limit = None;
         self.approval_choice = None;
     }
 
@@ -124,9 +97,15 @@ impl TuiApp {
     }
 
     pub fn tick(&mut self) {
-        if self.is_busy() {
+        if self.should_animate() {
             self.throbber.calc_next();
         }
+    }
+
+    pub(crate) fn handle_key_with_redraw(&mut self, key: KeyEvent) -> (InputAction, bool) {
+        let before = self.input_view();
+        let action = self.handle_key(key);
+        (action, before != self.input_view())
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> InputAction {
@@ -152,34 +131,50 @@ impl TuiApp {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let _ = self.handle_mouse_with_redraw(mouse);
+    }
+
+    pub(crate) fn handle_mouse_with_redraw(&mut self, mouse: MouseEvent) -> bool {
+        let before = (self.scroll_from_bottom, self.approval_scroll);
         match (self.approval.is_some(), mouse.kind) {
             (true, MouseEventKind::ScrollUp) => {
                 self.approval_scroll = self.approval_scroll.saturating_sub(SCROLL_STEP);
             }
             (true, MouseEventKind::ScrollDown) => {
-                self.approval_scroll = self.approval_scroll.saturating_add(SCROLL_STEP);
+                self.scroll_approval_down();
             }
             (false, MouseEventKind::ScrollUp) => self.scroll_up(),
             (false, MouseEventKind::ScrollDown) => self.scroll_down(),
             _ => {}
         }
+        before != (self.scroll_from_bottom, self.approval_scroll)
     }
 
     pub fn paste(&mut self, text: &str) {
+        let _ = self.paste_with_redraw(text);
+    }
+
+    pub(crate) fn paste_with_redraw(&mut self, text: &str) -> bool {
         if self.approval.is_some() || self.task_running {
-            return;
+            return false;
         }
         let before = self.input_text();
         let was_selecting = self.composer.is_selecting();
         let text = composer::normalize_newlines(text);
         let _ = self.composer.insert_str(text.as_ref());
-        if self.input_text() != before || self.composer.is_selecting() != was_selecting {
+        let changed = self.input_text() != before || self.composer.is_selecting() != was_selecting;
+        if changed {
+            self.composer_view.invalidate_layout();
             self.reset_history_navigation();
         }
+        changed
     }
 
     pub fn scroll_up(&mut self) {
-        self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(SCROLL_STEP);
+        let next = self.scroll_from_bottom.saturating_add(SCROLL_STEP);
+        self.scroll_from_bottom = self
+            .transcript_scroll_limit
+            .map_or(next, |limit| next.min(limit));
     }
 
     pub fn scroll_down(&mut self) {
@@ -198,31 +193,18 @@ impl TuiApp {
         self.task_running || self.activity.is_some()
     }
 
-    fn append_stream(&mut self, kind: StreamKind, delta: &str) {
-        if delta.is_empty() {
-            return;
-        }
-        if let Some(index) = self.active_stream
-            && self.transcript[index].kind == EntryKind::Stream(kind)
-        {
-            self.transcript[index].text.push_str(delta);
-            self.transcript_revision = self.transcript_revision.wrapping_add(1);
-            return;
-        }
-        self.transcript.push(TranscriptEntry {
-            kind: EntryKind::Stream(kind),
-            text: delta.to_string(),
-        });
-        self.active_stream = Some(self.transcript.len() - 1);
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    pub(crate) fn should_animate(&self) -> bool {
+        self.is_busy() && self.approval.is_none()
     }
 
-    fn push_entry(&mut self, kind: EntryKind, text: String) {
-        self.active_stream = None;
-        if !text.is_empty() {
-            self.transcript.push(TranscriptEntry { kind, text });
-            self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        }
+    fn input_view(&self) -> (composer::InputView, u64, usize, usize, bool) {
+        (
+            composer::input_view(&self.composer, &self.composer_view),
+            self.transcript_revision,
+            self.scroll_from_bottom,
+            self.approval_scroll,
+            self.approval.is_some(),
+        )
     }
 
     fn handle_approval_key(&mut self, key: KeyEvent) -> InputAction {
@@ -233,7 +215,7 @@ impl TuiApp {
                 return InputAction::None;
             }
             KeyCode::PageDown | KeyCode::Down => {
-                self.approval_scroll = self.approval_scroll.saturating_add(SCROLL_STEP);
+                self.scroll_approval_down();
                 return InputAction::None;
             }
             _ => {}
@@ -259,6 +241,13 @@ impl TuiApp {
             self.scroll_down();
         }
         InputAction::None
+    }
+
+    fn scroll_approval_down(&mut self) {
+        let next = self.approval_scroll.saturating_add(SCROLL_STEP);
+        self.approval_scroll = self
+            .approval_scroll_limit
+            .map_or(next, |limit| next.min(limit));
     }
 
     fn handle_composer_key(&mut self, key: KeyEvent) -> InputAction {
@@ -289,6 +278,7 @@ impl TuiApp {
     fn apply_composer_input(&mut self, key: KeyEvent) {
         let scroll = self.composer_view.key_scroll_delta(key);
         if self.composer.input(key) {
+            self.composer_view.invalidate_layout();
             self.reset_history_navigation();
         }
         self.composer_view.record_scroll(scroll);
@@ -309,6 +299,7 @@ impl TuiApp {
 
     fn insert_newline(&mut self) {
         self.composer.insert_newline();
+        self.composer_view.invalidate_layout();
         self.reset_history_navigation();
     }
 
@@ -370,6 +361,7 @@ impl TuiApp {
         self.composer.set_max_histories(max_histories);
         self.composer.move_cursor(CursorMove::Bottom);
         self.composer.move_cursor(CursorMove::End);
+        self.composer_view.invalidate_layout();
     }
 
     fn reset_history_navigation(&mut self) {
@@ -383,24 +375,4 @@ impl Default for TuiApp {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn make_composer(lines: Vec<String>) -> TextArea<'static> {
-    let mut composer = TextArea::new(lines);
-    composer.set_block(
-        Block::bordered()
-            .title(" Message ")
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
-    composer.set_placeholder_text("Ask afi to inspect or change something…");
-    composer.set_placeholder_style(Style::default().fg(Color::DarkGray));
-    composer.set_cursor_line_style(Style::default());
-    composer.set_cursor_style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    );
-    composer.set_wrap_mode(WrapMode::WordOrGlyph);
-    composer
 }

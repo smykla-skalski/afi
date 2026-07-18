@@ -2,6 +2,7 @@
 
 mod app;
 mod composer;
+mod transcript;
 mod view;
 
 pub use app::{InputAction, TuiApp};
@@ -10,5 +11,7 @@ pub use app::{InputAction, TuiApp};
 mod composer_tests;
 #[cfg(test)]
 mod history_tests;
+#[cfg(test)]
+mod render_tests;
 #[cfg(test)]
 mod tests;

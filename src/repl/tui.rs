@@ -1,6 +1,4 @@
-//! Fullscreen REPL driver. This is the only owner of terminal state, input,
-//! rendering, and the terminal title while the interactive frontend is active.
-
+//! Fullscreen REPL driver and sole owner of interactive terminal state.
 use std::io;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -42,7 +40,7 @@ pub(super) async fn run(rt: Runtime) -> io::Result<Runtime> {
     let mut ui = ChannelUi::new(backend_tx.clone(), backend_notify.clone());
     let core = ReplCore::new(rt, &mut ui);
     let mut driver = Driver::new(core, backend_tx, backend_rx, backend_notify);
-    driver.drain_backend();
+    let _ = driver.drain_backend();
     let loop_result = driver.run(&mut terminal).await;
     if loop_result.is_err() {
         driver.cancel_current();
@@ -133,9 +131,20 @@ impl Driver {
         .await;
         match next {
             update::DriverUpdate::Frame => self.render_frame(terminal)?,
-            update::DriverUpdate::Event(event) => self.handle_event(event)?,
-            update::DriverUpdate::Result(result) => self.handle_result(result),
-            update::DriverUpdate::Backend => self.drain_backend(),
+            update::DriverUpdate::Event(event) => {
+                if self.handle_event(event)? {
+                    self.render_if_requested(terminal)?;
+                }
+            }
+            update::DriverUpdate::Result(result) => {
+                self.handle_result(result);
+                self.render_if_requested(terminal)?;
+            }
+            update::DriverUpdate::Backend => {
+                if self.drain_backend() {
+                    self.render_if_requested(terminal)?;
+                }
+            }
         }
         Ok(())
     }
@@ -148,7 +157,7 @@ impl Driver {
     }
 
     fn render_frame(&mut self, terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
-        if self.app.is_busy() && self.last_throbber.elapsed() >= THROBBER_INTERVAL {
+        if self.app.should_animate() && self.last_throbber.elapsed() >= THROBBER_INTERVAL {
             self.app.tick();
             self.render.request();
             self.last_throbber = Instant::now();
@@ -156,24 +165,30 @@ impl Driver {
         self.render_if_requested(terminal)
     }
 
-    fn handle_event(&mut self, event: Option<io::Result<Event>>) -> io::Result<()> {
-        self.render.request();
-        match event {
+    fn handle_event(&mut self, event: Option<io::Result<Event>>) -> io::Result<bool> {
+        let redraw = match event {
             Some(Ok(Event::Key(key))) => {
-                let action = self.app.handle_key(key);
+                let (action, redraw) = self.app.handle_key_with_redraw(key);
+                let starts_job = matches!(&action, InputAction::Submit(_) | InputAction::Quit);
                 self.resolve_approval();
                 self.handle_action(action);
+                redraw || starts_job
             }
-            Some(Ok(Event::Paste(text))) => self.app.paste(&text),
-            Some(Ok(Event::Mouse(mouse))) => self.app.handle_mouse(mouse),
-            Some(Ok(_)) => {}
+            Some(Ok(Event::Paste(text))) => self.app.paste_with_redraw(&text),
+            Some(Ok(Event::Mouse(mouse))) => self.app.handle_mouse_with_redraw(mouse),
+            Some(Ok(Event::Resize(_, _))) => true,
+            Some(Ok(_)) => false,
             Some(Err(error)) => return Err(error),
             None => {
                 self.input_open = false;
                 self.start_shutdown();
+                true
             }
+        };
+        if redraw {
+            self.render.request();
         }
-        Ok(())
+        Ok(redraw)
     }
 
     fn handle_action(&mut self, action: InputAction) {
@@ -217,32 +232,42 @@ impl Driver {
         );
     }
 
-    fn handle_backend(&mut self, event: BackendEvent) {
-        self.render.request();
+    fn handle_backend(&mut self, event: BackendEvent) -> bool {
         match event {
-            BackendEvent::Output(output) => self.app.apply_output(output),
+            BackendEvent::Output(output) => {
+                if self.app.apply_output_with_redraw(output) {
+                    self.render.request();
+                }
+            }
             BackendEvent::ActivityStarted { label, cancel } => {
                 self.cancel = Some(cancel);
-                self.app.set_activity(Some(label));
+                if self.app.set_activity_with_redraw(Some(label)) {
+                    self.render.request();
+                }
             }
             BackendEvent::ActivityStopped => {
-                self.app.set_activity(None);
+                if self.app.set_activity_with_redraw(None) {
+                    self.render.request();
+                }
             }
             BackendEvent::ApprovalRequested { prompt, reply } => {
-                if approval_is_cancelled(self.shutdown_requested, self.cancel.as_ref()) {
+                if update::approval_is_cancelled(self.shutdown_requested, self.cancel.as_ref()) {
                     let _ = reply.send(ApprovalChoice::Esc);
-                    return;
+                    return false;
                 }
                 self.deny_pending_approval();
                 self.approval_reply = Some(reply);
                 self.app.set_approval(Some(prompt));
+                self.render.request();
+                return true;
             }
         }
+        false
     }
 
     fn handle_result(&mut self, result: Option<WorkerResult>) {
         self.render.request();
-        self.drain_backend();
+        let _ = self.drain_backend();
         let Some(result) = result else {
             self.exit = true;
             return;
@@ -296,13 +321,15 @@ impl Driver {
         self.app.set_approval(None);
     }
 
-    fn drain_backend(&mut self) {
+    fn drain_backend(&mut self) -> bool {
+        let mut urgent = false;
         for _ in 0..BACKEND_CAPACITY {
             let Ok(event) = self.backend_rx.try_recv() else {
                 break;
             };
-            self.handle_backend(event);
+            urgent |= self.handle_backend(event);
         }
+        urgent
     }
 
     fn finish(mut self) -> io::Result<(Runtime, Option<String>)> {
@@ -315,10 +342,6 @@ impl Driver {
             .ok_or_else(|| io::Error::other("REPL worker stopped unexpectedly"))?;
         Ok((core.into_runtime(), self.exit_hint))
     }
-}
-
-fn approval_is_cancelled(shutdown_requested: bool, cancel: Option<&CancellationToken>) -> bool {
-    shutdown_requested || cancel.is_some_and(CancellationToken::is_cancelled)
 }
 
 enum CoreJob {
@@ -394,25 +417,4 @@ fn set_title(title: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn late_approval_is_cancelled_after_job_cancel() {
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        assert!(approval_is_cancelled(false, Some(&cancel)));
-        assert!(approval_is_cancelled(true, None));
-        assert!(!approval_is_cancelled(false, None));
-    }
-
-    #[test]
-    fn repeated_updates_coalesce_into_one_frame() {
-        let mut render = RenderGate::default();
-        render.request();
-        render.request();
-
-        assert!(render.take());
-        assert!(!render.take());
-    }
-}
+mod tests;

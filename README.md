@@ -123,6 +123,7 @@ When stdin and stdout are terminals, afi runs one persistent fullscreen Ratatui 
 - **PageUp/PageDown** or the **mouse wheel** scrolls the conversation or an open approval dialog. The conversation and overflowing composer each show their current position with a scrollbar.
 - **Esc** or **Ctrl+C** requests cancellation of active work; **Ctrl+C** exits while idle.
 - **Y** approves a requested action; **N**, **Enter**, or **Esc** denies or cancels it.
+- Approval requests dim the inactive interface and use an opaque, high-contrast dialog. Long prompts show a scrollbar.
 
 When either stream is not a terminal, afi uses a plain line-oriented interface. It emits no terminal control sequences or prompts to redirected stdout, and non-interactive approval requests deny by default. `--prompt-file <path>` and `--prompt-file -` always use this plain interface.
 

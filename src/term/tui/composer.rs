@@ -4,9 +4,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};
-use ratatui::style::Color;
-use ratatui::widgets::{Clear, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget};
-use ratatui_textarea::{CursorMove, TextArea};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Clear, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget};
+use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
 const MAX_CONTENT_ROWS: usize = 5;
 
@@ -21,6 +21,25 @@ pub(super) struct ViewState {
     scroll_top: usize,
     viewport_height: u16,
     draft_scroll_top: Option<usize>,
+    layout_revision: u64,
+    metrics: Option<CachedMetrics>,
+    #[cfg(test)]
+    measurement_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedMetrics {
+    revision: u64,
+    width: u16,
+    metrics: Metrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InputView {
+    layout_revision: u64,
+    cursor: (usize, usize),
+    selection: Option<((usize, usize), (usize, usize))>,
+    scroll_top: usize,
 }
 
 impl ViewState {
@@ -46,12 +65,61 @@ impl ViewState {
     pub(super) fn restore_draft(&mut self) {
         if let Some(top) = self.draft_scroll_top.take() {
             self.scroll_top = top;
+            self.invalidate_layout();
         }
     }
 
     pub(super) fn clear_draft(&mut self) {
         self.draft_scroll_top = None;
     }
+
+    pub(super) fn invalidate_layout(&mut self) {
+        self.layout_revision = self.layout_revision.wrapping_add(1);
+        self.metrics = None;
+    }
+
+    pub(super) const fn layout_revision(&self) -> u64 {
+        self.layout_revision
+    }
+
+    pub(super) const fn scroll_top(&self) -> usize {
+        self.scroll_top
+    }
+
+    #[cfg(test)]
+    pub(super) const fn measurement_count(&self) -> usize {
+        self.measurement_count
+    }
+}
+
+pub(super) fn input_view(textarea: &TextArea<'_>, state: &ViewState) -> InputView {
+    let cursor = textarea.cursor();
+    InputView {
+        layout_revision: state.layout_revision(),
+        cursor: (cursor.0, cursor.1),
+        selection: textarea.selection_range(),
+        scroll_top: state.scroll_top(),
+    }
+}
+
+pub(super) fn new() -> TextArea<'static> {
+    let mut composer = TextArea::default();
+    composer.set_block(
+        Block::bordered()
+            .title(" Message ")
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    composer.set_placeholder_text("Ask afi to inspect or change something…");
+    composer.set_placeholder_style(Style::default().fg(Color::DarkGray));
+    composer.set_cursor_line_style(Style::default());
+    composer.set_cursor_style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
+    composer.set_wrap_mode(WrapMode::WordOrGlyph);
+    composer
 }
 
 pub(super) fn normalize_newlines(text: &str) -> Cow<'_, str> {
@@ -88,6 +156,30 @@ pub(super) fn measure(textarea: &TextArea<'_>, frame_area: Rect) -> Metrics {
         outer_height: u16::try_from(visible_rows + border_rows).unwrap_or(u16::MAX),
         visual_rows,
     }
+}
+
+pub(super) fn measure_cached(
+    state: &mut ViewState,
+    textarea: &TextArea<'_>,
+    frame_area: Rect,
+) -> Metrics {
+    if let Some(cached) = state.metrics
+        && cached.revision == state.layout_revision
+        && cached.width == frame_area.width
+    {
+        return cached.metrics;
+    }
+    let metrics = measure(textarea, frame_area);
+    state.metrics = Some(CachedMetrics {
+        revision: state.layout_revision,
+        width: frame_area.width,
+        metrics,
+    });
+    #[cfg(test)]
+    {
+        state.measurement_count += 1;
+    }
+    metrics
 }
 
 pub(super) fn render(

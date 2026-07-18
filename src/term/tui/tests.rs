@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -26,6 +26,10 @@ fn mouse(kind: MouseEventKind) -> MouseEvent {
         row: 0,
         modifiers: KeyModifiers::NONE,
     }
+}
+
+fn released(code: KeyCode) -> KeyEvent {
+    KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Release)
 }
 
 fn render(app: &mut TuiApp, width: u16, height: u16) -> Buffer {
@@ -170,6 +174,110 @@ fn mouse_wheel_scrolls_transcript_and_approval() {
 }
 
 #[test]
+fn ignored_input_does_not_request_a_redraw() {
+    let mut app = TuiApp::new();
+    let (_, redraw) = app.handle_key_with_redraw(released(KeyCode::Char('x')));
+    assert!(!redraw);
+    assert!(!app.handle_mouse_with_redraw(mouse(MouseEventKind::Moved)));
+
+    app.set_task_running(true);
+    let (_, redraw) = app.handle_key_with_redraw(key(KeyCode::Char('x')));
+    assert!(!redraw);
+    assert!(!app.paste_with_redraw("blocked"));
+
+    app.set_approval(Some("approve?".to_string()));
+    let (_, redraw) = app.handle_key_with_redraw(key(KeyCode::Char('x')));
+    assert!(!redraw);
+}
+
+#[test]
+fn meaningful_input_requests_a_redraw() {
+    let mut app = TuiApp::new();
+    let (_, redraw) = app.handle_key_with_redraw(key(KeyCode::Char('x')));
+    assert!(redraw);
+    assert!(app.handle_mouse_with_redraw(mouse(MouseEventKind::ScrollUp)));
+    assert!(app.paste_with_redraw(" pasted"));
+}
+
+#[test]
+fn scrolling_against_a_rendered_boundary_skips_redraw() {
+    let mut app = TuiApp::new();
+    app.apply_output(OutputEvent::Message {
+        kind: MessageKind::Info,
+        text: (0..30)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    });
+    app.scroll_from_bottom = usize::MAX;
+    let _ = render(&mut app, 40, 12);
+    assert!(!app.handle_mouse_with_redraw(mouse(MouseEventKind::ScrollUp)));
+
+    app.set_approval(Some(
+        (0..30)
+            .map(|line| format!("part {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
+    app.approval_scroll = usize::MAX;
+    let _ = render(&mut app, 40, 12);
+    assert!(!app.handle_mouse_with_redraw(mouse(MouseEventKind::ScrollDown)));
+    let (_, redraw) = app.handle_key_with_redraw(key(KeyCode::PageDown));
+    assert!(!redraw);
+}
+
+#[test]
+fn new_output_reopens_scroll_before_the_coalesced_frame() {
+    let mut app = TuiApp::new();
+    app.apply_output(OutputEvent::Message {
+        kind: MessageKind::Info,
+        text: "short".to_string(),
+    });
+    let _ = render(&mut app, 40, 12);
+    assert_eq!(app.transcript_scroll_limit, Some(0));
+
+    app.apply_output(OutputEvent::Message {
+        kind: MessageKind::Info,
+        text: (0..30)
+            .map(|line| format!("new line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    });
+    assert!(app.handle_mouse_with_redraw(mouse(MouseEventKind::ScrollUp)));
+    let _ = render(&mut app, 40, 12);
+    assert_eq!(app.scroll_from_bottom, 5);
+}
+
+#[test]
+fn pending_output_combines_existing_anchor_with_new_scroll() {
+    let mut app = TuiApp::new();
+    app.apply_output(OutputEvent::Message {
+        kind: MessageKind::Info,
+        text: (0..30)
+            .map(|line| format!("old line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    });
+    let _ = render(&mut app, 40, 12);
+    app.scroll_up();
+    let _ = render(&mut app, 40, 12);
+    let old_limit = app.transcript_scroll_limit.unwrap();
+
+    app.apply_output(OutputEvent::Message {
+        kind: MessageKind::Info,
+        text: (0..10)
+            .map(|line| format!("new line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    });
+    app.scroll_up();
+    let _ = render(&mut app, 40, 12);
+    let growth = app.transcript_scroll_limit.unwrap() - old_limit;
+
+    assert_eq!(app.scroll_from_bottom, 10 + growth);
+}
+
+#[test]
 fn transcript_scroll_is_clamped_after_render() {
     let mut app = TuiApp::new();
     app.apply_output(OutputEvent::Message {
@@ -249,64 +357,6 @@ fn main_regions_render_in_vertical_order() {
     assert!(transcript < status);
     assert!(status < composer);
     assert!(composer < footer);
-}
-
-#[test]
-fn spinner_tick_only_changes_status_region() {
-    let mut app = TuiApp::new();
-    app.apply_output(OutputEvent::Message {
-        kind: MessageKind::Info,
-        text: "stable transcript".to_string(),
-    });
-    app.paste("stable input");
-    app.set_activity(Some("thinking".to_string()));
-    let before = render(&mut app, 60, 18);
-    app.tick();
-    let after = render(&mut app, 60, 18);
-    let status = areas(&app, Rect::new(0, 0, 60, 18)).status;
-
-    let mut changes = 0;
-    for y in 0..18 {
-        for x in 0..60 {
-            if before[(x, y)] != after[(x, y)] {
-                changes += 1;
-                assert!(x >= status.x && x < status.right());
-                assert!(y >= status.y && y < status.bottom());
-            }
-        }
-    }
-    assert!(changes > 0);
-}
-
-#[test]
-fn approval_modal_renders_over_base_view() {
-    let mut app = TuiApp::new();
-    app.apply_output(OutputEvent::Message {
-        kind: MessageKind::Info,
-        text: "base transcript".to_string(),
-    });
-    app.set_approval(Some("Allow write_file?".to_string()));
-    let buffer = render(&mut app, 60, 18);
-    assert!(marker_row(&buffer, "Approval required") > 0);
-    assert!(marker_row(&buffer, "Allow write_file?") > 0);
-}
-
-#[test]
-fn long_approval_prompt_can_scroll_to_suffix() {
-    let mut app = TuiApp::new();
-    let prompt = (0..20)
-        .map(|index| format!("command part {index}"))
-        .chain(["DANGEROUS-SUFFIX".to_string()])
-        .collect::<Vec<_>>()
-        .join("\n");
-    app.set_approval(Some(prompt));
-    let first = render(&mut app, 50, 12);
-    assert!(!(0..first.area.height).any(|y| row(&first, y).contains("DANGEROUS-SUFFIX")));
-    for _ in 0..10 {
-        let _ = app.handle_key(key(KeyCode::PageDown));
-    }
-    let scrolled = render(&mut app, 50, 12);
-    assert!((0..scrolled.area.height).any(|y| row(&scrolled, y).contains("DANGEROUS-SUFFIX")));
 }
 
 #[test]

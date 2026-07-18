@@ -3,13 +3,12 @@ use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Shadow, Wrap,
 };
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber};
 
-use crate::term::{MessageKind, StreamKind};
-
-use super::app::{EntryKind, TranscriptEntry, TuiApp};
+use super::app::TuiApp;
 use super::composer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +21,7 @@ pub(super) struct LayoutAreas {
 }
 
 pub(super) fn render(frame: &mut Frame, app: &mut TuiApp) {
-    let metrics = composer::measure(&app.composer, frame.area());
+    let metrics = composer::measure_cached(&mut app.composer_view, &app.composer, frame.area());
     let areas = layout_areas(frame.area(), metrics.outer_height);
     render_header(frame, app, areas.header);
     render_transcript(frame, app, areas.transcript);
@@ -101,6 +100,7 @@ fn render_header(frame: &mut Frame, app: &TuiApp, area: Rect) {
 
 fn render_transcript(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     if area.is_empty() {
+        app.transcript_scroll_limit = Some(0);
         return;
     }
     let block = Block::bordered()
@@ -115,29 +115,25 @@ fn render_transcript(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         area
     };
     if inner.is_empty() {
+        app.transcript_scroll_limit = Some(0);
         return;
     }
-    let paragraph = Paragraph::new(transcript_text(&app.transcript)).wrap(Wrap { trim: false });
-    let line_count = paragraph.line_count(inner.width);
-    let last_page = line_count.saturating_sub(usize::from(inner.height));
-    if app.scroll_from_bottom > 0 && app.rendered_transcript_revision != app.transcript_revision {
-        let appended_lines = line_count.saturating_sub(app.rendered_transcript_lines);
-        app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(appended_lines);
-    }
-    app.rendered_transcript_revision = app.transcript_revision;
-    app.rendered_transcript_lines = line_count;
-    app.scroll_from_bottom = app.scroll_from_bottom.min(last_page);
-    let top = last_page.saturating_sub(app.scroll_from_bottom);
-    let scroll = u16::try_from(top).unwrap_or(u16::MAX);
-    frame.render_widget(paragraph.scroll((scroll, 0)), inner);
-    if last_page > 0 && bordered {
+    let viewport = app.transcript_view.render(
+        frame,
+        &app.transcript,
+        app.transcript_revision,
+        inner,
+        &mut app.scroll_from_bottom,
+    );
+    app.transcript_scroll_limit = Some(viewport.last_page);
+    if viewport.last_page > 0 && bordered {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
             .track_symbol(None)
             .thumb_style(Color::DarkGray);
-        let mut state = ScrollbarState::new(last_page.saturating_add(1))
-            .position(top)
+        let mut state = ScrollbarState::new(viewport.last_page.saturating_add(1))
+            .position(viewport.top)
             .viewport_content_length(usize::from(inner.height));
         frame.render_stateful_widget(
             scrollbar,
@@ -147,72 +143,6 @@ fn render_transcript(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
             }),
             &mut state,
         );
-    }
-}
-
-fn transcript_text(entries: &[TranscriptEntry]) -> Text<'_> {
-    let mut lines = Vec::new();
-    for entry in entries {
-        if !lines.is_empty() {
-            lines.push(Line::default());
-        }
-        append_entry_lines(&mut lines, entry);
-    }
-    if lines.is_empty() {
-        lines.push(Line::styled(
-            "No messages yet.",
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    Text::from(lines)
-}
-
-fn append_entry_lines<'a>(lines: &mut Vec<Line<'a>>, entry: &'a TranscriptEntry) {
-    let (label, style, markdown) = entry_format(entry.kind);
-    let content = if markdown {
-        tui_markdown::from_str(&entry.text)
-    } else {
-        Text::from(entry.text.as_str())
-    };
-    let content_lines = if content.lines.is_empty() {
-        vec![Line::default()]
-    } else {
-        content.lines
-    };
-    for (index, line) in content_lines.into_iter().enumerate() {
-        let prefix = if index == 0 {
-            format!("{label:<11}")
-        } else {
-            " ".repeat(11)
-        };
-        let mut spans = Vec::with_capacity(line.spans.len() + 1);
-        spans.push(Span::styled(prefix, style));
-        spans.extend(line.spans);
-        lines.push(Line {
-            style: line.style,
-            alignment: line.alignment,
-            spans,
-        });
-    }
-}
-
-fn entry_format(kind: EntryKind) -> (&'static str, Style, bool) {
-    let normal = Style::default();
-    match kind {
-        EntryKind::User => ("you", normal.fg(Color::Cyan).bold(), false),
-        EntryKind::Message(MessageKind::Info) => ("info", normal.fg(Color::Gray), false),
-        EntryKind::Message(MessageKind::Warning) => ("warning", normal.fg(Color::Yellow), false),
-        EntryKind::Message(MessageKind::Error) => ("error", normal.fg(Color::Red).bold(), false),
-        EntryKind::Message(MessageKind::Stats) => ("stats", normal.fg(Color::DarkGray), false),
-        EntryKind::Message(MessageKind::Tool) => ("tool", normal.fg(Color::Magenta), false),
-        EntryKind::Stream(StreamKind::Assistant) => {
-            ("assistant", normal.fg(Color::Green).bold(), true)
-        }
-        EntryKind::Stream(StreamKind::Reasoning) => (
-            "reasoning",
-            normal.fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-            false,
-        ),
     }
 }
 
@@ -258,7 +188,7 @@ fn render_approval(frame: &mut Frame, app: &mut TuiApp) {
         return;
     };
     let outer = frame.area();
-    let width = outer.width.saturating_sub(2).clamp(1, 80);
+    let width = popup_extent(outer.width).min(80);
     let text = Text::from(prompt);
     let measured = Paragraph::new(text.clone())
         .wrap(Wrap { trim: false })
@@ -266,28 +196,73 @@ fn render_approval(frame: &mut Frame, app: &mut TuiApp) {
     let desired_height = u16::try_from(measured.saturating_add(2))
         .unwrap_or(u16::MAX)
         .max(5);
-    let height = desired_height.min(outer.height.saturating_sub(2).max(1));
+    let height = desired_height.min(popup_extent(outer.height));
     let area = centered_rect(outer, width, height);
     if area.is_empty() {
         return;
     }
+    frame.render_widget(
+        Block::default().style(Style::default().add_modifier(Modifier::DIM)),
+        outer,
+    );
     frame.render_widget(Clear, area);
     let visible_height = usize::from(area.height.saturating_sub(2));
     let max_scroll = measured.saturating_sub(visible_height);
     app.approval_scroll = app.approval_scroll.min(max_scroll);
+    app.approval_scroll_limit = Some(max_scroll);
     let scroll = u16::try_from(app.approval_scroll).unwrap_or(u16::MAX);
+    let surface = Style::default().fg(Color::White).bg(Color::Black);
+    let accent = Style::default()
+        .fg(Color::Yellow)
+        .bg(Color::Black)
+        .add_modifier(Modifier::BOLD);
     frame.render_widget(
         Paragraph::new(text)
+            .style(surface)
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
             .block(
                 Block::bordered()
+                    .border_type(BorderType::Thick)
+                    .style(surface)
+                    .border_style(accent)
+                    .title_style(accent)
                     .title(" Approval required ")
                     .title_bottom(" Y yes · N no · Esc cancel · PgUp/PgDown ")
-                    .border_style(Style::default().fg(Color::Yellow)),
+                    .shadow(
+                        Shadow::dark_shade()
+                            .style(Style::default().fg(Color::DarkGray).bg(Color::Black)),
+                    ),
             ),
         area,
     );
+    if max_scroll > 0 {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_style(accent);
+        let mut state = ScrollbarState::new(max_scroll.saturating_add(1))
+            .position(app.approval_scroll)
+            .viewport_content_length(visible_height);
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut state,
+        );
+    }
+}
+
+fn popup_extent(total: u16) -> u16 {
+    if total >= 7 {
+        total.saturating_sub(2)
+    } else {
+        total
+    }
+    .max(1)
 }
 
 fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {

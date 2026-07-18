@@ -35,3 +35,9 @@ run = "./scripts/check-rust-source-size.sh"
 [tasks.check]
 description = "Aggregate strict validation gate: format, clippy, source size, tests"
 depends = ["fmt:check", "check:rust", "check:source-size", "test"]
+
+[tasks.install]
+description = "Install the current afi binary into the standard Cargo bin directory for terminal use"
+# --path . installs this local package; --locked pins to Cargo.lock; --force
+# overwrites any previously installed afi safely; --bin afi selects the binary.
+run = "cargo install --path . --locked --force --bin afi"

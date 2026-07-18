@@ -11,6 +11,7 @@ use minion::Runtime;
 /// `args` is argv including argv[0] (typically `"minion"`). `env` is the
 /// starting env; no `MINION_*` vars leak from the shell. `env_file` is
 /// optional - pass `Some(path)` to exercise the `~/.env` loader.
+#[allow(dead_code)]
 pub fn build(args: &[&str], env: &[(&str, &str)]) -> Runtime {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let env_map: HashMap<String, String> = env

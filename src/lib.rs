@@ -12,6 +12,7 @@ pub mod log;
 pub mod prompt;
 pub mod repl;
 pub mod sessions;
+pub mod tools;
 pub mod util;
 
 pub use approval::{ApprovalKind, ApprovalState, Level};

@@ -1,8 +1,11 @@
 //! Context compression: fold older turns into a summary, keep the last N
 //! verbatim. Manual `/compress` keeps 2; auto-compress keeps ~⅓.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
+
+mod auto;
+pub use auto::maybe_autocompress;
 
 /// How many recent turns to leave untouched in a manual `/compress`.
 pub const COMPRESS_KEEP: usize = 2;
@@ -204,40 +207,6 @@ fn render_tool_call(tc: &Value) -> Option<String> {
     Some(format!("{name}({args})"))
 }
 
-/// Silently compress when context usage crosses the `autocompress_percent`
-/// threshold. Returns `true` if a compression happened.
-///
-/// `compress_fn` is the closure that does the actual compression (abstracted
-/// so this is testable without a live server).
-pub fn maybe_autocompress<F>(
-    messages: &mut Vec<Value>,
-    prompt_tokens: u64,
-    autocompress_percent: u32,
-    context_window: Option<u64>,
-    compress_fn: F,
-) -> bool
-where
-    F: FnOnce(&mut Vec<Value>) -> Option<CompressResult>,
-{
-    if autocompress_percent == 0 {
-        return false;
-    }
-    if prompt_tokens == 0 {
-        return false;
-    }
-    let mx = match context_window {
-        Some(m) if m > 0 => m,
-        _ => return false,
-    };
-    // Compress once prompt_tokens reaches autocompress_percent of the window.
-    // Integer math avoids u64 -> f64 precision loss: tokens/mx*100 >= pct is
-    // equivalent to tokens*100 >= pct*mx (u128 guards the multiplication).
-    if u128::from(prompt_tokens) * 100 < u128::from(autocompress_percent) * u128::from(mx) {
-        return false;
-    }
-    compress_fn(messages).is_some()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,14 +253,16 @@ mod tests {
         });
         let result = result.unwrap();
         assert_eq!(result.summarized_n, 4); // 4 head messages summarized
-                                            // Should have system + summary + last 2 turns
+        // Should have system + summary + last 2 turns
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[1]["role"], "user");
-        assert!(messages[1]["content"]
-            .as_str()
-            .unwrap()
-            .contains("summary of earlier"));
+        assert!(
+            messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("summary of earlier")
+        );
     }
 
     #[test]

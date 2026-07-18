@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::fs;
 
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::LazyLock;
 
 /// The names of all registered tools, in dispatch order.

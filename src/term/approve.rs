@@ -48,10 +48,10 @@ impl Drop for RawGuard {
 fn read_choice() -> io::Result<ApprovalChoice> {
     let _raw = RawGuard::enter()?;
     loop {
-        if let Event::Key(key) = event::read()? {
-            if let Some(choice) = classify_key(key) {
-                return Ok(choice);
-            }
+        if let Event::Key(key) = event::read()?
+            && let Some(choice) = classify_key(key)
+        {
+            return Ok(choice);
         }
     }
 }

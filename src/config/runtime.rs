@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::path::Path;
 
-use crate::approval::{apply_approval, approval_display, normalize_approval, ApprovalState};
+use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
 use crate::envfile;
 
-use super::{build_http_headers, parse_extra_body, Source};
+use super::{Source, build_http_headers, parse_extra_body};
 
 // --- Runtime -----------------------------------------------------------------
 

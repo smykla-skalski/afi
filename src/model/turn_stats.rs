@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::metrics::abbr;
-use crate::model::recovery::{nudge_current_user_turn, FORCED_FINAL_NUDGE};
+use crate::model::recovery::{FORCED_FINAL_NUDGE, nudge_current_user_turn};
 use crate::model::turn_dispatch::ToolCallAccum;
 use crate::model::{ModelConfig, TURN_DONE, TURN_FORCE_FINAL};
 

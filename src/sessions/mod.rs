@@ -11,7 +11,7 @@ pub mod store;
 pub mod summary;
 
 pub use store::{delete_session, load_session, session_files_newest, write_session};
-pub use summary::{list_sessions, resolve_session, session_summary_from_file, SessionSummary};
+pub use summary::{SessionSummary, list_sessions, resolve_session, session_summary_from_file};
 
 use std::collections::HashMap;
 use std::path::PathBuf;

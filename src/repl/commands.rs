@@ -3,17 +3,17 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::runtime::Runtime as TokioRuntime;
 
-use super::{banner, run_turn_loop, TurnParams, CYAN, DIM, GREEN, MAGENTA, RED, RESET, YELLOW};
+use super::{CYAN, DIM, GREEN, MAGENTA, RED, RESET, TurnParams, YELLOW, banner, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
 use crate::config::{Runtime, Source};
 use crate::memory::{list_memories, remember_memories};
+use crate::model::ModelConfig;
 use crate::model::client::{ChatClient, ReqwestClient};
 use crate::model::compress::COMPRESS_KEEP;
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
-use crate::model::ModelConfig;
 use crate::prompt::SYSTEM;
 use crate::sessions::{self, new_session_id, resolve_session};
 

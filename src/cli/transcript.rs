@@ -27,19 +27,20 @@ pub fn print_transcript<W: Write>(out: &mut W, messages: &[Value], max_chars: us
 /// A one-line recap of a message's content (tool-call names, joined text
 /// parts, or the plain string content).
 fn message_recap(m: &Value) -> String {
-    if m.get("content").is_none() && m.get("tool_calls").is_some() {
-        if let Some(arr) = m.get("tool_calls").and_then(|t| t.as_array()) {
-            let names: Vec<String> = arr
-                .iter()
-                .filter_map(|tc| {
-                    tc.get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(|n| n.as_str())
-                        .map(|n| format!("{n}(...)"))
-                })
-                .collect();
-            return format!("\u{2192} {}", names.join(", "));
-        }
+    if m.get("content").is_none()
+        && m.get("tool_calls").is_some()
+        && let Some(arr) = m.get("tool_calls").and_then(|t| t.as_array())
+    {
+        let names: Vec<String> = arr
+            .iter()
+            .filter_map(|tc| {
+                tc.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|n| format!("{n}(...)"))
+            })
+            .collect();
+        return format!("\u{2192} {}", names.join(", "));
     }
     if let Some(Value::Array(parts)) = m.get("content") {
         return parts

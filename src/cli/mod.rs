@@ -18,8 +18,8 @@ use crate::util::now_secs_f64;
 
 use crate::repl::{DIM, GREEN, MAGENTA, RESET, YELLOW};
 use crate::sessions::{
-    list_sessions, resolve_session, sessions_dir, SessionSummary, SESSION_LIST_DEFAULT_LIMIT,
-    SESSION_LIST_MAX_LIMIT,
+    SESSION_LIST_DEFAULT_LIMIT, SESSION_LIST_MAX_LIMIT, SessionSummary, list_sessions,
+    resolve_session, sessions_dir,
 };
 use std::collections::HashMap;
 use std::hash::BuildHasher;

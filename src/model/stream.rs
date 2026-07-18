@@ -80,17 +80,16 @@ pub fn normalize_usage(
     fallback_chars: u64,
 ) -> Option<NormalizedUsage> {
     // llama.cpp: no `usage`, but a `timings` object with prompt_n / predicted_n / cache_n.
-    if usage.is_none() {
-        if let Some(t) = timings {
-            if t.predicted_n > 0 {
-                return Some(NormalizedUsage {
-                    input_tokens: t.prompt_n.saturating_sub(t.cache_n),
-                    output_tokens: t.predicted_n,
-                    cache_read_tokens: t.cache_n,
-                    reasoning_tokens: 0,
-                });
-            }
-        }
+    if usage.is_none()
+        && let Some(t) = timings
+        && t.predicted_n > 0
+    {
+        return Some(NormalizedUsage {
+            input_tokens: t.prompt_n.saturating_sub(t.cache_n),
+            output_tokens: t.predicted_n,
+            cache_read_tokens: t.cache_n,
+            reasoning_tokens: 0,
+        });
     }
 
     if let Some(u) = usage {

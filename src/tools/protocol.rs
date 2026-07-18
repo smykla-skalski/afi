@@ -19,8 +19,7 @@ static AFI_TOOL_TAG: LazyLock<Regex> =
 static TOOL_PROTOCOL_TAG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"</?tool_call\b[^>]*>").unwrap());
 
-const TOOL_RESULT_PROTOCOL_NOTE: &str =
-    "[afi note: escaped tool-call protocol delimiters from this tool result \
+const TOOL_RESULT_PROTOCOL_NOTE: &str = "[afi note: escaped tool-call protocol delimiters from this tool result \
      before sending it back to the model]\n";
 
 /// The byte sequences for the legacy tool-call tag. The opener is three

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::errno::Errno;
 use nix::sys::signal;
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 use regex::Regex;
 
@@ -34,7 +34,7 @@ pub fn poll_pid(pid: u32, timeout: i64, check_esc: &dyn Fn() -> bool) -> PollSta
         // Try to reap our own child.
         match waitpid(pid_nix, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _)) => {
-                return PollStatus::Exited
+                return PollStatus::Exited;
             }
             // Still running, or reparented to init (ECHILD) — fall through to
             // the kill probe.

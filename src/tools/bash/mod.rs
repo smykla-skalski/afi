@@ -26,7 +26,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 mod logs;
-pub use logs::{delete_old_bg_logs, find_bg_log_for_pid, poll_pid, read_log, PollStatus};
+pub use logs::{PollStatus, delete_old_bg_logs, find_bg_log_for_pid, poll_pid, read_log};
 
 /// Default poll window for `run_bash` (~3 s). Override with
 /// `AFI_BASH_POLL_SECONDS`.
@@ -244,11 +244,14 @@ pub fn wait_background<S: BuildHasher>(
         ),
         PollStatus::Timeout => {
             format!(
-            "[timeout after {}s] PID {} still running. Check output so far with read_file('{}')",
-            timeout,
-            pid,
-            log_path.canonicalize().unwrap_or_else(|_| log_path.clone()).display()
-        )
+                "[timeout after {}s] PID {} still running. Check output so far with read_file('{}')",
+                timeout,
+                pid,
+                log_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| log_path.clone())
+                    .display()
+            )
         }
         PollStatus::Exited => {
             thread::sleep(Duration::from_millis(200));

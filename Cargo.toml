@@ -1,7 +1,7 @@
 [package]
 name = "afi"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Sentdex", "smykla-skalski"]
 license = "MIT"
 description = "A deliberately tiny coding agent for self-hosted or remote models."

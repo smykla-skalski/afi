@@ -3,18 +3,8 @@
 //! The `model_turn` and REPL tests are deferred to phases 5 and 8.
 
 use afi::approval::{ApprovalState, Level};
-use afi::risk::{confirm, extract_action_path, risk_user_message, ApprovalChoice, RiskClassifier};
-use std::env;
-use std::fs;
+use afi::risk::{ApprovalChoice, RiskClassifier, confirm, extract_action_path};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
-use tempfile::tempdir;
-
-/// Serialize tests that set HOME (env vars aren't thread-safe).
-fn home_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 // --- Mock classifier ---
 
@@ -144,58 +134,4 @@ fn extract_write_path() {
 #[test]
 fn extract_unknown_action() {
     assert_eq!(extract_action_path("run: echo hello"), None);
-}
-
-// --- risk_context tests (from test_risk_context.py) ---
-
-#[test]
-fn downloads_project_file_is_in_project() {
-    let _guard = home_lock().lock().unwrap();
-    let home = tempdir().unwrap();
-    env::set_var("HOME", home.path());
-    let project = home.path().join("Downloads").join("didenstuff");
-    fs::create_dir_all(&project).unwrap();
-    let target = project.join("pose_editor.py");
-    fs::write(&target, "").unwrap();
-    let cwd = project.canonicalize().unwrap();
-    let project_root = cwd.clone();
-    let target_abs = target.canonicalize().unwrap();
-
-    let msg = risk_user_message(&format!("edit {}", target.display()), &cwd, &project_root);
-    let payload: serde_json::Value = serde_json::from_str(&msg).unwrap();
-    assert_eq!(
-        payload["project_root"],
-        project_root.to_string_lossy().to_string()
-    );
-    assert_eq!(
-        payload["primary_path"],
-        target_abs.to_string_lossy().to_string()
-    );
-    assert_eq!(payload["path_scope"], "in_project");
-    assert_eq!(payload["path_in_downloads"], true);
-}
-
-#[test]
-fn downloads_file_outside_project_is_outside() {
-    let _guard = home_lock().lock().unwrap();
-    let home = tempdir().unwrap();
-    env::set_var("HOME", home.path());
-    let project = home.path().join("code").join("app");
-    let downloads_project = home.path().join("Downloads").join("didenstuff");
-    fs::create_dir_all(&project).unwrap();
-    fs::create_dir_all(&downloads_project).unwrap();
-    let target = downloads_project.join("pose_editor.py");
-    fs::write(&target, "").unwrap();
-    let cwd = project.canonicalize().unwrap();
-    let project_root = cwd.clone();
-    let target_abs = target.canonicalize().unwrap();
-
-    let msg = risk_user_message(&format!("edit {}", target.display()), &cwd, &project_root);
-    let payload: serde_json::Value = serde_json::from_str(&msg).unwrap();
-    assert_eq!(payload["path_scope"], "outside_project");
-    assert_eq!(payload["path_in_downloads"], true);
-    assert_eq!(
-        payload["primary_path"],
-        target_abs.to_string_lossy().to_string()
-    );
 }

@@ -84,13 +84,13 @@ fn read_multiline_tui(prompt: &str, history: &mut Vec<String>) -> io::Result<Str
         MoveTo(vp.x, vp.y),
         Clear(ClearType::FromCursorDown)
     );
-    if let Ok(text) = &outcome {
-        if !text.is_empty() {
-            drop(terminal);
-            drop(guard);
-            println!("{prompt}{text}");
-            return outcome;
-        }
+    if let Ok(text) = &outcome
+        && !text.is_empty()
+    {
+        drop(terminal);
+        drop(guard);
+        println!("{prompt}{text}");
+        return outcome;
     }
     outcome
 }

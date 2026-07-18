@@ -158,16 +158,16 @@ impl ChatClient for ReqwestClient {
         if let Some(tc) = tool_choice {
             body["tool_choice"] = tc.clone();
         }
-        if let Some(mt) = max_tokens {
-            if mt > 0 {
-                body["max_tokens"] = Value::from(mt);
-            }
+        if let Some(mt) = max_tokens
+            && mt > 0
+        {
+            body["max_tokens"] = Value::from(mt);
         }
-        if let Some(eb) = extra_body {
-            if let (Some(a), Some(b)) = (eb.as_object(), body.as_object_mut()) {
-                for (k, v) in a {
-                    b.insert(k.clone(), v.clone());
-                }
+        if let Some(eb) = extra_body
+            && let (Some(a), Some(b)) = (eb.as_object(), body.as_object_mut())
+        {
+            for (k, v) in a {
+                b.insert(k.clone(), v.clone());
             }
         }
 
@@ -208,11 +208,11 @@ impl ChatClient for ReqwestClient {
             "messages": messages,
             "stream": false,
         });
-        if let Some(eb) = extra_body {
-            if let (Some(a), Some(b)) = (eb.as_object(), body.as_object_mut()) {
-                for (k, v) in a {
-                    b.insert(k.clone(), v.clone());
-                }
+        if let Some(eb) = extra_body
+            && let (Some(a), Some(b)) = (eb.as_object(), body.as_object_mut())
+        {
+            for (k, v) in a {
+                b.insert(k.clone(), v.clone());
             }
         }
         let mut req = self

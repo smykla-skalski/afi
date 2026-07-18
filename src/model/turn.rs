@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::approval::ApprovalState;
 use crate::config::Source;
@@ -20,14 +20,14 @@ use crate::model::recovery::recovery_sampling_opts;
 use crate::model::stream::StreamChunk;
 use crate::model::turn_finalize::finalize_turn;
 use crate::model::turn_stats::handle_reasoning_stall;
-use crate::model::turn_stream::{accumulate, StreamResult};
-use crate::model::{ModelConfig, FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, TURN_DONE, TURN_ESC};
+use crate::model::turn_stream::{StreamResult, accumulate};
+use crate::model::{FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, ModelConfig, TURN_DONE, TURN_ESC};
 use crate::risk::RiskClassifier;
-use crate::term::activity::{run_during_generation, Generation};
+use crate::term::activity::{Generation, run_during_generation};
 use crate::term::interrupt::InterruptWatcher;
 use crate::tools;
 
-pub use crate::model::turn_loop::{run_model_turn_loop, LoopRequest};
+pub use crate::model::turn_loop::{LoopRequest, run_model_turn_loop};
 
 /// Bundles the parameters for a single model turn.
 pub struct TurnRequest<'a> {

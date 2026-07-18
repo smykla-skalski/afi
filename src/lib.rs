@@ -29,7 +29,7 @@ pub use approval::{ApprovalKind, ApprovalState, Level};
 pub use config::{Runtime, Source};
 pub use repl::banner;
 pub use sessions::{
-    delete_session, list_sessions, load_session, new_session_id, resolve_session, safe_title,
-    session_summary_from_file, short_id, write_session, SessionSummary, SESSION_LIST_DEFAULT_LIMIT,
-    SESSION_LIST_MAX_LIMIT,
+    SESSION_LIST_DEFAULT_LIMIT, SESSION_LIST_MAX_LIMIT, SessionSummary, delete_session,
+    list_sessions, load_session, new_session_id, resolve_session, safe_title,
+    session_summary_from_file, short_id, write_session,
 };

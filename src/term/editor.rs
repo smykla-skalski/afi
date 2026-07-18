@@ -11,12 +11,12 @@
 //! wide (CJK) glyphs never split - the old raw-ANSI editor byte-sliced at
 //! `cursor + 1` and panicked on any non-ASCII character.
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph};
-use ratatui::Frame;
 
 use crate::term::char_width;
 use std::mem;
@@ -265,8 +265,8 @@ fn wrap(buffer: &str, cursor: usize, width: usize) -> (Vec<String>, usize, usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

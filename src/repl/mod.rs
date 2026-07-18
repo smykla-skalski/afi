@@ -4,8 +4,8 @@
 
 mod commands;
 
-use commands::handle_slash_command;
 pub use commands::CommandResult;
+use commands::handle_slash_command;
 
 use std::collections::HashMap;
 use std::env;
@@ -13,18 +13,18 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::approval::{ApprovalState, Level};
 use crate::cli::session_id_from_args;
 use crate::config::{Runtime, Source};
 use crate::log::log_event;
-use crate::model::client::ReqwestClient;
-use crate::model::turn::{run_model_turn_loop, LoopRequest};
 use crate::model::ModelConfig;
+use crate::model::client::ReqwestClient;
+use crate::model::turn::{LoopRequest, run_model_turn_loop};
 use crate::prompt::SYSTEM;
-use crate::risk::{detect_project_root, HighDefaultClassifier};
+use crate::risk::{HighDefaultClassifier, detect_project_root};
 use crate::sessions::{self, new_session_id, safe_title};
 use crate::term;
 
@@ -45,10 +45,10 @@ pub fn banner(rt: &Runtime) -> String {
     let sep = format!("{DIM} \u{00b7} {RESET}");
     let model = rt.model.clone().unwrap_or_else(|| "auto".to_string());
     let mut parts = vec![format!("{BOLD}afi{RESET}"), format!("{CYAN}{model}{RESET}")];
-    if rt.sources.len() > 1 {
-        if let Some(active) = &rt.active {
-            parts.push(format!("{MAGENTA}{active}{RESET}"));
-        }
+    if rt.sources.len() > 1
+        && let Some(active) = &rt.active
+    {
+        parts.push(format!("{MAGENTA}{active}{RESET}"));
     }
     if rt.approval.yolo {
         parts.push(format!("{GREEN}yolo{RESET}"));

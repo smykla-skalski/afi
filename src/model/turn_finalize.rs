@@ -5,16 +5,16 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::model::recovery::{
-    last_is_dangling_tool, nudge_current_user_turn, EMPTY_TURN_NUDGE, FORCED_FINAL_NUDGE,
+    EMPTY_TURN_NUDGE, FORCED_FINAL_NUDGE, last_is_dangling_tool, nudge_current_user_turn,
 };
 use crate::model::stream::normalize_usage;
 use crate::model::turn::TurnRequest;
 use crate::model::turn_dispatch::{
-    dispatch_structured, dispatch_text, order_tool_calls, DispatchArgs, ToolCallAccum,
-    ToolRunOutcome,
+    DispatchArgs, ToolCallAccum, ToolRunOutcome, dispatch_structured, dispatch_text,
+    order_tool_calls,
 };
 use crate::model::turn_stats::{handle_reasoning_stall, print_stats_footer};
 use crate::model::turn_stream::Accumulated;
@@ -223,7 +223,7 @@ fn run_structured_tools(
                     &ordered,
                     i,
                     &e.to_string(),
-                ))
+                ));
             }
         }
     }

@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::json;
 
-use super::{is_under_path, ApprovalChoice, EscToChat, RiskClassifier};
+use super::{ApprovalChoice, EscToChat, RiskClassifier, is_under_path};
 use crate::approval::{ApprovalState, Level};
 
 /// Matches `write <path> (N bytes)` action strings.
@@ -41,6 +41,16 @@ pub fn extract_action_path(action: &str) -> Option<String> {
 /// Classify a path as `in_project/outside_project`, `in_cwd`, `in_downloads`, etc.
 #[must_use]
 pub fn classify_action_path(path: &str, cwd: &Path, project_root: &Path) -> serde_json::Value {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    classify_action_path_with_home(path, cwd, project_root, &home)
+}
+
+fn classify_action_path_with_home(
+    path: &str,
+    cwd: &Path,
+    project_root: &Path,
+    home: &Path,
+) -> serde_json::Value {
     let expanded = expand_tilde(path);
     let abs_path = if expanded.is_absolute() {
         expanded.canonicalize().unwrap_or(expanded)
@@ -49,8 +59,7 @@ pub fn classify_action_path(path: &str, cwd: &Path, project_root: &Path) -> serd
             .canonicalize()
             .unwrap_or_else(|_| cwd.join(&expanded))
     };
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let home = home.canonicalize().unwrap_or(home);
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
     let downloads = home.join("Downloads");
 
     let in_project = is_under_path(&abs_path, project_root);
@@ -87,6 +96,16 @@ fn expand_tilde(path: &str) -> PathBuf {
 /// Build the JSON user message for the risk classifier.
 #[must_use]
 pub fn risk_user_message(action: &str, cwd: &Path, project_root: &Path) -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    risk_user_message_with_home(action, cwd, project_root, &home)
+}
+
+fn risk_user_message_with_home(
+    action: &str,
+    cwd: &Path,
+    project_root: &Path,
+    home: &Path,
+) -> String {
     let mut msg = json!({
         "action": action,
         "cwd": cwd.to_string_lossy(),
@@ -97,7 +116,7 @@ pub fn risk_user_message(action: &str, cwd: &Path, project_root: &Path) -> Strin
             A file under project_root is in-project even when project_root is inside ~/Downloads.",
     });
     if let Some(path) = extract_action_path(action) {
-        let classification = classify_action_path(&path, cwd, project_root);
+        let classification = classify_action_path_with_home(&path, cwd, project_root, home);
         if let (Some(msg_obj), Some(cls_obj)) = (msg.as_object_mut(), classification.as_object()) {
             for (k, v) in cls_obj {
                 msg_obj.insert(k.clone(), v.clone());
@@ -140,14 +159,14 @@ pub fn confirm(
     }
     let (level, reason) = classifier.classify(action, cwd, project_root);
 
-    if let Some(threshold) = approval.approve_level {
-        if level <= threshold {
-            eprintln!(
-                "  \u{21b3} auto-allow [{level}] {action}  ({})",
-                short_reason(reason)
-            );
-            return Ok(true);
-        }
+    if let Some(threshold) = approval.approve_level
+        && level <= threshold
+    {
+        eprintln!(
+            "  \u{21b3} auto-allow [{level}] {action}  ({})",
+            short_reason(reason)
+        );
+        return Ok(true);
     }
 
     let lvl_color = match level {
@@ -169,17 +188,9 @@ pub fn confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use std::fs;
     use std::path::Path;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
-
-    /// Serialize tests that set HOME (env vars aren't thread-safe).
-    fn home_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     /// A mock classifier that returns a fixed level + reason.
     struct MockClassifier {
@@ -329,11 +340,7 @@ mod tests {
 
     #[test]
     fn risk_user_message_downloads_in_project() {
-        let _guard = home_lock().lock().unwrap();
         let home = tempdir().unwrap();
-        // Set HOME so dirs::home_dir() resolves to the temp dir (matches
-        // Python's monkeypatch.setenv("HOME", ...)).
-        env::set_var("HOME", home.path());
         let project = home.path().join("Downloads").join("didenstuff");
         fs::create_dir_all(&project).unwrap();
         let target = project.join("pose_editor.py");
@@ -342,7 +349,12 @@ mod tests {
         let project_root = cwd.clone();
         let target_abs = target.canonicalize().unwrap();
 
-        let msg = risk_user_message(&format!("edit {}", target.display()), &cwd, &project_root);
+        let msg = risk_user_message_with_home(
+            &format!("edit {}", target.display()),
+            &cwd,
+            &project_root,
+            home.path(),
+        );
         let payload: serde_json::Value = serde_json::from_str(&msg).unwrap();
         assert_eq!(
             payload["project_root"],
@@ -358,9 +370,7 @@ mod tests {
 
     #[test]
     fn risk_user_message_downloads_outside_project() {
-        let _guard = home_lock().lock().unwrap();
         let home = tempdir().unwrap();
-        env::set_var("HOME", home.path());
         let project = home.path().join("code").join("app");
         let downloads_project = home.path().join("Downloads").join("didenstuff");
         fs::create_dir_all(&project).unwrap();
@@ -370,7 +380,12 @@ mod tests {
         let cwd = project.canonicalize().unwrap();
         let project_root = cwd.clone();
 
-        let msg = risk_user_message(&format!("edit {}", target.display()), &cwd, &project_root);
+        let msg = risk_user_message_with_home(
+            &format!("edit {}", target.display()),
+            &cwd,
+            &project_root,
+            home.path(),
+        );
         let payload: serde_json::Value = serde_json::from_str(&msg).unwrap();
         assert_eq!(payload["path_scope"], "outside_project");
         assert_eq!(payload["path_in_downloads"], true);

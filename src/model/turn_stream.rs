@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::metrics::abbr;
+use crate::model::ModelConfig;
 use crate::model::stream::{StreamChunk, Timings, Usage};
 use crate::model::turn_dispatch::ToolCallAccum;
-use crate::model::ModelConfig;
 
 #[derive(PartialEq)]
 enum TurnMode {
@@ -200,18 +200,18 @@ pub(crate) fn accumulate(
     for chunk in chunks {
         fold.note_meta(chunk, t0);
 
-        if let Some(rc) = &chunk.reasoning_content {
-            if fold.handle_reasoning(rc, config) {
-                println!();
-                eprintln!(
-                    "\x1b[31m  \u{26a0} REASONING-ONLY LIMIT - {} chars; cutting\x1b[0m",
-                    abbr(fold.reasoning_only_chars as u64)
-                );
-                return StreamResult::ReasoningStall {
-                    chars: fold.reasoning_only_chars,
-                    reasoning_parts: fold.reasoning_parts,
-                };
-            }
+        if let Some(rc) = &chunk.reasoning_content
+            && fold.handle_reasoning(rc, config)
+        {
+            println!();
+            eprintln!(
+                "\x1b[31m  \u{26a0} REASONING-ONLY LIMIT - {} chars; cutting\x1b[0m",
+                abbr(fold.reasoning_only_chars as u64)
+            );
+            return StreamResult::ReasoningStall {
+                chars: fold.reasoning_only_chars,
+                reasoning_parts: fold.reasoning_parts,
+            };
         }
 
         if let Some(c) = &chunk.content {

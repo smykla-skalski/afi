@@ -8,10 +8,10 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use afi::cli::{
-    cli_sessions, fmt_when, print_session_list, session_id_from_args, session_list_page_options,
-    PageOptions,
+    PageOptions, cli_sessions, fmt_when, print_session_list, session_id_from_args,
+    session_list_page_options,
 };
-use afi::sessions::{write_session, SessionSummary};
+use afi::sessions::{SessionSummary, write_session};
 use serde_json::json;
 
 fn msg(role: &str, content: &str) -> serde_json::Value {

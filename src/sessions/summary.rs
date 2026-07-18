@@ -43,11 +43,11 @@ pub fn session_summary_from_file(dir: &Path, fname: &str) -> Option<SessionSumma
     let mut preview = String::new();
     if let Some(arr) = msgs {
         for m in arr {
-            if m.get("role").and_then(|r| r.as_str()) == Some("user") {
-                if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
-                    preview = safe_title(Some(c), 60).unwrap_or_default();
-                    break;
-                }
+            if m.get("role").and_then(|r| r.as_str()) == Some("user")
+                && let Some(c) = m.get("content").and_then(|c| c.as_str())
+            {
+                preview = safe_title(Some(c), 60).unwrap_or_default();
+                break;
             }
         }
     }
@@ -133,12 +133,11 @@ pub fn list_sessions(
             continue;
         }
         out.push(summary);
-        if query.is_none() {
-            if let Some(lim) = limit {
-                if out.len() >= offset + lim {
-                    break;
-                }
-            }
+        if query.is_none()
+            && let Some(lim) = limit
+            && out.len() >= offset + lim
+        {
+            break;
         }
     }
     if query.is_some() {
@@ -168,10 +167,11 @@ pub fn resolve_session(target: &str, sessions: &[SessionSummary]) -> Option<Stri
     let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
 
     // numeric index → recent-sessions slot (1-based)
-    if let Ok(idx) = target.parse::<usize>() {
-        if idx >= 1 && idx <= sessions.len() {
-            return Some(sessions[idx - 1].id.clone());
-        }
+    if let Ok(idx) = target.parse::<usize>()
+        && idx >= 1
+        && idx <= sessions.len()
+    {
+        return Some(sessions[idx - 1].id.clone());
     }
     // exact id
     if ids.contains(&target) {

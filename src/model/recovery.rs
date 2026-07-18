@@ -5,7 +5,7 @@
 //! back into the same broken output.
 
 use regex::Regex;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::model::ModelConfig;
 
@@ -192,10 +192,12 @@ mod tests {
         nudge_current_user_turn(&mut messages, "do something");
         assert_eq!(messages[1]["role"], "user");
         assert!(messages[1]["content"].as_str().unwrap().contains("hello"));
-        assert!(messages[1]["content"]
-            .as_str()
-            .unwrap()
-            .contains("[Runtime note: do something]"));
+        assert!(
+            messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("[Runtime note: do something]")
+        );
     }
 
     #[test]
@@ -217,10 +219,12 @@ mod tests {
         ];
         nudge_current_user_turn(&mut messages, "test nudge");
         assert_eq!(messages.last().unwrap()["role"], "user");
-        assert!(messages.last().unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .contains("[Runtime note: test nudge]"));
+        assert!(
+            messages.last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .contains("[Runtime note: test nudge]")
+        );
     }
 
     #[test]

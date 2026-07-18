@@ -5,13 +5,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::term::approve::prompt_choice;
 
 use crate::approval::ApprovalState;
 use crate::model::ModelConfig;
-use crate::risk::{confirm, RiskClassifier};
+use crate::risk::{RiskClassifier, confirm};
 use crate::tools;
 use crate::tools::protocol::sanitize_tool_result;
 use std::path::PathBuf;
@@ -146,7 +146,7 @@ pub(crate) fn dispatch_tool(name: &str, args: &Value, da: &DispatchArgs<'_>) -> 
                     .and_then(|a| a.as_str())
                     .unwrap_or("")
                     .to_string(),
-            )
+            );
         }
         _ => format!("ERROR: unknown tool {name}"),
     };

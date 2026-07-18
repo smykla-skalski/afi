@@ -56,13 +56,12 @@ pub fn detect_project_root(cwd: Option<&Path>) -> PathBuf {
             "--show-toplevel",
         ])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !root.is_empty() {
-                let root_path = PathBuf::from(&root);
-                return root_path.canonicalize().unwrap_or(root_path);
-            }
+        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !root.is_empty() {
+            let root_path = PathBuf::from(&root);
+            return root_path.canonicalize().unwrap_or(root_path);
         }
     }
     cwd

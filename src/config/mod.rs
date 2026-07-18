@@ -8,7 +8,7 @@ use regex::Regex;
 use serde_json::{Map, Value};
 
 mod runtime;
-pub use runtime::{discover_sources, parse_args, ParsedArgs, Runtime};
+pub use runtime::{ParsedArgs, Runtime, discover_sources, parse_args};
 
 // --- HTTP headers for aggregators like OpenRouter ---------------------------
 
@@ -27,11 +27,7 @@ pub fn build_http_headers(
     if let Some(name) = app_name {
         h.insert("X-Title".to_string(), name.to_string());
     }
-    if h.is_empty() {
-        None
-    } else {
-        Some(h)
-    }
+    if h.is_empty() { None } else { Some(h) }
 }
 
 // --- EXTRA_BODY parsing ------------------------------------------------------

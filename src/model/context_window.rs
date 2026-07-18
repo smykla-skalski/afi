@@ -24,8 +24,8 @@ pub fn ctx_from_models(models_data: &Value, mid: &str) -> Option<u64> {
         .or_else(|| data.first())?;
 
     // Prefer the llama.cpp-style `meta` dict, then top-level OpenAI-compat keys.
-    if let Some(meta) = pick.get("meta") {
-        if let Some(n) = first_positive(
+    if let Some(meta) = pick.get("meta")
+        && let Some(n) = first_positive(
             meta,
             &[
                 "n_ctx",
@@ -34,9 +34,9 @@ pub fn ctx_from_models(models_data: &Value, mid: &str) -> Option<u64> {
                 "max_context_length",
                 "max_input_tokens",
             ],
-        ) {
-            return Some(n);
-        }
+        )
+    {
+        return Some(n);
     }
     first_positive(
         pick,
@@ -73,18 +73,18 @@ pub fn ctx_from_props(props: &Value) -> Option<u64> {
         .and_then(|v| v.as_object())
     {
         for key in &["n_ctx", "context_length", "context_window"] {
-            if let Some(v) = dgs.get(*key).and_then(Value::as_u64) {
-                if v > 0 {
-                    return Some(v);
-                }
+            if let Some(v) = dgs.get(*key).and_then(Value::as_u64)
+                && v > 0
+            {
+                return Some(v);
             }
         }
     }
     for key in &["n_ctx", "context_length", "context_window"] {
-        if let Some(v) = props.get(*key).and_then(Value::as_u64) {
-            if v > 0 {
-                return Some(v);
-            }
+        if let Some(v) = props.get(*key).and_then(Value::as_u64)
+            && v > 0
+        {
+            return Some(v);
         }
     }
     None

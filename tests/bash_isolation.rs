@@ -5,7 +5,7 @@
 //! old `unsafe { pre_exec(setsid) }` in `src/tools/bash.rs`.
 
 use std::collections::HashMap;
-use std::process::{id, Command};
+use std::process::{Command, id};
 
 use afi::tools::bash::run_bash;
 

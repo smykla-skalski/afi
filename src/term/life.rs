@@ -6,10 +6,10 @@
 //! `LifeSpinner`, advancing it one generation per animation tick while a model
 //! request is in flight; there is no background thread writing raw escapes.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
-use ratatui::Frame;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -192,8 +192,8 @@ mod tests {
 
     #[test]
     fn renders_label_into_a_test_backend_buffer() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let sp = LifeSpinner {
             row: vec![0u8; GOL_W],
             label: "thinking".to_string(),

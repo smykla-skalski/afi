@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::approval::ApprovalState;
 use crate::config::Source;
 use crate::model::client::ChatClient;
-use crate::model::turn::{model_turn, TurnRequest};
+use crate::model::turn::{TurnRequest, model_turn};
 use crate::model::{
     ModelConfig, TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL,
 };

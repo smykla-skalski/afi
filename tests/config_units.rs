@@ -1,7 +1,7 @@
 //! Unit-level ports from `tests/test_sources.py`: `parse_extra_body`,
 //! `Source::clean_model_id`, `Source::is_local`, and `parse_args`.
 
-use afi::config::{parse_args, parse_extra_body, ParsedArgs};
+use afi::config::{ParsedArgs, parse_args, parse_extra_body};
 use afi::{ApprovalKind, Source};
 
 // parse_extra_body edge cases (empty object, non-object, empty string)

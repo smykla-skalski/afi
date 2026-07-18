@@ -7,7 +7,7 @@
 
 mod common;
 
-use afi::approval::{normalize_approval, ApprovalKind, ApprovalState, Level};
+use afi::approval::{ApprovalKind, ApprovalState, Level, normalize_approval};
 use afi::banner;
 use std::io::Write;
 

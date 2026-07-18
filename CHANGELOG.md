@@ -4,7 +4,7 @@ All notable changes to `afi` from this point forward.
 
 ### Changed — persistent Ratatui REPL
 
-Interactive sessions now use one fullscreen Ratatui application for the header, Markdown transcript, multiline composer, activity state, scrolling, and approval dialogs. A single Crossterm event stream owns terminal input and resize events. This replaces the inline chatbox, Conway's Life spinner, approval reader, and interrupt watcher, which competed for terminal state and placed output on the wrong rows.
+Interactive sessions now use one fullscreen Ratatui application for the header, Markdown transcript, multiline composer, activity state, scrolling, and approval dialogs. PageUp, PageDown, and the mouse wheel scroll the conversation, and a scrollbar shows the current position. A single Crossterm event stream owns terminal input and resize events. This replaces the inline chatbox, Conway's Life spinner, approval reader, and interrupt watcher, which competed for terminal state and placed output on the wrong rows.
 
 Model responses now reach both interfaces as live SSE chunks. The TUI uses `ratatui-textarea`, `throbber-widgets-tui`, and `tui-markdown`; typed UI events keep model and tool code away from terminal output. Esc and Ctrl+C share one task cancellation token, including HTTP generation and Bash waits. Long approval prompts scroll so the user can inspect a full command before deciding.
 

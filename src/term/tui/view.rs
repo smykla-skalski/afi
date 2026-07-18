@@ -1,8 +1,10 @@
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use throbber_widgets_tui::{BRAILLE_SIX, Throbber};
 
 use crate::term::{MessageKind, StreamKind};
@@ -96,7 +98,8 @@ fn render_transcript(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     let block = Block::bordered()
         .title(" Conversation ")
         .border_style(Style::default().fg(Color::DarkGray));
-    let inner = if area.width >= 3 && area.height >= 3 {
+    let bordered = area.width >= 3 && area.height >= 3;
+    let inner = if bordered {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         inner
@@ -117,8 +120,26 @@ fn render_transcript(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     app.rendered_transcript_lines = line_count;
     app.scroll_from_bottom = app.scroll_from_bottom.min(last_page);
     let top = last_page.saturating_sub(app.scroll_from_bottom);
-    let top = u16::try_from(top).unwrap_or(u16::MAX);
-    frame.render_widget(paragraph.scroll((top, 0)), inner);
+    let scroll = u16::try_from(top).unwrap_or(u16::MAX);
+    frame.render_widget(paragraph.scroll((scroll, 0)), inner);
+    if last_page > 0 && bordered {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_style(Color::DarkGray);
+        let mut state = ScrollbarState::new(last_page.saturating_add(1))
+            .position(top)
+            .viewport_content_length(usize::from(inner.height));
+        frame.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut state,
+        );
+    }
 }
 
 fn transcript_text(entries: &[TranscriptEntry]) -> Text<'_> {
@@ -212,11 +233,11 @@ fn render_footer(frame: &mut Frame, app: &TuiApp, area: Rect) {
         return;
     }
     let help = if app.approval.is_some() {
-        "Y approve · N/Enter deny · Esc cancel · PgUp/PgDown inspect"
+        "Y approve · N/Enter deny · Esc cancel · PgUp/PgDown or wheel inspect"
     } else if app.task_running {
-        "Esc cancel · PgUp/PgDown scroll"
+        "Esc cancel · PgUp/PgDown or wheel scroll"
     } else {
-        "Enter send · Alt+Enter newline · Alt+↑/↓ history · PgUp/PgDown scroll · Ctrl+C quit"
+        "Enter send · Alt+Enter newline · Alt+↑/↓ history · PgUp/PgDown or wheel scroll · Ctrl+C quit"
     };
     frame.render_widget(
         Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),

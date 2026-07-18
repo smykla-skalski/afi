@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Block;
@@ -147,6 +147,20 @@ impl TuiApp {
             };
         }
         self.handle_composer_key(key)
+    }
+
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match (self.approval.is_some(), mouse.kind) {
+            (true, MouseEventKind::ScrollUp) => {
+                self.approval_scroll = self.approval_scroll.saturating_sub(SCROLL_STEP);
+            }
+            (true, MouseEventKind::ScrollDown) => {
+                self.approval_scroll = self.approval_scroll.saturating_add(SCROLL_STEP);
+            }
+            (false, MouseEventKind::ScrollUp) => self.scroll_up(),
+            (false, MouseEventKind::ScrollDown) => self.scroll_down(),
+            _ => {}
+        }
     }
 
     pub fn paste(&mut self, text: &str) {

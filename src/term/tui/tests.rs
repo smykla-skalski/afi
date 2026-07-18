@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -16,6 +16,15 @@ fn key(code: KeyCode) -> KeyEvent {
 
 fn modified(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, modifiers)
+}
+
+fn mouse(kind: MouseEventKind) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    }
 }
 
 fn render(app: &mut TuiApp, width: u16, height: u16) -> Buffer {
@@ -153,6 +162,21 @@ fn page_keys_adjust_transcript_scroll() {
 }
 
 #[test]
+fn mouse_wheel_scrolls_transcript_and_approval() {
+    let mut app = TuiApp::new();
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp));
+    assert_eq!(app.scroll_from_bottom, 5);
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown));
+    assert_eq!(app.scroll_from_bottom, 0);
+
+    app.set_approval(Some("inspect command".to_string()));
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown));
+    assert_eq!(app.approval_scroll, 5);
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp));
+    assert_eq!(app.approval_scroll, 0);
+}
+
+#[test]
 fn transcript_scroll_is_clamped_after_render() {
     let mut app = TuiApp::new();
     app.apply_output(OutputEvent::Message {
@@ -162,6 +186,29 @@ fn transcript_scroll_is_clamped_after_render() {
     app.scroll_from_bottom = usize::MAX;
     let _ = render(&mut app, 60, 18);
     assert_eq!(app.scroll_from_bottom, 0);
+}
+
+#[test]
+fn scrollbar_thumb_tracks_conversation_position() {
+    let mut app = TuiApp::new();
+    app.apply_output(OutputEvent::Message {
+        kind: MessageKind::Info,
+        text: (0..30)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    });
+
+    let bottom = render(&mut app, 40, 12);
+    let transcript = layout_areas(Rect::new(0, 0, 40, 12), app.composer_height()).transcript;
+    let x = transcript.right() - 1;
+    let top_y = transcript.y + 1;
+    let bottom_y = transcript.bottom() - 2;
+    assert_eq!(bottom[(x, bottom_y)].symbol(), "█");
+
+    app.scroll_from_bottom = usize::MAX;
+    let top = render(&mut app, 40, 12);
+    assert_eq!(top[(x, top_y)].symbol(), "█");
 }
 
 #[test]
@@ -271,7 +318,7 @@ fn long_approval_prompt_can_scroll_to_suffix() {
 
 #[test]
 fn tiny_and_narrow_terminals_render_without_panicking() {
-    for (width, height) in [(1, 1), (4, 3), (12, 5), (20, 8)] {
+    for (width, height) in [(1, 1), (1, 12), (2, 12), (4, 3), (12, 5), (20, 8)] {
         let mut app = TuiApp::new();
         app.apply_output(OutputEvent::Stream {
             kind: StreamKind::Assistant,

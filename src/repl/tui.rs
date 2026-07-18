@@ -5,7 +5,7 @@ use std::io;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream};
+use crossterm::event::{self, Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::SetTitle;
 use tokio::runtime::Handle;
@@ -165,6 +165,7 @@ impl Driver {
                 self.handle_action(action);
             }
             Some(Ok(Event::Paste(text))) => self.app.paste(&text),
+            Some(Ok(Event::Mouse(mouse))) => self.app.handle_mouse(mouse),
             Some(Ok(_)) => {}
             Some(Err(error)) => return Err(error),
             None => {
@@ -366,14 +367,24 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         let guard = Self;
-        execute!(io::stdout(), EnableBracketedPaste, SetTitle("afi idle"))?;
+        execute!(
+            io::stdout(),
+            event::EnableBracketedPaste,
+            event::EnableMouseCapture,
+            SetTitle("afi idle")
+        )?;
         Ok(guard)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), DisableBracketedPaste, SetTitle("afi idle"));
+        let _ = execute!(
+            io::stdout(),
+            event::DisableMouseCapture,
+            event::DisableBracketedPaste,
+            SetTitle("afi idle")
+        );
         ratatui::restore();
     }
 }

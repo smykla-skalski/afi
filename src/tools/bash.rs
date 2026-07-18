@@ -452,7 +452,12 @@ mod tests {
 
     #[test]
     fn run_bash_quick_command() {
-        let env = std::collections::HashMap::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "MINION_HOME".to_string(),
+            tmp.path().to_string_lossy().to_string(),
+        );
         let out = run_bash("echo hello", None, &env, &|| false);
         assert!(out.contains("[exit 0]"));
         assert!(out.contains("hello"));
@@ -460,7 +465,12 @@ mod tests {
 
     #[test]
     fn run_bash_backgrounds_long_command() {
-        let env = std::collections::HashMap::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "MINION_HOME".to_string(),
+            tmp.path().to_string_lossy().to_string(),
+        );
         let out = run_bash("sleep 10", Some(1), &env, &|| false);
         assert!(out.contains("[background]"));
         assert!(out.contains("PID"));
@@ -468,7 +478,12 @@ mod tests {
 
     #[test]
     fn run_bash_esc_interrupts() {
-        let env = std::collections::HashMap::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "MINION_HOME".to_string(),
+            tmp.path().to_string_lossy().to_string(),
+        );
         let out = run_bash("sleep 10", Some(5), &env, &|| true);
         assert!(out.contains("[background]"));
         assert!(out.contains("interrupted"));

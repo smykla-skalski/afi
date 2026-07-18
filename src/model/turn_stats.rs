@@ -9,6 +9,7 @@ use crate::metrics::abbr;
 use crate::model::recovery::{FORCED_FINAL_NUDGE, nudge_current_user_turn};
 use crate::model::turn_dispatch::ToolCallAccum;
 use crate::model::{ModelConfig, TURN_DONE, TURN_FORCE_FINAL};
+use crate::term::{MessageKind, UserInterface};
 
 pub(crate) fn handle_reasoning_stall(
     messages: &mut Vec<Value>,
@@ -17,81 +18,93 @@ pub(crate) fn handle_reasoning_stall(
     chars: usize,
     _reasoning_parts: &[String],
     forced_final: bool,
+    ui: &mut dyn UserInterface,
 ) -> String {
     if forced_final {
-        eprintln!(
-            "\x1b[31m  \u{2702} FORCED FINAL FAILED - {} reasoning chars\x1b[0m",
-            abbr(chars as u64)
+        ui.message(
+            MessageKind::Error,
+            format!(
+                "FORCED FINAL FAILED - {} reasoning chars",
+                abbr(chars as u64)
+            ),
         );
         return TURN_DONE.to_string();
     }
     let retry_limit = config.reasoning_only_retry_limit;
     if cut_count >= retry_limit {
-        eprintln!(
-            "\x1b[31m  \u{2702} REASONING-ONLY RESCUE FAILED - gave up after {cut_count} stalls\x1b[0m"
+        ui.message(
+            MessageKind::Error,
+            format!("REASONING-ONLY RESCUE FAILED - gave up after {cut_count} stalls"),
         );
         return TURN_DONE.to_string();
     }
     let is_last = cut_count == retry_limit - 1;
     if is_last {
-        eprintln!(
-            "\x1b[33m  \u{2702} REASONING-ONLY STALL - {} chars; forcing final ({}/{})\x1b[0m",
-            abbr(chars as u64),
-            cut_count + 1,
-            retry_limit
+        ui.message(
+            MessageKind::Warning,
+            format!(
+                "REASONING-ONLY STALL - {} chars; forcing final ({}/{})",
+                abbr(chars as u64),
+                cut_count + 1,
+                retry_limit
+            ),
         );
         nudge_current_user_turn(messages, FORCED_FINAL_NUDGE);
         return TURN_FORCE_FINAL.to_string();
     }
-    eprintln!(
-        "\x1b[33m  \u{2702} REASONING-ONLY STALL - {} chars; nudging ({}/{})\x1b[0m",
-        abbr(chars as u64),
-        cut_count + 1,
-        retry_limit
+    ui.message(
+        MessageKind::Warning,
+        format!(
+            "REASONING-ONLY STALL - {} chars; nudging ({}/{})",
+            abbr(chars as u64),
+            cut_count + 1,
+            retry_limit
+        ),
     );
     nudge_current_user_turn(messages, "Now act - emit a tool call now.");
     TURN_FORCE_FINAL.to_string()
 }
 
-pub(crate) fn print_stats_footer(
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    elapsed: f64,
-    t_first: Option<f64>,
-    streamed_chars: u64,
-    text: &str,
-    tool_calls: &HashMap<u32, ToolCallAccum>,
-) {
-    let dim = "\x1b[2m";
-    let reset = "\x1b[0m";
-    if completion_tokens > 0 && elapsed > 0.0 {
-        let tps = f64::from(u32::try_from(completion_tokens).unwrap_or(u32::MAX)) / elapsed;
+pub(crate) struct TurnStats<'a> {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub elapsed: f64,
+    pub t_first: Option<f64>,
+    pub streamed_chars: u64,
+    pub text: &'a str,
+    pub tool_calls: &'a HashMap<u32, ToolCallAccum>,
+}
+
+pub(crate) fn print_stats_footer(stats: &TurnStats<'_>, ui: &mut dyn UserInterface) {
+    if stats.completion_tokens > 0 && stats.elapsed > 0.0 {
+        let tps =
+            f64::from(u32::try_from(stats.completion_tokens).unwrap_or(u32::MAX)) / stats.elapsed;
         let mut parts = vec![
-            format!("{} tok", completion_tokens),
+            format!("{} tok", stats.completion_tokens),
             format!("{:5.1} tok/s", tps),
-            format!("{} ctx", abbr(prompt_tokens)),
+            format!("{} ctx", abbr(stats.prompt_tokens)),
         ];
-        if let Some(ttft) = t_first {
+        if let Some(ttft) = stats.t_first {
             parts.push(format!("{:4.0}ms ttft", ttft * 1000.0));
         }
-        parts.push(format!("{elapsed:4.1}s wall"));
-        println!("{}  \u{2514} {}{}", dim, parts.join(" \u{00b7} "), reset);
-    } else if streamed_chars > 0 {
-        let gen_n = (streamed_chars / 4).max(1);
-        let tps = if elapsed > 0.0 {
-            f64::from(u32::try_from(gen_n).unwrap_or(u32::MAX)) / elapsed
+        parts.push(format!("{:4.1}s wall", stats.elapsed));
+        ui.message(MessageKind::Stats, format!("└ {}", parts.join(" · ")));
+    } else if stats.streamed_chars > 0 {
+        let gen_n = (stats.streamed_chars / 4).max(1);
+        let tps = if stats.elapsed > 0.0 {
+            f64::from(u32::try_from(gen_n).unwrap_or(u32::MAX)) / stats.elapsed
         } else {
             0.0
         };
-        println!(
-            "{}  \u{2514} \u{2248}{} tok \u{00b7} {:5.1} tok/s \u{00b7} {:4.1}s wall{}",
-            dim,
-            abbr(gen_n),
-            tps,
-            elapsed,
-            reset
+        ui.message(
+            MessageKind::Stats,
+            format!(
+                "└ ≈{} tok · {tps:5.1} tok/s · {:4.1}s wall",
+                abbr(gen_n),
+                stats.elapsed
+            ),
         );
-    } else if !text.is_empty() || !tool_calls.is_empty() {
-        println!("{dim}  \u{2514} {elapsed:4.1}s wall{reset}");
+    } else if !stats.text.is_empty() || !stats.tool_calls.is_empty() {
+        ui.message(MessageKind::Stats, format!("└ {:4.1}s wall", stats.elapsed));
     }
 }

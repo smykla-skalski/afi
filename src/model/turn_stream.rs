@@ -1,21 +1,15 @@
-//! Streaming accumulation for a model turn: fold the SSE chunks into content,
-//! reasoning, and tool-call fragments while echoing reasoning/answer text, and
-//! flag a reasoning-only stall when the model loops without acting.
+//! Incremental accumulation for a model turn. Each SSE chunk updates the fold
+//! and emits typed UI deltas as soon as it arrives.
 
 use std::collections::HashMap;
+use std::mem::take;
 use std::time::Instant;
 
 use crate::metrics::abbr;
 use crate::model::ModelConfig;
 use crate::model::stream::{StreamChunk, Timings, Usage};
 use crate::model::turn_dispatch::ToolCallAccum;
-
-#[derive(PartialEq)]
-enum TurnMode {
-    Idle,
-    Think,
-    Say,
-}
+use crate::term::{MessageKind, StreamKind, UserInterface};
 
 /// The folded result of a streamed turn.
 pub(crate) struct Accumulated {
@@ -39,9 +33,8 @@ pub(crate) enum StreamResult {
     },
 }
 
-/// Mutable fold state accumulated across the SSE chunks. Splitting the per-kind
-/// handling into methods keeps [`accumulate`] itself simple.
-struct Fold {
+/// Mutable fold state updated once per live SSE chunk.
+pub(crate) struct StreamAccumulator {
     content_parts: Vec<String>,
     tool_calls: HashMap<u32, ToolCallAccum>,
     reasoning_parts: Vec<String>,
@@ -51,11 +44,11 @@ struct Fold {
     streamed_chars: u64,
     reasoning_only_chars: usize,
     t_first: Option<f64>,
-    mode: TurnMode,
 }
 
-impl Fold {
-    fn new() -> Self {
+impl StreamAccumulator {
+    #[must_use]
+    pub(crate) fn new() -> Self {
         Self {
             content_parts: Vec::new(),
             tool_calls: HashMap::new(),
@@ -66,7 +59,6 @@ impl Fold {
             streamed_chars: 0,
             reasoning_only_chars: 0,
             t_first: None,
-            mode: TurnMode::Idle,
         }
     }
 
@@ -94,15 +86,16 @@ impl Fold {
         }
     }
 
-    /// Echo a reasoning fragment. Returns `true` when the reasoning-only
-    /// character limit is reached and the caller should stall.
-    fn handle_reasoning(&mut self, rc: &str, config: &ModelConfig) -> bool {
-        if !matches!(self.mode, TurnMode::Think) {
-            println!("\x1b[2m  -- reasoning --\x1b[0m");
-            self.mode = TurnMode::Think;
-        }
-        if !rc.trim().is_empty() {
-            print!("\x1b[2m{rc}\x1b[0m");
+    /// Emit and fold a reasoning fragment. Returns `true` at the configured
+    /// reasoning-only cutoff.
+    fn handle_reasoning(
+        &mut self,
+        rc: &str,
+        config: &ModelConfig,
+        ui: &mut dyn UserInterface,
+    ) -> bool {
+        if !rc.is_empty() {
+            ui.stream(StreamKind::Reasoning, rc.to_string());
             self.reasoning_parts.push(rc.to_string());
         }
         if self.no_output_yet() {
@@ -113,39 +106,18 @@ impl Fold {
             && self.reasoning_only_chars >= config.reasoning_only_char_limit
     }
 
-    /// Echo an answer-content fragment.
-    fn handle_content(&mut self, c: &str) {
-        if matches!(self.mode, TurnMode::Think) {
-            println!();
-            println!("\x1b[2m  ---------------\x1b[0m");
-        }
-        if !matches!(self.mode, TurnMode::Say) {
-            print!("\x1b[32m");
-        }
-        self.mode = TurnMode::Say;
-        if !c.trim().is_empty() {
-            print!("{c}");
+    /// Emit and fold an answer-content fragment.
+    fn handle_content(&mut self, c: &str, ui: &mut dyn UserInterface) {
+        if !c.is_empty() {
+            ui.stream(StreamKind::Assistant, c.to_string());
             self.content_parts.push(c.to_string());
             self.streamed_chars += c.len() as u64;
-        }
-    }
-
-    /// Close any open reasoning/answer block before tool-call output.
-    fn exit_text_mode(&mut self) {
-        if matches!(self.mode, TurnMode::Think) {
-            println!();
-            println!("\x1b[2m  ---------------\x1b[0m");
-            self.mode = TurnMode::Idle;
-        } else if matches!(self.mode, TurnMode::Say) {
-            println!("\x1b[0m");
-            self.mode = TurnMode::Idle;
         }
     }
 
     /// Fold the tool-call fragments in one chunk into the accumulator.
     fn handle_tool_calls(&mut self, chunk: &StreamChunk) {
         for tc in &chunk.tool_calls {
-            self.exit_text_mode();
             let entry = self.tool_calls.entry(tc.index).or_default();
             if tc.id.is_some() {
                 entry.id.clone_from(&tc.id);
@@ -160,16 +132,46 @@ impl Fold {
         }
     }
 
-    /// Close out any open reasoning/answer block on stream end.
-    fn finish_line(&mut self) {
-        if matches!(self.mode, TurnMode::Think) {
-            println!();
-            println!("\x1b[2m  ---------------\x1b[0m");
+    /// Fold and emit one chunk. A returned result is terminal: the caller must
+    /// stop polling the HTTP stream and return it immediately.
+    pub(crate) fn push(
+        &mut self,
+        chunk: &StreamChunk,
+        config: &ModelConfig,
+        t0: Instant,
+        ui: &mut dyn UserInterface,
+    ) -> Option<StreamResult> {
+        self.note_meta(chunk, t0);
+        if let Some(reasoning) = &chunk.reasoning_content
+            && self.handle_reasoning(reasoning, config, ui)
+        {
+            ui.finish_stream();
+            ui.message(
+                MessageKind::Warning,
+                format!(
+                    "REASONING-ONLY LIMIT - {} chars; cutting",
+                    abbr(self.reasoning_only_chars as u64)
+                ),
+            );
+            return Some(StreamResult::ReasoningStall {
+                chars: self.reasoning_only_chars,
+                reasoning_parts: take(&mut self.reasoning_parts),
+            });
         }
-        if matches!(self.mode, TurnMode::Say) {
-            println!("\x1b[0m");
+        if let Some(content) = &chunk.content {
+            self.handle_content(content, ui);
         }
-        println!("\x1b[0m");
+        if !chunk.tool_calls.is_empty() {
+            self.handle_tool_calls(chunk);
+        }
+        None
+    }
+
+    /// Complete a normally exhausted SSE stream and return its accumulated
+    /// model/tool data.
+    pub(crate) fn finish(self, ui: &mut dyn UserInterface) -> StreamResult {
+        ui.finish_stream();
+        StreamResult::Done(self.into_accumulated())
     }
 
     fn into_accumulated(self) -> Accumulated {
@@ -187,42 +189,160 @@ impl Fold {
     }
 }
 
-/// Fold `chunks` into an [`Accumulated`], echoing reasoning and answer text as
-/// it goes. Returns early with [`StreamResult::ReasoningStall`] if the model
-/// exceeds the reasoning-only character limit without producing content.
-pub(crate) fn accumulate(
-    chunks: &[StreamChunk],
-    config: &ModelConfig,
-    t0: Instant,
-) -> StreamResult {
-    let mut fold = Fold::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::stream::ToolCallDelta;
+    use crate::risk::ApprovalChoice;
+    use crate::term::OutputEvent;
+    use tokio_util::sync::CancellationToken;
 
-    for chunk in chunks {
-        fold.note_meta(chunk, t0);
+    #[derive(Default)]
+    struct RecordingUi {
+        events: Vec<OutputEvent>,
+    }
 
-        if let Some(rc) = &chunk.reasoning_content
-            && fold.handle_reasoning(rc, config)
-        {
-            println!();
-            eprintln!(
-                "\x1b[31m  \u{26a0} REASONING-ONLY LIMIT - {} chars; cutting\x1b[0m",
-                abbr(fold.reasoning_only_chars as u64)
-            );
-            return StreamResult::ReasoningStall {
-                chars: fold.reasoning_only_chars,
-                reasoning_parts: fold.reasoning_parts,
-            };
+    impl UserInterface for RecordingUi {
+        fn emit(&mut self, event: OutputEvent) {
+            self.events.push(event);
         }
 
-        if let Some(c) = &chunk.content {
-            fold.handle_content(c);
+        fn start_activity(&mut self, _label: &str) -> CancellationToken {
+            CancellationToken::new()
         }
 
-        if !chunk.tool_calls.is_empty() {
-            fold.handle_tool_calls(chunk);
+        fn stop_activity(&mut self) {}
+
+        fn approve(&mut self, _prompt: &str) -> ApprovalChoice {
+            ApprovalChoice::No
         }
     }
 
-    fold.finish_line();
-    StreamResult::Done(fold.into_accumulated())
+    fn finish(accumulator: StreamAccumulator, ui: &mut RecordingUi) -> super::Accumulated {
+        match accumulator.finish(ui) {
+            StreamResult::Done(result) => result,
+            StreamResult::ReasoningStall { .. } => panic!("stream must finish"),
+        }
+    }
+
+    fn push(
+        accumulator: &mut StreamAccumulator,
+        chunk: &StreamChunk,
+        config: &ModelConfig,
+        started: Instant,
+        ui: &mut RecordingUi,
+    ) {
+        assert!(accumulator.push(chunk, config, started, ui).is_none());
+    }
+
+    #[test]
+    fn emits_live_reasoning_and_assistant_deltas() {
+        let mut ui = RecordingUi::default();
+        let mut accumulator = StreamAccumulator::new();
+        let config = ModelConfig::default();
+        let started = Instant::now();
+
+        let reasoning = StreamChunk {
+            reasoning_content: Some("plan".to_string()),
+            ..StreamChunk::default()
+        };
+        let answer = StreamChunk {
+            content: Some("done".to_string()),
+            ..StreamChunk::default()
+        };
+        push(&mut accumulator, &reasoning, &config, started, &mut ui);
+        push(&mut accumulator, &answer, &config, started, &mut ui);
+
+        let result = finish(accumulator, &mut ui);
+        assert_eq!(result.reasoning_parts, ["plan"]);
+        assert_eq!(result.content_parts, ["done"]);
+        assert!(result.t_first.is_some());
+        assert!(matches!(
+            ui.events.as_slice(),
+            [
+                OutputEvent::Stream {
+                    kind: StreamKind::Reasoning,
+                    ..
+                },
+                OutputEvent::Stream {
+                    kind: StreamKind::Assistant,
+                    ..
+                },
+                OutputEvent::StreamFinished
+            ]
+        ));
+    }
+
+    #[test]
+    fn preserves_whitespace_only_content_deltas() {
+        let mut ui = RecordingUi::default();
+        let mut accumulator = StreamAccumulator::new();
+        let config = ModelConfig::default();
+        for content in ["hello", " ", "world\n\n"] {
+            let chunk = StreamChunk {
+                content: Some(content.to_string()),
+                ..StreamChunk::default()
+            };
+            assert!(
+                accumulator
+                    .push(&chunk, &config, Instant::now(), &mut ui)
+                    .is_none()
+            );
+        }
+        let result = finish(accumulator, &mut ui);
+        assert_eq!(result.content_parts.join(""), "hello world\n\n");
+    }
+
+    #[test]
+    fn merges_tool_call_deltas_incrementally() {
+        let mut ui = RecordingUi::default();
+        let mut accumulator = StreamAccumulator::new();
+        let config = ModelConfig::default();
+        for arguments in ["{\"path\":", "\"README.md\"}"] {
+            let chunk = StreamChunk {
+                tool_calls: vec![ToolCallDelta {
+                    index: 0,
+                    id: Some("call-1".to_string()),
+                    name: Some("read_file".to_string()),
+                    arguments: Some(arguments.to_string()),
+                }],
+                ..StreamChunk::default()
+            };
+            assert!(
+                accumulator
+                    .push(&chunk, &config, Instant::now(), &mut ui)
+                    .is_none()
+            );
+        }
+
+        let result = finish(accumulator, &mut ui);
+        assert_eq!(result.tool_calls[&0].args, "{\"path\":\"README.md\"}");
+    }
+
+    #[test]
+    fn reasoning_limit_returns_terminal_result() {
+        let mut ui = RecordingUi::default();
+        let mut accumulator = StreamAccumulator::new();
+        let config = ModelConfig {
+            reasoning_only_char_limit: 4,
+            ..ModelConfig::default()
+        };
+        let chunk = StreamChunk {
+            reasoning_content: Some("think".to_string()),
+            ..StreamChunk::default()
+        };
+
+        let result = accumulator
+            .push(&chunk, &config, Instant::now(), &mut ui)
+            .expect("limit must stop the stream");
+        let StreamResult::ReasoningStall { chars, .. } = result else {
+            panic!("expected reasoning stall");
+        };
+        assert_eq!(chars, 5);
+        assert!(
+            ui.events
+                .iter()
+                .any(|event| matches!(event, OutputEvent::StreamFinished))
+        );
+    }
 }

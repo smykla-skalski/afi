@@ -28,6 +28,15 @@ use std::path::PathBuf;
 mod transcript;
 pub use transcript::print_transcript;
 
+#[derive(Clone, Copy)]
+struct CliStyle(bool);
+
+impl CliStyle {
+    fn color(self, color: &'static str) -> &'static str {
+        if self.0 { color } else { "" }
+    }
+}
+
 /// Resolve a starting session id from CLI flags: `--resume`/`-r` and
 /// `--session`.
 ///
@@ -220,8 +229,18 @@ pub fn print_session_list<W: Write>(
     start_index: usize,
     current_id: Option<&str>,
 ) {
+    print_session_list_with_style(out, sessions, start_index, current_id, CliStyle(true));
+}
+
+fn print_session_list_with_style<W: Write>(
+    out: &mut W,
+    sessions: &[SessionSummary],
+    start_index: usize,
+    current_id: Option<&str>,
+    style: CliStyle,
+) {
     for (offset, s) in sessions.iter().enumerate() {
-        print_session_row(out, start_index + offset, s, current_id);
+        print_session_row(out, start_index + offset, s, current_id, style);
     }
 }
 
@@ -256,20 +275,25 @@ fn print_session_row<W: Write>(
     i: usize,
     s: &SessionSummary,
     current_id: Option<&str>,
+    style: CliStyle,
 ) {
+    let dim = style.color(DIM);
+    let green = style.color(GREEN);
+    let magenta = style.color(MAGENTA);
+    let reset = style.color(RESET);
     let title = if s.title.is_empty() {
         "(empty)"
     } else {
         &s.title
     };
     let prefix = match current_id {
-        Some(cid) if cid == s.id => format!("  {GREEN}\u{25cf}{RESET} "),
-        _ => format!("  {DIM}{i:>3}{RESET}  "),
+        Some(cid) if cid == s.id => format!("  {green}\u{25cf}{reset} "),
+        _ => format!("  {dim}{i:>3}{reset}  "),
     };
-    let _ = writeln!(out, "{prefix}{MAGENTA}{}{RESET}  {}", s.id, title);
-    let _ = writeln!(out, "       {DIM}{}{RESET}", session_meta(s));
+    let _ = writeln!(out, "{prefix}{magenta}{}{reset}  {title}", s.id);
+    let _ = writeln!(out, "       {dim}{}{reset}", session_meta(s));
     if let Some(detail) = session_detail(s) {
-        let _ = writeln!(out, "       {DIM}{detail}{RESET}");
+        let _ = writeln!(out, "       {dim}{detail}{reset}");
     }
 }
 
@@ -314,6 +338,17 @@ pub fn cli_sessions<W: Write, S: BuildHasher>(
     env: &HashMap<String, String, S>,
     out: &mut W,
 ) -> bool {
+    cli_sessions_with_style(args, env, out, true)
+}
+
+/// TTY-aware variant used by the binary while the original public helper
+/// retains its styled rendering contract for existing callers.
+pub fn cli_sessions_with_style<W: Write, S: BuildHasher>(
+    args: &[String],
+    env: &HashMap<String, String, S>,
+    out: &mut W,
+    styled: bool,
+) -> bool {
     if args.is_empty() {
         return false;
     }
@@ -333,8 +368,12 @@ pub fn cli_sessions<W: Write, S: BuildHasher>(
     let sessions: Vec<SessionSummary> = fetched.into_iter().take(limit).collect();
     let has_next = sessions.len() == limit
         && list_sessions(&dir, Some(1), offset + limit, query.as_deref()).len() == 1;
+    let style = CliStyle(styled);
+    let dim = style.color(DIM);
+    let reset = style.color(RESET);
+    let yellow = style.color(YELLOW);
     for warning in &warnings {
-        let _ = writeln!(out, "{YELLOW}  {warning}{RESET}");
+        let _ = writeln!(out, "{yellow}  {warning}{reset}");
     }
     if sessions.is_empty() {
         print_no_sessions(out, query.as_deref(), page, &dir);
@@ -346,20 +385,20 @@ pub fn cli_sessions<W: Write, S: BuildHasher>(
         .unwrap_or_default();
     let _ = writeln!(
         out,
-        "{DIM}  sessions{} \u{00b7} page {} \u{00b7} {}{RESET}",
+        "{dim}  sessions{} \u{00b7} page {} \u{00b7} {}{reset}",
         where_,
         page,
         dir.display()
     );
-    print_session_list(out, &sessions, offset + 1, None);
+    print_session_list_with_style(out, &sessions, offset + 1, None, style);
     let _ = writeln!(
         out,
-        "{DIM}  resume with: afi --resume <n|short-id|title>{RESET}"
+        "{dim}  resume with: afi --resume <n|short-id|title>{reset}"
     );
     if has_next {
         let _ = writeln!(
             out,
-            "{DIM}  next page: {}{RESET}",
+            "{dim}  next page: {}{reset}",
             session_next_hint("afi sessions", page, limit, query.as_deref())
         );
     }

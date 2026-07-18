@@ -149,7 +149,7 @@ impl Runtime {
     }
 
     /// Swap the active source. Reassigns `active` + `model`. Returns `false`
-    /// (with a printed message) if the name is unknown.
+    /// if the name is unknown.
     ///
     /// `model_override` (optional) pins `model` to a specific id for this
     /// switch - used by `/source <name> <model>` so a multi-model host can be
@@ -157,7 +157,6 @@ impl Runtime {
     /// override) always falls back to the source's configured default.
     pub fn switch_source(&mut self, name: &str, model_override: Option<&str>) -> bool {
         if !self.sources.contains_key(name) {
-            eprintln!("  \u{2717} unknown source {name:?}");
             return false;
         }
         self.active = Some(name.to_string());

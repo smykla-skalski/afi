@@ -6,10 +6,11 @@
 //! a live server.
 
 use async_trait::async_trait;
+use futures::{Stream, StreamExt, TryStreamExt};
 use regex::Regex;
 use reqwest::Client;
+use tokio_util::io::StreamReader;
 
-use crate::model::stream::parse_sse_body;
 use serde_json::Value;
 
 use crate::config::Source;
@@ -17,7 +18,18 @@ use crate::model::stream::StreamChunk;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
+use std::io;
+use std::pin::Pin;
 use std::time::Duration;
+
+/// Live chunks from one streaming chat-completions response.
+pub type ChatCompletionStream =
+    Pin<Box<dyn Stream<Item = Result<StreamChunk, ClientError>> + Send>>;
+
+mod sse;
+use sse::decoded_stream;
+
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 /// Bundles the parameters for a streaming chat completion request.
 #[derive(Debug, Clone)]
@@ -36,11 +48,11 @@ pub struct StreamRequest<'a> {
 /// reqwest; tests can mock it.
 #[async_trait]
 pub trait ChatClient: Send + Sync {
-    /// POST /v1/chat/completions with streaming. Returns a Vec of SSE chunks.
+    /// POST /v1/chat/completions and return its live parsed SSE stream.
     async fn chat_completions_stream(
         &self,
         req: StreamRequest<'_>,
-    ) -> Result<Vec<StreamChunk>, ClientError>;
+    ) -> Result<ChatCompletionStream, ClientError>;
 
     /// POST /v1/chat/completions without streaming. Returns the response text.
     async fn chat_completions(
@@ -72,6 +84,23 @@ pub enum ClientError {
     Http { status: u16, body: String },
     #[error("parse error: {0}")]
     Parse(String),
+}
+
+async fn limited_error_body(response: reqwest::Response) -> String {
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            break;
+        };
+        let remaining = (MAX_ERROR_BODY_BYTES + 1).saturating_sub(body.len());
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if body.len() > MAX_ERROR_BODY_BYTES {
+            body.truncate(MAX_ERROR_BODY_BYTES);
+            return format!("{}\n[truncated]", String::from_utf8_lossy(&body));
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// A reqwest-based implementation of `ChatClient`.
@@ -134,7 +163,7 @@ impl ChatClient for ReqwestClient {
     async fn chat_completions_stream(
         &self,
         stream_req: StreamRequest<'_>,
-    ) -> Result<Vec<StreamChunk>, ClientError> {
+    ) -> Result<ChatCompletionStream, ClientError> {
         let StreamRequest {
             source,
             model,
@@ -185,14 +214,11 @@ impl ChatClient for ReqwestClient {
             .map_err(|e| ClientError::Connection(e.to_string()))?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
+            let body = limited_error_body(resp).await;
             return Err(ClientError::Http { status, body });
         }
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| ClientError::Connection(e.to_string()))?;
-        Ok(parse_sse_body(&text))
+        let bytes = resp.bytes_stream().map_err(io::Error::other);
+        Ok(decoded_stream(StreamReader::new(bytes)))
     }
 
     async fn chat_completions(
@@ -305,3 +331,6 @@ impl ChatClient for ReqwestClient {
         Ok(body)
     }
 }
+
+#[cfg(test)]
+mod tests;

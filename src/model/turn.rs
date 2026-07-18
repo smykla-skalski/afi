@@ -1,31 +1,29 @@
 //! The model turn: one streamed turn (open stream, process SSE chunks,
 //! dispatch tools, return a TURN_* status) and the retry loop that wraps it.
 //!
-//! The request is awaited under `term::activity::run_during_generation`, which
-//! animates the Life spinner and lets Esc interrupt generation; chunk folding,
-//! tool dispatch, and reporting live in the `turn_stream`, `turn_dispatch`, and
-//! `turn_stats` sibling modules.
+//! Frontends receive live chunks through typed UI events. Their cancellation
+//! token races both HTTP setup and every stream read.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
+use futures::StreamExt;
 use serde_json::{Value, json};
 
 use crate::approval::ApprovalState;
 use crate::config::Source;
 use crate::log::log_event;
-use crate::model::client::{ChatClient, ClientError, StreamRequest};
+use crate::model::client::{ChatClient, ChatCompletionStream, ClientError, StreamRequest};
 use crate::model::recovery::recovery_sampling_opts;
-use crate::model::stream::StreamChunk;
 use crate::model::turn_finalize::finalize_turn;
 use crate::model::turn_stats::handle_reasoning_stall;
-use crate::model::turn_stream::{StreamResult, accumulate};
+use crate::model::turn_stream::{StreamAccumulator, StreamResult};
 use crate::model::{FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, ModelConfig, TURN_DONE, TURN_ESC};
 use crate::risk::RiskClassifier;
-use crate::term::activity::{Generation, run_during_generation};
-use crate::term::interrupt::InterruptWatcher;
+use crate::term::{MessageKind, UserInterface};
 use crate::tools;
+use tokio_util::sync::CancellationToken;
 
 pub use crate::model::turn_loop::{LoopRequest, run_model_turn_loop};
 
@@ -48,27 +46,29 @@ pub struct TurnRequest<'a> {
 }
 
 /// Run one streamed model turn. Returns a TURN_* status string.
-pub async fn model_turn(messages: &mut Vec<Value>, tr: TurnRequest<'_>) -> String {
+pub async fn model_turn(
+    messages: &mut Vec<Value>,
+    tr: TurnRequest<'_>,
+    ui: &mut dyn UserInterface,
+) -> String {
     let t0 = Instant::now();
     let (tools_val, tool_choice, max_tokens) = request_params(&tr);
     let extra_body = merged_extra_body(&tr);
 
-    let chunks = match fetch_chunks(
-        &tr,
-        messages,
-        &tools_val,
-        tool_choice.as_ref(),
+    let params = FetchParams {
+        tools: &tools_val,
+        tool_choice: tool_choice.as_ref(),
         max_tokens,
-        extra_body.as_ref(),
-    )
-    .await
-    {
-        Ok(c) => c,
+        extra_body: extra_body.as_ref(),
+        started: t0,
+    };
+    let cancel = ui.start_activity("thinking");
+    let stream_result = match fetch_stream(&tr, messages, &params, &cancel, ui).await {
+        Ok(result) => result,
         Err(status) => return status,
     };
-    log_event("resp", &json!({"chunks": chunks.len()}));
 
-    let acc = match accumulate(&chunks, tr.config, t0) {
+    let acc = match stream_result {
         StreamResult::Done(a) => a,
         StreamResult::ReasoningStall {
             chars,
@@ -81,10 +81,11 @@ pub async fn model_turn(messages: &mut Vec<Value>, tr: TurnRequest<'_>) -> Strin
                 chars,
                 &reasoning_parts,
                 tr.forced_final,
+                ui,
             );
         }
     };
-    finalize_turn(messages, &tr, acc, t0)
+    finalize_turn(messages, &tr, acc, t0, &cancel, ui)
 }
 
 /// The forced-final vs normal tools/token limits for the request.
@@ -127,52 +128,144 @@ fn merged_extra_body(tr: &TurnRequest<'_>) -> Option<Value> {
 
 /// Stream the completion, mapping transport errors and Esc-interrupt to a
 /// terminal TURN_* status (returned as `Err`).
-async fn fetch_chunks(
+struct FetchParams<'a> {
+    tools: &'a Value,
+    tool_choice: Option<&'a Value>,
+    max_tokens: Option<u32>,
+    extra_body: Option<&'a Value>,
+    started: Instant,
+}
+
+async fn fetch_stream(
     tr: &TurnRequest<'_>,
     messages: &mut Vec<Value>,
-    tools_val: &Value,
-    tool_choice: Option<&Value>,
-    max_tokens: Option<u32>,
-    extra_body: Option<&Value>,
-) -> Result<Vec<StreamChunk>, String> {
+    params: &FetchParams<'_>,
+    cancel: &CancellationToken,
+    ui: &mut dyn UserInterface,
+) -> Result<StreamResult, String> {
     let stream_req = StreamRequest {
         source: tr.source,
         model: tr.model,
         messages: messages.as_slice(),
-        tools: Some(tools_val),
-        tool_choice,
-        max_tokens,
-        extra_body,
+        tools: Some(params.tools),
+        tool_choice: params.tool_choice,
+        max_tokens: params.max_tokens,
+        extra_body: params.extra_body,
         recovery_sampling: tr.recovery_sampling,
     };
     log_event(
         "req",
         &json!({"model": tr.model, "stream": true, "forced_final": tr.forced_final, "recovery_sampling": tr.recovery_sampling}),
     );
-    let interrupt = InterruptWatcher::new();
-    let stream_fut = tr.client.chat_completions_stream(stream_req);
-    match run_during_generation(&interrupt, "thinking", stream_fut).await {
-        Generation::Completed(Ok(c)) => Ok(c),
-        Generation::Completed(Err(ClientError::Connection(msg))) => {
-            eprintln!(
-                "\x1b[31m  \u{2717} can't reach {} - is the server up?\n    {}\x1b[0m",
-                tr.source.base_url, msg
-            );
-            Err(TURN_DONE.to_string())
+    let mut stream = match open_stream(tr, stream_req, cancel).await {
+        Ok(stream) => stream,
+        Err(StreamOpenError::Cancelled) => {
+            ui.stop_activity();
+            return Err(interrupt_generation(messages, None, ui));
         }
-        Generation::Completed(Err(ClientError::Http { status, body })) => {
-            let body_short = &body[..body.len().min(200)];
-            eprintln!("\x1b[31m  \u{2717} HTTP {status}: {body_short}\x1b[0m");
-            Err(TURN_DONE.to_string())
+        Err(StreamOpenError::Client(error)) => {
+            ui.stop_activity();
+            return Err(report_client_error(error, tr.source, ui));
         }
-        Generation::Completed(Err(ClientError::Parse(msg))) => {
-            eprintln!("\x1b[31m  \u{2717} parse error: {msg}\x1b[0m");
-            Err(TURN_DONE.to_string())
-        }
-        Generation::Interrupted => {
-            eprintln!("\x1b[33m  \u{21b3} interrupted by Esc\x1b[0m");
-            messages.push(json!({"role": "user", "content": "[User pressed Esc to interrupt generation. Acknowledge briefly and wait.]"}));
-            Err(TURN_ESC.to_string())
+    };
+    let mut accumulator = StreamAccumulator::new();
+    let mut chunks = 0usize;
+    loop {
+        let item = tokio::select! {
+            item = stream.next() => item,
+            () = cancel.cancelled() => {
+                ui.stop_activity();
+                return Err(interrupt_generation(messages, Some(accumulator), ui));
+            }
+        };
+        let Some(item) = item else {
+            break;
+        };
+        let chunk = match item {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                ui.stop_activity();
+                if preserve_partial(messages, accumulator, ui) {
+                    messages.push(json!({"role": "user", "content": "[Runtime note: The previous assistant stream ended before completion. Do not assume the partial answer was complete.]"}));
+                }
+                return Err(report_client_error(error, tr.source, ui));
+            }
+        };
+        chunks += 1;
+        if let Some(result) = accumulator.push(&chunk, tr.config, params.started, ui) {
+            ui.stop_activity();
+            log_event("resp", &json!({"chunks": chunks, "cut": true}));
+            return Ok(result);
         }
     }
+    ui.stop_activity();
+    log_event("resp", &json!({"chunks": chunks}));
+    Ok(accumulator.finish(ui))
+}
+
+async fn open_stream(
+    tr: &TurnRequest<'_>,
+    request: StreamRequest<'_>,
+    cancel: &CancellationToken,
+) -> Result<ChatCompletionStream, StreamOpenError> {
+    tokio::select! {
+        result = tr.client.chat_completions_stream(request) => {
+            result.map_err(StreamOpenError::Client)
+        },
+        () = cancel.cancelled() => Err(StreamOpenError::Cancelled),
+    }
+}
+
+enum StreamOpenError {
+    Cancelled,
+    Client(ClientError),
+}
+
+fn report_client_error(error: ClientError, source: &Source, ui: &mut dyn UserInterface) -> String {
+    let message = match error {
+        ClientError::Connection(message) => {
+            format!(
+                "can't reach {} - is the server up?\n{message}",
+                source.base_url
+            )
+        }
+        ClientError::Http { status, body } => {
+            let body_short: String = body.chars().take(200).collect();
+            format!("HTTP {status}: {body_short}")
+        }
+        ClientError::Parse(message) => format!("parse error: {message}"),
+    };
+    ui.message(MessageKind::Error, message);
+    TURN_DONE.to_string()
+}
+
+fn interrupt_generation(
+    messages: &mut Vec<Value>,
+    accumulator: Option<StreamAccumulator>,
+    ui: &mut dyn UserInterface,
+) -> String {
+    if let Some(accumulator) = accumulator {
+        preserve_partial(messages, accumulator, ui);
+    } else {
+        ui.finish_stream();
+    }
+    ui.message(MessageKind::Warning, "interrupted by Esc".to_string());
+    messages.push(json!({"role": "user", "content": "[User pressed Esc to interrupt generation. Acknowledge briefly and wait.]"}));
+    TURN_ESC.to_string()
+}
+
+fn preserve_partial(
+    messages: &mut Vec<Value>,
+    accumulator: StreamAccumulator,
+    ui: &mut dyn UserInterface,
+) -> bool {
+    let StreamResult::Done(accumulated) = accumulator.finish(ui) else {
+        return false;
+    };
+    let text = accumulated.content_parts.join("");
+    if text.is_empty() {
+        return false;
+    }
+    messages.push(json!({"role": "assistant", "content": text}));
+    true
 }

@@ -3,10 +3,10 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::io::stdout;
+use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
 
-use afi::cli::cli_sessions;
+use afi::cli::cli_sessions_with_style;
 use afi::repl::run_repl;
 
 fn main() {
@@ -18,7 +18,9 @@ fn main() {
         .or_else(|| dirs::home_dir().map(|h| h.join(".env")));
 
     // `afi sessions [query]` short-circuits before the REPL - print and exit.
-    if cli_sessions(&args[1..], &env_map, &mut stdout().lock()) {
+    let stdout = stdout();
+    let styled = stdout.is_terminal();
+    if cli_sessions_with_style(&args[1..], &env_map, &mut stdout.lock(), styled) {
         return;
     }
 

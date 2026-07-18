@@ -2,6 +2,14 @@
 
 All notable changes to `afi` from this point forward.
 
+### Changed — persistent Ratatui REPL
+
+Interactive sessions now use one fullscreen Ratatui application for the header, Markdown transcript, multiline composer, activity state, scrolling, and approval dialogs. A single Crossterm event stream owns terminal input and resize events. This replaces the inline chatbox, Conway's Life spinner, approval reader, and interrupt watcher, which competed for terminal state and placed output on the wrong rows.
+
+Model responses now reach both interfaces as live SSE chunks. The TUI uses `ratatui-textarea`, `throbber-widgets-tui`, and `tui-markdown`; typed UI events keep model and tool code away from terminal output. Esc and Ctrl+C share one task cancellation token, including HTTP generation and Bash waits. Long approval prompts scroll so the user can inspect a full command before deciding.
+
+Piped input, redirected output, and prompt-file runs keep a separate plain interface. It writes no ANSI escapes or prompts to redirected streams, denies non-interactive approval requests, and treats EOF as shutdown instead of retrying forever.
+
 ### Changed — Rust port
 
 `afi` is now a Rust binary. The Python implementation (`minion.py`) at

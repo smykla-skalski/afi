@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 /// A parsed SSE chunk from the streaming chat completions API.
 #[derive(Debug, Clone, Default)]
@@ -17,6 +18,22 @@ pub struct StreamChunk {
     pub finish_reason: Option<String>,
     pub usage: Option<Usage>,
     pub timings: Option<Timings>,
+}
+
+/// Result of decoding one physical SSE line.
+#[derive(Debug)]
+pub(crate) enum SseLine {
+    Chunk(StreamChunk),
+    Done,
+    Ignore,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SseDecodeError {
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("provider error: {0}")]
+    Provider(String),
 }
 
 /// A streamed tool-call delta.
@@ -123,19 +140,32 @@ pub fn normalize_usage(
     None
 }
 
-/// Parse a single `data: {...}` SSE line into a `StreamChunk`. Returns
-/// `None` for `data: [DONE]` or blank lines.
-#[must_use]
-pub fn parse_sse_line(line: &str) -> Option<StreamChunk> {
+/// Decode one physical SSE line, preserving malformed JSON as an error for the
+/// live HTTP stream. Both `data:{...}` and `data: {...}` are accepted.
+pub(crate) fn decode_sse_line(line: &str) -> Result<SseLine, SseDecodeError> {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') {
-        return None;
+        return Ok(SseLine::Ignore);
     }
-    let json_str = line.strip_prefix("data: ")?;
-    if json_str.trim() == "[DONE]" {
-        return None;
+    let Some(json_str) = line.strip_prefix("data:") else {
+        return Ok(SseLine::Ignore);
+    };
+    decode_sse_data(json_str)
+}
+
+/// Decode the joined `data` fields from one SSE event.
+pub(crate) fn decode_sse_data(data: &str) -> Result<SseLine, SseDecodeError> {
+    let data = data.trim_start();
+    if data.trim() == "[DONE]" {
+        return Ok(SseLine::Done);
     }
-    let v: Value = serde_json::from_str(json_str).ok()?;
+    if data.trim().is_empty() {
+        return Ok(SseLine::Ignore);
+    }
+    let v: Value = serde_json::from_str(data)?;
+    if let Some(error) = v.get("error") {
+        return Err(SseDecodeError::Provider(provider_error_message(error)));
+    }
 
     let mut chunk = StreamChunk::default();
     if let Some(choice) = v
@@ -152,7 +182,25 @@ pub fn parse_sse_line(line: &str) -> Option<StreamChunk> {
     if let Some(t) = v.get("timings") {
         chunk.timings = serde_json::from_value(t.clone()).ok();
     }
-    Some(chunk)
+    Ok(SseLine::Chunk(chunk))
+}
+
+fn provider_error_message(error: &Value) -> String {
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .map_or_else(|| error.to_string(), str::to_string)
+}
+
+/// Parse a single `data: {...}` SSE line into a `StreamChunk`. Returns
+/// `None` for terminal, ignored, or malformed lines.
+#[must_use]
+pub fn parse_sse_line(line: &str) -> Option<StreamChunk> {
+    match decode_sse_line(line).ok()? {
+        SseLine::Chunk(chunk) => Some(chunk),
+        SseLine::Done | SseLine::Ignore => None,
+    }
 }
 
 /// Fold one `choices[0]` entry (delta `content`/`reasoning`/`tool_calls` +
@@ -201,9 +249,24 @@ fn parse_tool_delta(tc: &Value) -> ToolCallDelta {
 /// Parse a full SSE response body into a Vec of `StreamChunks`.
 #[must_use]
 pub fn parse_sse_body(body: &str) -> Vec<StreamChunk> {
-    body.split("\n\n")
-        .flat_map(|event| event.lines().filter_map(parse_sse_line).collect::<Vec<_>>())
-        .collect()
+    let mut chunks = Vec::new();
+    let mut data = Vec::new();
+    for line in body.lines().chain([""]) {
+        if let Some(value) = line.strip_prefix("data:") {
+            data.push(value.trim_start());
+            continue;
+        }
+        if !line.is_empty() || data.is_empty() {
+            continue;
+        }
+        match decode_sse_data(&data.join("\n")) {
+            Ok(SseLine::Chunk(chunk)) => chunks.push(chunk),
+            Ok(SseLine::Done) => return chunks,
+            Ok(SseLine::Ignore) | Err(_) => {}
+        }
+        data.clear();
+    }
+    chunks
 }
 
 #[cfg(test)]
@@ -261,6 +324,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_sse_line_accepts_data_without_space() {
+        let line = r#"data:{"choices":[{"delta":{"content":"hello"}}]}"#;
+        let chunk = parse_sse_line(line).unwrap();
+        assert_eq!(chunk.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn live_decoder_reports_malformed_json() {
+        assert!(decode_sse_line("data: {broken").is_err());
+    }
+
+    #[test]
+    fn live_decoder_reports_provider_error_payload() {
+        let error = decode_sse_line(r#"data: {"error":{"message":"overloaded"}}"#)
+            .expect_err("provider error must fail the stream");
+        assert!(error.to_string().contains("overloaded"));
+    }
+
+    #[test]
     fn parse_sse_line_done() {
         let line = "data: [DONE]";
         assert!(parse_sse_line(line).is_none());
@@ -297,5 +379,13 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].content, Some("a".to_string()));
         assert_eq!(chunks[1].content, Some("b".to_string()));
+    }
+
+    #[test]
+    fn parse_sse_body_joins_data_fields() {
+        let body = "data: {\"choices\":[\ndata: {\"delta\":{\"content\":\"a\"}}\ndata: ]}\n\n";
+        let chunks = parse_sse_body(body);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content.as_deref(), Some("a"));
     }
 }

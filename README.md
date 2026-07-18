@@ -4,15 +4,9 @@
 
 A no-nonsense coding agent that doesn't use 50K tokens of context to say "hello."
 
-`afi` is a Rust binary that talks to any OpenAI-compatible endpoint - a local
-llama.cpp / vLLM / SGLang server, or a remote API like Z.ai or OpenAI itself -
-and starts chatting with an agent that can read, write, edit, and run shell
-commands in your project.
+`afi` is a Rust binary that talks to any OpenAI-compatible endpoint - a local llama.cpp / vLLM / SGLang server, or a remote API like Z.ai or OpenAI itself - and opens an agent that can read, write, edit, and run shell commands in your project.
 
-This is a from-scratch Rust port of the original single-file Python
-[`minion.py`](https://github.com/Sentdex/minion). The CLI flags, env vars,
-slash commands, and behavior are byte-identical except for two documented
-breaking changes (see [CHANGELOG.md](CHANGELOG.md)):
+This is a from-scratch Rust port of the original single-file Python [`minion.py`](https://github.com/Sentdex/minion). The CLI flags, env vars, slash commands, and behavior remain compatible except for the intentional interface and storage changes documented in [CHANGELOG.md](CHANGELOG.md):
 
 - the traffic log moved from `llamacpp.log` next to the script to
   `~/.afi/logs/traffic.jsonl`
@@ -119,16 +113,18 @@ Switch at runtime with `/source [name]`.
 | `/help`             | show available commands                                  |
 | `/quit`             | exit                                                     |
 
-## Input
+## Terminal interfaces
 
-The prompt is a multi-line editor with a framed box:
+When stdin and stdout are terminals, afi runs one persistent fullscreen Ratatui interface. The header, Markdown conversation, activity indicator, multiline composer, footer, and approval dialog share one layout and one input loop.
 
-- **Enter** submits; **Alt+Enter** or **Ctrl+J** inserts a newline
-- **Paste** (bracketed-paste) inserts text verbatim, including newlines
-- **Up/Down** navigate history; **Left/Right** move within the line
-- **Home/End** jump to line start/end; **Ctrl+U** clears; **Ctrl+C** cancels
+- **Enter** submits; **Alt+Enter** or **Ctrl+J** inserts a newline.
+- **Paste** inserts text verbatim, including newlines.
+- **Alt+Up/Down** navigates prompt history; standard editor keys move and edit text.
+- **PageUp/PageDown** scrolls the conversation or an open approval dialog.
+- **Esc** or **Ctrl+C** requests cancellation of active work; **Ctrl+C** exits while idle.
+- **Y** approves a requested action; **N**, **Enter**, or **Esc** denies or cancels it.
 
-Falls back to plain `read_line` when stdin/stdout isn't a TTY.
+When either stream is not a terminal, afi uses a plain line-oriented interface. It emits no terminal control sequences or prompts to redirected stdout, and non-interactive approval requests deny by default. `--prompt-file <path>` and `--prompt-file -` always use this plain interface.
 
 ## Sessions (save / resume)
 

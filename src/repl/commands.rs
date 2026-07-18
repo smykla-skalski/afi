@@ -4,9 +4,8 @@
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use tokio::runtime::Runtime as TokioRuntime;
 
-use super::{CYAN, DIM, GREEN, MAGENTA, RED, RESET, TurnParams, YELLOW, banner, run_turn_loop};
+use super::{TurnParams, header, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
 use crate::config::{Runtime, Source};
 use crate::memory::{list_memories, remember_memories};
@@ -16,6 +15,14 @@ use crate::model::compress::COMPRESS_KEEP;
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
 use crate::prompt::SYSTEM;
 use crate::sessions::{self, new_session_id, resolve_session};
+use crate::term::{MessageKind, UserInterface};
+use MessageKind::{Error, Info, Warning};
+
+type Env = HashMap<String, String>;
+type Ui<'a> = &'a mut dyn UserInterface;
+
+const MEMORY_USAGE: &str = "Usage:\n  /memory save [focus...]   save a memory\n  /memory remember <query>  search memories\n  /memory list              list all memories";
+const HELP: &str = "Commands:\n  /source [name] [model]  list/switch sources\n  /yolo                   toggle auto-approve\n  /approval [level]       show/set approval mode\n  /sessions               list saved sessions\n  /save [title]           save current session\n  /delete [target]        delete a session\n  /compress               compress context\n  /reset                  start fresh session\n  /memory save|remember|list  manage memories\n  /quit                   exit";
 
 /// The result of evaluating a slash command.
 pub enum CommandResult {
@@ -27,16 +34,20 @@ pub enum CommandResult {
     NotACommand,
 }
 
+fn say(ui: Ui<'_>, kind: MessageKind, text: impl Into<String>) {
+    ui.message(kind, text.into());
+}
+
 /// Dispatch a slash command. Returns `CommandResult::Quit` for `/quit`,
 /// `CommandResult::Continue` for handled commands, `CommandResult::NotACommand`
 /// for non-slash input.
-pub(crate) fn handle_slash_command(
+pub(crate) async fn handle_slash_command(
     input: &str,
     rt: &mut Runtime,
     messages: &mut Vec<Value>,
     session_id: &mut String,
-    _history: &mut [String],
-    env: &HashMap<String, String>,
+    env: &Env,
+    ui: Ui<'_>,
 ) -> CommandResult {
     let input = input.trim();
     if !input.starts_with('/') {
@@ -48,47 +59,45 @@ pub(crate) fn handle_slash_command(
     let arg = parts.get(1).map_or("", |s| s.trim());
 
     match cmd {
-        "/quit" | "/exit" => CommandResult::Quit,
-        "/reset" | "/clear" | "/new" => cmd_reset(messages, session_id),
-        "/yolo" => cmd_yolo(rt),
-        "/approval" => cmd_approval(rt, arg),
-        "/source" => cmd_source(rt, arg),
-        "/compress" | "/compact" => cmd_compress(rt, messages),
-        "/save" => cmd_save(messages, session_id, arg, env),
-        "/sessions" => cmd_sessions(session_id, env),
-        "/delete" => cmd_delete(session_id, arg, env),
-        "/memory" => cmd_memory(arg, env),
-        "/recover" => cmd_recover(rt, messages, arg, env),
-        "/autocompress" => cmd_autocompress(arg, env),
-        "/provider" => cmd_provider(rt, arg),
-        "/help" => print_help(),
+        "/quit" | "/exit" => return CommandResult::Quit,
+        "/reset" | "/clear" | "/new" => cmd_reset(messages, session_id, ui),
+        "/yolo" => cmd_yolo(rt, ui),
+        "/approval" => cmd_approval(rt, arg, ui),
+        "/source" => cmd_source(rt, arg, ui),
+        "/compress" | "/compact" => cmd_compress(rt, messages, ui).await,
+        "/save" => cmd_save(messages, session_id, arg, env, ui),
+        "/sessions" => cmd_sessions(session_id, env, ui),
+        "/delete" => cmd_delete(session_id, arg, env, ui),
+        "/memory" => cmd_memory(arg, env, ui),
+        "/recover" => cmd_recover(rt, messages, arg, env, ui).await,
+        "/autocompress" => cmd_autocompress(arg, env, ui),
+        "/provider" => cmd_provider(rt, arg, ui),
+        "/help" => print_help(ui),
         _ => {
-            println!("{YELLOW}  unknown command {cmd:?} (try /help){RESET}");
-            CommandResult::Continue
+            say(ui, Warning, format!("Unknown command {cmd:?} (try /help)"));
         }
     }
-}
-
-fn cmd_reset(messages: &mut Vec<Value>, session_id: &mut String) -> CommandResult {
-    *messages = vec![json!({"role": "system", "content": SYSTEM})];
-    *session_id = new_session_id();
-    println!("{DIM}  ↻ started a fresh session ({session_id}){RESET}");
     CommandResult::Continue
 }
 
-fn cmd_yolo(rt: &mut Runtime) -> CommandResult {
+fn cmd_reset(messages: &mut Vec<Value>, session_id: &mut String, ui: Ui<'_>) {
+    *messages = vec![json!({"role": "system", "content": SYSTEM})];
+    *session_id = new_session_id();
+    say(ui, Info, format!("Started a fresh session ({session_id})"));
+}
+
+fn cmd_yolo(rt: &mut Runtime, ui: Ui<'_>) {
     rt.approval.yolo = !rt.approval.yolo;
     if rt.approval.yolo {
         rt.approval.approve_level = None;
-        println!("{GREEN}  yolo mode on{RESET}");
+        say(ui, Info, "Yolo mode on");
     } else {
-        println!("{DIM}  yolo mode off{RESET}");
+        say(ui, Info, "Yolo mode off");
     }
-    println!("{}", banner(rt));
-    CommandResult::Continue
+    ui.header(header(rt));
 }
 
-fn cmd_approval(rt: &mut Runtime, arg: &str) -> CommandResult {
+fn cmd_approval(rt: &mut Runtime, arg: &str, ui: Ui<'_>) {
     if arg.is_empty() {
         let display = if rt.approval.yolo {
             "off (yolo)".to_string()
@@ -98,90 +107,100 @@ fn cmd_approval(rt: &mut Runtime, arg: &str) -> CommandResult {
                 Some(l) => l.to_string(),
             }
         };
-        println!("{DIM}  approval: {display}{RESET}");
+        say(ui, Info, format!("Approval: {display}"));
     } else if let Some(kind) = normalize_approval(arg) {
         apply_approval(&mut rt.approval, kind, true);
-        println!(
-            "{DIM}  approval set to: {}{RESET}",
-            approval_display(&rt.approval)
+        say(
+            ui,
+            Info,
+            format!("Approval set to: {}", approval_display(&rt.approval)),
         );
+        ui.header(header(rt));
     } else {
-        println!("{RED}  unknown approval level {arg:?} (want all|low|medium|high|yolo){RESET}");
+        say(
+            ui,
+            Error,
+            format!("Unknown approval level {arg:?} (want all|low|medium|high|yolo)"),
+        );
     }
-    CommandResult::Continue
 }
 
-fn cmd_source(rt: &mut Runtime, arg: &str) -> CommandResult {
+fn cmd_source(rt: &mut Runtime, arg: &str, ui: Ui<'_>) {
     if arg.is_empty() {
-        for name in &rt.source_order {
-            let src = &rt.sources[name];
-            let active_mark = if rt.active.as_deref() == Some(name.as_str()) {
-                format!("{GREEN}●{RESET} ")
-            } else {
-                format!("{DIM}○{RESET} ")
-            };
-            let model = src.display_model();
-            println!(
-                "  {active_mark}{MAGENTA}{name}{RESET} {CYAN}{model}{RESET} {DIM}{}{RESET}",
-                src.base_url
-            );
-        }
-        return CommandResult::Continue;
+        let sources = rt
+            .source_order
+            .iter()
+            .map(|name| {
+                let src = &rt.sources[name];
+                let mark = if rt.active.as_deref() == Some(name.as_str()) {
+                    '●'
+                } else {
+                    '○'
+                };
+                format!("{mark} {name} {} {}", src.display_model(), src.base_url)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        say(ui, Info, sources);
+        return;
     }
     let source_parts: Vec<&str> = arg.split_whitespace().collect();
     let name = source_parts[0];
     let model_override = source_parts.get(1).map(ToString::to_string);
     if rt.switch_source(name, model_override.as_deref()) {
-        println!("{DIM}  → switched to {name}{RESET}");
-        println!("{}", banner(rt));
+        say(ui, Info, format!("Switched to {name}"));
+        ui.header(header(rt));
     } else {
-        println!("{RED}  ✗ unknown source {name:?}{RESET}");
+        say(ui, Error, format!("Unknown source {name:?}"));
     }
-    CommandResult::Continue
 }
 
-fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>) -> CommandResult {
+async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, ui: Ui<'_>) {
     let body_len = messages.len().saturating_sub(1);
     if body_len <= COMPRESS_KEEP {
-        println!("{DIM}  nothing to compress (too few turns){RESET}");
-        return CommandResult::Continue;
+        say(ui, Info, "Nothing to compress (too few turns)");
+        return;
     }
-    println!("{DIM}  compressing context...{RESET}");
     let (Some(source), Some(model)) = (rt.active_source(), rt.model.as_ref()) else {
-        eprintln!("{RED}  no active source{RESET}");
-        return CommandResult::Continue;
+        say(ui, Error, "No active source");
+        return;
     };
-    if let Some(summary) = request_compression(source, model) {
-        apply_compression(messages, &summary);
-        println!("{DIM}  compressed context{RESET}");
+
+    let cancel = ui.start_activity("Compressing context");
+    let result = tokio::select! {
+        result = request_compression(source, model) => Some(result),
+        () = cancel.cancelled() => None,
+    };
+    ui.stop_activity();
+    match result {
+        Some(Ok(Some(summary))) => {
+            apply_compression(messages, &summary);
+            say(ui, Info, "Compressed context");
+        }
+        Some(Ok(None)) => {}
+        Some(Err(error)) => {
+            say(ui, Error, format!("Compress failed: {error}"));
+        }
+        None => say(ui, Info, "Compression cancelled"),
     }
-    CommandResult::Continue
 }
 
 /// Ask the model for a one-shot summary of the conversation so far.
-fn request_compression(source: &Source, model: &str) -> Option<String> {
+async fn request_compression(source: &Source, model: &str) -> Result<Option<String>, String> {
     let client = ReqwestClient::new();
-    let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
     let extra_body = source.extra_request_kwargs();
-    runtime.block_on(async {
-        let prompt = "Summarize the following conversation history for context retention.";
-        match client
-            .chat_completions(
-                source,
-                model,
-                &[json!({"role": "user", "content": prompt})],
-                30,
-                extra_body.as_ref(),
-            )
-            .await
-        {
-            Ok(text) => parse_completion_content(&text),
-            Err(e) => {
-                eprintln!("{RED}  compress failed: {e}{RESET}");
-                None
-            }
-        }
-    })
+    let prompt = "Summarize the following conversation history for context retention.";
+    let text = client
+        .chat_completions(
+            source,
+            model,
+            &[json!({"role": "user", "content": prompt})],
+            30,
+            extra_body.as_ref(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(parse_completion_content(&text))
 }
 
 /// Pull `choices[0].message.content` out of a chat-completions JSON response.
@@ -214,12 +233,7 @@ fn apply_compression(messages: &mut Vec<Value>, summary: &str) {
     *messages = new_msgs;
 }
 
-fn cmd_save(
-    messages: &mut Vec<Value>,
-    session_id: &str,
-    arg: &str,
-    env: &HashMap<String, String>,
-) -> CommandResult {
+fn cmd_save(messages: &mut Vec<Value>, session_id: &str, arg: &str, env: &Env, ui: Ui<'_>) {
     let dir = sessions::sessions_dir(env);
     let meta = if arg.is_empty() {
         json!({})
@@ -227,99 +241,101 @@ fn cmd_save(
         json!({ "title": arg })
     };
     let _ = sessions::write_session(&dir, session_id, messages, Some(&meta));
-    println!("{DIM}  saved session {session_id}{RESET}");
-    CommandResult::Continue
+    say(ui, Info, format!("Saved session {session_id}"));
 }
 
-fn cmd_sessions(session_id: &str, env: &HashMap<String, String>) -> CommandResult {
+fn cmd_sessions(session_id: &str, env: &Env, ui: Ui<'_>) {
     let dir = sessions::sessions_dir(env);
     let sessions_list = sessions::list_sessions(&dir, Some(15), 0, None);
     if sessions_list.is_empty() {
-        println!("{DIM}  no saved sessions{RESET}");
-        return CommandResult::Continue;
+        say(ui, Info, "No saved sessions");
+        return;
     }
-    for (i, s) in sessions_list.iter().enumerate() {
-        let mark = if s.id == *session_id {
-            format!("{GREEN}●{RESET}")
-        } else {
-            format!("{DIM}{}{RESET}", i + 1)
-        };
-        println!("  {mark} {MAGENTA}{}{RESET} {}", s.id, s.title);
-    }
-    CommandResult::Continue
+    let rows = sessions_list
+        .iter()
+        .enumerate()
+        .map(|(index, session)| {
+            let mark = if session.id == *session_id {
+                "●".to_string()
+            } else {
+                (index + 1).to_string()
+            };
+            format!("{mark} {} {}", session.id, session.title)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    say(ui, Info, rows);
 }
 
-fn cmd_delete(session_id: &str, arg: &str, env: &HashMap<String, String>) -> CommandResult {
+fn cmd_delete(session_id: &str, arg: &str, env: &Env, ui: Ui<'_>) {
     if arg.is_empty() {
-        println!("{YELLOW}  usage: /delete <n|id>{RESET}");
-        return CommandResult::Continue;
+        say(ui, Warning, "Usage: /delete <n|id>");
+        return;
     }
     let dir = sessions::sessions_dir(env);
     let sessions_list = sessions::list_sessions(&dir, Some(50), 0, None);
     let Some(sid) = resolve_session(arg, &sessions_list) else {
-        println!("{YELLOW}  no session matching {arg:?}{RESET}");
-        return CommandResult::Continue;
+        say(ui, Warning, format!("No session matching {arg:?}"));
+        return;
     };
     if sid == *session_id {
-        println!("{YELLOW}  cannot delete the current session{RESET}");
+        say(ui, Warning, "Cannot delete the current session");
     } else if sessions::delete_session(&dir, &sid) {
-        println!("{DIM}  deleted session {sid}{RESET}");
+        say(ui, Info, format!("Deleted session {sid}"));
     } else {
-        println!("{RED}  ✗ could not delete session {sid}{RESET}");
+        say(ui, Error, format!("Could not delete session {sid}"));
     }
-    CommandResult::Continue
 }
 
-fn cmd_memory(arg: &str, env: &HashMap<String, String>) -> CommandResult {
+fn cmd_memory(arg: &str, env: &Env, ui: Ui<'_>) {
     let sub_parts: Vec<&str> = arg.splitn(2, ' ').collect();
     match sub_parts.first().copied() {
-        Some("list") => memory_list(env),
-        Some("remember") => memory_remember(sub_parts.get(1).copied().unwrap_or(""), env),
-        Some("save") => println!("{DIM}  (memory save requires a live model connection){RESET}"),
-        _ => print_memory_usage(),
+        Some("list") => memory_list(env, ui),
+        Some("remember") => {
+            memory_remember(sub_parts.get(1).copied().unwrap_or(""), env, ui);
+        }
+        Some("save") => say(ui, Info, "Memory save requires a live model connection"),
+        _ => print_memory_usage(ui),
     }
-    CommandResult::Continue
 }
 
-fn memory_list(env: &HashMap<String, String>) {
+fn memory_list(env: &Env, ui: Ui<'_>) {
     let memories = list_memories(env);
     if memories.is_empty() {
-        println!("{DIM}  no saved memories{RESET}");
+        say(ui, Info, "No saved memories");
         return;
     }
-    for (name, title) in &memories {
-        println!("  {MAGENTA}{name}{RESET} {DIM}{title}{RESET}");
-    }
+    let rows = memories
+        .iter()
+        .map(|(name, title)| format!("{name} {title}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    say(ui, Info, rows);
 }
 
-fn memory_remember(query: &str, env: &HashMap<String, String>) {
+fn memory_remember(query: &str, env: &Env, ui: Ui<'_>) {
     if query.is_empty() {
-        println!("{YELLOW}  usage: /memory remember <query>{RESET}");
+        say(ui, Warning, "Usage: /memory remember <query>");
         return;
     }
     let results = remember_memories(env, query);
     if results.is_empty() {
-        println!("{DIM}  no memories matching {query:?}{RESET}");
+        say(ui, Info, format!("No memories matching {query:?}"));
         return;
     }
-    for (name, title, _) in &results {
-        println!("  {MAGENTA}{name}{RESET} {DIM}{title}{RESET}");
-    }
+    let rows = results
+        .iter()
+        .map(|(name, title, _)| format!("{name} {title}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    say(ui, Info, rows);
 }
 
-fn print_memory_usage() {
-    println!("{DIM}  usage:{RESET}");
-    println!("{DIM}    /memory save [focus...]   save a memory{RESET}");
-    println!("{DIM}    /memory remember <query>   search memories{RESET}");
-    println!("{DIM}    /memory list               list all memories{RESET}");
+fn print_memory_usage(ui: Ui<'_>) {
+    say(ui, Info, MEMORY_USAGE);
 }
 
-fn cmd_recover(
-    rt: &Runtime,
-    messages: &mut Vec<Value>,
-    arg: &str,
-    env: &HashMap<String, String>,
-) -> CommandResult {
+async fn cmd_recover(rt: &Runtime, messages: &mut Vec<Value>, arg: &str, env: &Env, ui: Ui<'_>) {
     let note = if arg.is_empty() {
         String::new()
     } else {
@@ -328,8 +344,8 @@ fn cmd_recover(
     let nudge = format!("{MANUAL_RECOVERY_NUDGE}{note}");
     messages.push(json!({"role": "user", "content": format!("[Runtime note: {nudge}]")}));
     let (Some(source), Some(model)) = (rt.active_source(), rt.model.as_ref()) else {
-        eprintln!("{RED}  no active source{RESET}");
-        return CommandResult::Continue;
+        say(ui, Error, "No active source");
+        return;
     };
     let config = ModelConfig::from_env(env);
     run_turn_loop(
@@ -343,52 +359,40 @@ fn cmd_recover(
             force_final: true,
             recovery_sampling: true,
         },
-    );
-    CommandResult::Continue
+        ui,
+    )
+    .await;
 }
 
-fn cmd_autocompress(arg: &str, env: &HashMap<String, String>) -> CommandResult {
+fn cmd_autocompress(arg: &str, env: &Env, ui: Ui<'_>) {
     let config = ModelConfig::from_env(env);
     if arg.is_empty() {
         let pct = config.autocompress_percent;
         if pct == 0 {
-            println!("{DIM}  auto-compress: off{RESET}");
+            say(ui, Info, "Auto-compress: off");
         } else {
-            println!("{DIM}  auto-compress: {pct}%{RESET}");
+            say(ui, Info, format!("Auto-compress: {pct}%"));
         }
     } else {
-        println!("{DIM}  (autocompress setting updated){RESET}");
+        say(ui, Info, "Auto-compress setting updated");
     }
-    CommandResult::Continue
 }
 
-fn cmd_provider(rt: &Runtime, arg: &str) -> CommandResult {
+fn cmd_provider(rt: &Runtime, arg: &str, ui: Ui<'_>) {
     if arg.is_empty() {
         if let Some(src) = rt.active_source() {
             let order = src.provider_order();
             if order.is_empty() {
-                println!("{DIM}  no provider routing set{RESET}");
+                say(ui, Info, "No provider routing set");
             } else {
-                println!("{DIM}  provider order: {}{RESET}", order.join(", "));
+                say(ui, Info, format!("Provider order: {}", order.join(", ")));
             }
         }
     } else {
-        println!("{DIM}  (provider routing updated){RESET}");
+        say(ui, Info, "Provider routing updated");
     }
-    CommandResult::Continue
 }
 
-fn print_help() -> CommandResult {
-    println!("{DIM}  commands:{RESET}");
-    println!("{DIM}    /source [name] [model]  list/switch sources{RESET}");
-    println!("{DIM}    /yolo                   toggle auto-approve{RESET}");
-    println!("{DIM}    /approval [level]       show/set approval mode{RESET}");
-    println!("{DIM}    /sessions               list saved sessions{RESET}");
-    println!("{DIM}    /save [title]           save current session{RESET}");
-    println!("{DIM}    /delete [target]        delete a session{RESET}");
-    println!("{DIM}    /compress               compress context{RESET}");
-    println!("{DIM}    /reset                  start fresh session{RESET}");
-    println!("{DIM}    /memory save|remember|list  manage memories{RESET}");
-    println!("{DIM}    /quit                   exit{RESET}");
-    CommandResult::Continue
+fn print_help(ui: Ui<'_>) {
+    say(ui, Info, HELP);
 }

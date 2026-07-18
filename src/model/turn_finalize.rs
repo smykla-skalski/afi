@@ -16,10 +16,12 @@ use crate::model::turn_dispatch::{
     DispatchArgs, ToolCallAccum, ToolRunOutcome, dispatch_structured, dispatch_text,
     order_tool_calls,
 };
-use crate::model::turn_stats::{handle_reasoning_stall, print_stats_footer};
+use crate::model::turn_stats::{TurnStats, handle_reasoning_stall, print_stats_footer};
 use crate::model::turn_stream::Accumulated;
 use crate::model::{TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL};
+use crate::term::{MessageKind, StreamKind, UserInterface};
 use crate::tools::protocol::parse_text_calls;
+use tokio_util::sync::CancellationToken;
 
 /// Post-stream: print stats, then run the reasoning-stall / forced-final /
 /// tool-dispatch / empty-turn phases in order, returning the first terminal
@@ -29,6 +31,8 @@ pub(crate) fn finalize_turn(
     tr: &TurnRequest<'_>,
     acc: Accumulated,
     t0: Instant,
+    cancel: &CancellationToken,
+    ui: &mut dyn UserInterface,
 ) -> String {
     let Accumulated {
         content_parts,
@@ -54,13 +58,16 @@ pub(crate) fn finalize_turn(
         .or_else(|| timings.as_ref().map(|t| t.predicted_n))
         .unwrap_or(0);
     print_stats_footer(
-        prompt_tokens,
-        completion_tokens,
-        elapsed,
-        t_first,
-        streamed_chars,
-        &text,
-        &tool_calls,
+        &TurnStats {
+            prompt_tokens,
+            completion_tokens,
+            elapsed,
+            t_first,
+            streamed_chars,
+            text: &text,
+            tool_calls: &tool_calls,
+        },
+        ui,
     );
     let _ = normalize_usage(usage.as_ref(), timings.as_ref(), streamed_chars);
 
@@ -76,18 +83,20 @@ pub(crate) fn finalize_turn(
             reasoning_only_chars,
             &reasoning_parts,
             tr.forced_final,
+            ui,
         );
     }
-    if let Some(status) = forced_final_result(messages, tr, &tool_calls, &text, &finish_reasons) {
+    if let Some(status) = forced_final_result(messages, tr, &tool_calls, &text, &finish_reasons, ui)
+    {
         return status;
     }
-    if let Some(status) = run_structured_tools(messages, tr, &tool_calls, &text) {
+    if let Some(status) = run_structured_tools(messages, tr, &tool_calls, &text, cancel, ui) {
         return status;
     }
-    if let Some(status) = run_text_tools(messages, tr, &text) {
+    if let Some(status) = run_text_tools(messages, tr, &text, cancel, ui) {
         return status;
     }
-    handle_empty_or_final(messages, tr, &text)
+    handle_empty_or_final(messages, tr, &text, ui)
 }
 
 /// The forced-final answer / token-limit outcomes, if `forced_final` is set.
@@ -97,15 +106,19 @@ fn forced_final_result(
     tool_calls: &HashMap<u32, ToolCallAccum>,
     text: &str,
     finish_reasons: &[String],
+    ui: &mut dyn UserInterface,
 ) -> Option<String> {
     if tr.forced_final && !tool_calls.is_empty() {
-        return Some(emit_forced_final(messages, tool_calls));
+        return Some(emit_forced_final(messages, tool_calls, ui));
     }
     if tr.forced_final
         && !text.trim().is_empty()
         && finish_reasons.iter().any(|f| f.contains("length"))
     {
-        eprintln!("\x1b[33m  \u{2702} FORCED FINAL HIT TOKEN LIMIT - saved partial\x1b[0m");
+        ui.message(
+            MessageKind::Warning,
+            "FORCED FINAL HIT TOKEN LIMIT - saved partial".to_string(),
+        );
         messages.push(json!({"role": "assistant", "content": format!("{}\n\n[Truncated by token limit before completion.]", text.trim_end())}));
         return Some(TURN_DONE.to_string());
     }
@@ -116,6 +129,7 @@ fn forced_final_result(
 fn emit_forced_final(
     messages: &mut Vec<Value>,
     tool_calls: &HashMap<u32, ToolCallAccum>,
+    ui: &mut dyn UserInterface,
 ) -> String {
     let ordered = order_tool_calls(tool_calls);
     for c in &ordered {
@@ -129,9 +143,10 @@ fn emit_forced_final(
             .unwrap_or("")
             .trim();
         if answer.is_empty() {
-            eprintln!("\x1b[31m  \u{2702} FORCED FINAL ANSWER EMPTY\x1b[0m");
+            ui.message(MessageKind::Error, "FORCED FINAL ANSWER EMPTY".to_string());
         } else {
-            println!("\x1b[32m{answer}\x1b[0m");
+            ui.stream(StreamKind::Assistant, answer.to_string());
+            ui.finish_stream();
             messages.push(json!({"role": "assistant", "content": answer}));
         }
         return TURN_DONE.to_string();
@@ -140,23 +155,11 @@ fn emit_forced_final(
         .iter()
         .map(|c| c.name.as_deref().unwrap_or("tool"))
         .collect();
-    eprintln!(
-        "\x1b[31m  \u{2702} FORCED FINAL FAILED - model emitted {}\x1b[0m",
-        names.join(", ")
+    ui.message(
+        MessageKind::Error,
+        format!("FORCED FINAL FAILED - model emitted {}", names.join(", ")),
     );
     TURN_DONE.to_string()
-}
-
-/// The `DispatchArgs` view of a turn request.
-fn dispatch_args<'a>(tr: &TurnRequest<'a>) -> DispatchArgs<'a> {
-    DispatchArgs {
-        approval: tr.approval,
-        classifier: tr.classifier,
-        cwd: tr.cwd,
-        project_root: tr.project_root,
-        env: tr.env,
-        config: tr.config,
-    }
 }
 
 /// Push the assistant turn that carries the structured tool calls.
@@ -177,22 +180,26 @@ fn malformed_tool_retry(
     ordered: &[ToolCallAccum],
     idx: usize,
     err: &str,
+    ui: &mut dyn UserInterface,
 ) -> String {
     let name = ordered[idx].name.as_deref().unwrap_or("tool");
     let retry_limit = tr.config.malformed_stream_retry_limit;
     if tr.malformed_stream_cut_count >= retry_limit {
-        eprintln!(
-            "\x1b[31m  \u{2717} malformed tool call after {} recoveries\x1b[0m",
-            tr.malformed_stream_cut_count
+        ui.message(
+            MessageKind::Error,
+            format!(
+                "malformed tool call after {} recoveries",
+                tr.malformed_stream_cut_count
+            ),
         );
         return TURN_DONE.to_string();
     }
-    eprintln!(
-        "\x1b[33m  \u{2702} MALFORMED TOOL CALL - {} args invalid ({}); retrying ({}/{})\x1b[0m",
-        name,
-        err,
-        tr.malformed_stream_cut_count + 1,
-        retry_limit
+    ui.message(
+        MessageKind::Warning,
+        format!(
+            "MALFORMED TOOL CALL - {name} args invalid ({err}); retrying ({}/{retry_limit})",
+            tr.malformed_stream_cut_count + 1
+        ),
     );
     nudge_current_user_turn(
         messages,
@@ -207,6 +214,8 @@ fn run_structured_tools(
     tr: &TurnRequest<'_>,
     tool_calls: &HashMap<u32, ToolCallAccum>,
     text: &str,
+    cancel: &CancellationToken,
+    ui: &mut dyn UserInterface,
 ) -> Option<String> {
     if tool_calls.is_empty() {
         return None;
@@ -223,22 +232,35 @@ fn run_structured_tools(
                     &ordered,
                     i,
                     &e.to_string(),
+                    ui,
                 ));
             }
         }
     }
     push_assistant_tool_calls(messages, &ordered, text);
-    let da = dispatch_args(tr);
+    let mut da = DispatchArgs {
+        approval: tr.approval,
+        classifier: tr.classifier,
+        cwd: tr.cwd,
+        project_root: tr.project_root,
+        env: tr.env,
+        config: tr.config,
+        cancel,
+        ui,
+    };
     match dispatch_structured(
         messages,
         &ordered,
         &parsed_args,
-        &da,
+        &mut da,
         tr.config.tool_result_chars,
     ) {
         ToolRunOutcome::Escaped(action) => {
-            eprintln!("\x1b[33m  \u{21b3} escaped approval of {action:?}\x1b[0m");
-            messages.push(json!({"role": "user", "content": "[User pressed Esc at a tool approval prompt. Acknowledge briefly and wait.]"}));
+            da.ui.message(
+                MessageKind::Warning,
+                format!("tool execution cancelled: {action}"),
+            );
+            messages.push(json!({"role": "user", "content": "[User pressed Esc to cancel tool execution. Acknowledge briefly and wait.]"}));
             Some(TURN_ESC.to_string())
         }
         ToolRunOutcome::Ran => Some(TURN_TOOL.to_string()),
@@ -246,16 +268,34 @@ fn run_structured_tools(
 }
 
 /// Dispatch text-protocol tool calls, if any. `None` when there are none.
-fn run_text_tools(messages: &mut Vec<Value>, tr: &TurnRequest<'_>, text: &str) -> Option<String> {
+fn run_text_tools(
+    messages: &mut Vec<Value>,
+    tr: &TurnRequest<'_>,
+    text: &str,
+    cancel: &CancellationToken,
+    ui: &mut dyn UserInterface,
+) -> Option<String> {
     let calls = parse_text_calls(text);
     if calls.is_empty() {
         return None;
     }
     messages.push(json!({"role": "assistant", "content": text}));
-    let da = dispatch_args(tr);
-    match dispatch_text(messages, &calls, &da) {
+    let mut da = DispatchArgs {
+        approval: tr.approval,
+        classifier: tr.classifier,
+        cwd: tr.cwd,
+        project_root: tr.project_root,
+        env: tr.env,
+        config: tr.config,
+        cancel,
+        ui,
+    };
+    match dispatch_text(messages, &calls, &mut da) {
         ToolRunOutcome::Escaped(action) => {
-            eprintln!("\x1b[33m  \u{21b3} escaped approval of {action:?}\x1b[0m");
+            da.ui.message(
+                MessageKind::Warning,
+                format!("tool execution cancelled: {action}"),
+            );
             Some(TURN_ESC.to_string())
         }
         ToolRunOutcome::Ran => Some(TURN_TOOL.to_string()),
@@ -263,7 +303,12 @@ fn run_text_tools(messages: &mut Vec<Value>, tr: &TurnRequest<'_>, text: &str) -
 }
 
 /// Handle a plain text answer, an empty-turn nudge, or a forced-final nudge.
-fn handle_empty_or_final(messages: &mut Vec<Value>, tr: &TurnRequest<'_>, text: &str) -> String {
+fn handle_empty_or_final(
+    messages: &mut Vec<Value>,
+    tr: &TurnRequest<'_>,
+    text: &str,
+    ui: &mut dyn UserInterface,
+) -> String {
     if !text.trim().is_empty() {
         messages.push(json!({"role": "assistant", "content": text}));
         return TURN_DONE.to_string();
@@ -278,17 +323,22 @@ fn handle_empty_or_final(messages: &mut Vec<Value>, tr: &TurnRequest<'_>, text: 
         } else {
             ""
         };
-        eprintln!(
-            "\x1b[33m  \u{2702} EMPTY TURN{}; nudging ({}/{})\x1b[0m",
-            tag,
-            tr.empty_turn_count + 1,
-            tr.config.empty_turn_retry_limit
+        ui.message(
+            MessageKind::Warning,
+            format!(
+                "EMPTY TURN{tag}; nudging ({}/{})",
+                tr.empty_turn_count + 1,
+                tr.config.empty_turn_retry_limit
+            ),
         );
         nudge_current_user_turn(messages, EMPTY_TURN_NUDGE);
         return TURN_EMPTY.to_string();
     }
     if !tr.forced_final && tr.config.empty_turn_retry_limit > 0 {
-        eprintln!("\x1b[33m  \u{2702} EMPTY TURN - forcing final\x1b[0m");
+        ui.message(
+            MessageKind::Warning,
+            "EMPTY TURN - forcing final".to_string(),
+        );
         nudge_current_user_turn(messages, FORCED_FINAL_NUDGE);
         return TURN_FORCE_FINAL.to_string();
     }

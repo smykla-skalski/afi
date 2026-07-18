@@ -8,7 +8,7 @@ use regex::Regex;
 use serde_json::json;
 
 use super::{ApprovalChoice, EscToChat, RiskClassifier, is_under_path};
-use crate::approval::{ApprovalState, Level};
+use crate::approval::ApprovalState;
 
 /// Matches `write <path> (N bytes)` action strings.
 static WRITE_RE: LazyLock<Regex> =
@@ -129,10 +129,10 @@ fn risk_user_message_with_home(
 
 /// Shorten `reason` to 80 chars with an ellipsis so prompts stay one line.
 fn short_reason(reason: String) -> String {
-    if reason.len() <= 80 {
+    if reason.chars().count() <= 80 {
         reason
     } else {
-        format!("{}...", &reason[..77])
+        format!("{}...", reason.chars().take(77).collect::<String>())
     }
 }
 
@@ -162,22 +162,11 @@ pub fn confirm(
     if let Some(threshold) = approval.approve_level
         && level <= threshold
     {
-        eprintln!(
-            "  \u{21b3} auto-allow [{level}] {action}  ({})",
-            short_reason(reason)
-        );
         return Ok(true);
     }
 
-    let lvl_color = match level {
-        Level::Low => "\x1b[2m",     // DIM
-        Level::Medium => "\x1b[33m", // YELLOW
-        Level::High => "\x1b[31m",   // RED
-    };
     let short = short_reason(reason);
-    let prompt = format!(
-        "\x1b[33m  allow {action}? {lvl_color}[risk: {level} \u{2014} {short}]\x1b[0m \x1b[33m[Y/n/esc] \x1b[0m"
-    );
+    let prompt = format!("allow {action}?\nrisk: {level} — {short}");
     match ask(&prompt) {
         ApprovalChoice::Esc => Err(EscToChat(action.to_string())),
         ApprovalChoice::No => Ok(false),
@@ -188,6 +177,7 @@ pub fn confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::Level;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;

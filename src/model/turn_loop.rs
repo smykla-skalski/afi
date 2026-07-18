@@ -15,6 +15,7 @@ use crate::model::{
     ModelConfig, TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL,
 };
 use crate::risk::RiskClassifier;
+use crate::term::{MessageKind, UserInterface};
 
 /// Bundles the parameters for the model turn loop.
 pub struct LoopRequest<'a> {
@@ -90,7 +91,11 @@ fn transition(status: &str, c: &mut TurnCounters) {
 }
 
 /// The model turn loop: retries based on TURN_* status until DONE/ESC.
-pub async fn run_model_turn_loop(messages: &mut Vec<Value>, lr: LoopRequest<'_>) {
+pub async fn run_model_turn_loop(
+    messages: &mut Vec<Value>,
+    lr: LoopRequest<'_>,
+    ui: &mut dyn UserInterface,
+) {
     let max_turns: u32 = lr
         .env
         .get("AFI_MAX_MODEL_TURNS")
@@ -106,7 +111,7 @@ pub async fn run_model_turn_loop(messages: &mut Vec<Value>, lr: LoopRequest<'_>)
     };
 
     while steps < max_turns {
-        let status = model_turn(messages, build_request(&lr, &c, c.force_final)).await;
+        let status = model_turn(messages, build_request(&lr, &c, c.force_final), ui).await;
         c.force_final = false;
         c.recovery_sampling = false;
         if status == TURN_DONE || status == TURN_ESC {
@@ -117,7 +122,10 @@ pub async fn run_model_turn_loop(messages: &mut Vec<Value>, lr: LoopRequest<'_>)
     }
 
     if steps >= max_turns && !c.force_final {
-        eprintln!("\x1b[33m  \u{26a0} MODEL TURN LIMIT ({max_turns}) - forcing final\x1b[0m");
-        let _ = model_turn(messages, build_request(&lr, &c, true)).await;
+        ui.message(
+            MessageKind::Warning,
+            format!("MODEL TURN LIMIT ({max_turns}) - forcing final"),
+        );
+        let _ = model_turn(messages, build_request(&lr, &c, true), ui).await;
     }
 }

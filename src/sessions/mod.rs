@@ -29,17 +29,17 @@ pub fn sessions_dir(env: &HashMap<String, String>) -> PathBuf {
     if let Some(d) = env.get("AFI_SESSIONS_DIR") {
         return PathBuf::from(d);
     }
-    let home = minion_home(env);
+    let home = afi_home(env);
     home.join("sessions")
 }
 
 /// Where memory files live. Always under `AFI_HOME/memories`.
 pub fn memories_dir(env: &HashMap<String, String>) -> PathBuf {
-    minion_home(env).join("memories")
+    afi_home(env).join("memories")
 }
 
 /// `~/.afi` or `AFI_HOME`.
-pub fn minion_home(env: &HashMap<String, String>) -> PathBuf {
+pub fn afi_home(env: &HashMap<String, String>) -> PathBuf {
     if let Some(d) = env.get("AFI_HOME") {
         return PathBuf::from(d);
     }

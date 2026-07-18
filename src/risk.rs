@@ -69,7 +69,7 @@ pub fn is_under_path(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
 }
 
-/// Pull the primary file path from Minion's short approval action string.
+/// Pull the primary file path from afi's short approval action string.
 /// Handles "edit <path>" and "write <path> (N bytes)".
 pub fn extract_action_path(action: &str) -> Option<String> {
     let action = action.trim();

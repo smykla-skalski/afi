@@ -54,7 +54,7 @@ pub fn parse_extra_body(raw: Option<&str>) -> Option<Value> {
         Ok(Value::Object(_)) => None, // empty {} -> no routing, same as unset
         Ok(other) => {
             eprintln!(
-                "minion: AFI_*_EXTRA_BODY must be a JSON object, ignoring (got {}); \
+                "afi: AFI_*_EXTRA_BODY must be a JSON object, ignoring (got {}); \
                  provider routing is NOT set",
                 type_name(&other)
             );
@@ -62,7 +62,7 @@ pub fn parse_extra_body(raw: Option<&str>) -> Option<Value> {
         }
         Err(e) => {
             eprintln!(
-                "minion: ignoring bad AFI_*_EXTRA_BODY JSON ({} at char {}); \
+                "afi: ignoring bad AFI_*_EXTRA_BODY JSON ({} at char {}); \
                  provider routing is NOT set",
                 e,
                 e.line() // close enough to the Python `pos`; serde doesn't expose char offset
@@ -300,7 +300,7 @@ pub struct ParsedArgs {
 
 /// Parse argv into the subset that affects runtime construction.
 ///
-/// Hand-rolled for now so tests can pass `["minion", "--source", "zai"]`
+/// Hand-rolled for now so tests can pass `["afi", "--source", "zai"]`
 /// directly without a clap dependency at test time. Phase 8 may swap this for
 /// a clap-based parser; the surface should stay byte-identical.
 pub fn parse_args(args: &[String]) -> ParsedArgs {
@@ -553,7 +553,8 @@ pub fn discover_sources(env: &HashMap<String, String>) -> (HashMap<String, Sourc
 
     // Built-in `together` source.
     if !sources.contains_key("together") {
-        let key = envfile::resolve_api_key(env, env.get("TOGETHER_API_KEY").map(|s| s.as_str()));
+        let key =
+            envfile::resolve_api_key(env, env.get("AFI_TOGETHER_API_KEY").map(|s| s.as_str()));
         if let Some(k) = key {
             if !k.is_empty() {
                 let src = Source::new(
@@ -572,7 +573,8 @@ pub fn discover_sources(env: &HashMap<String, String>) -> (HashMap<String, Sourc
 
     // Built-in `openrouter` source.
     if !sources.contains_key("openrouter") {
-        let key = envfile::resolve_api_key(env, env.get("OPENROUTER_API_KEY").map(|s| s.as_str()));
+        let key =
+            envfile::resolve_api_key(env, env.get("AFI_OPENROUTER_API_KEY").map(|s| s.as_str()));
         if let Some(k) = key {
             if !k.is_empty() {
                 let or_body = parse_extra_body(
@@ -590,11 +592,11 @@ pub fn discover_sources(env: &HashMap<String, String>) -> (HashMap<String, Sourc
                 let app_name = env
                     .get("AFI_SOURCE_OPENROUTER_APP_NAME")
                     .map(|s| s.as_str())
-                    .or(Some("Minion"));
+                    .or(Some("Afi"));
                 let app_url = env
                     .get("AFI_SOURCE_OPENROUTER_APP_URL")
                     .map(|s| s.as_str())
-                    .or(Some("https://github.com/Sentdex/minion"));
+                    .or(Some("https://github.com/smykla-skalski/afi"));
                 let headers = build_http_headers(app_name, app_url);
                 let src = Source::new(
                     "openrouter",

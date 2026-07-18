@@ -19,7 +19,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::json;
 
-use crate::sessions::minion_home;
+use crate::sessions::afi_home;
 
 /// Default poll window for `run_bash` (~3 s). Override with
 /// `AFI_BASH_POLL_SECONDS`.
@@ -51,7 +51,7 @@ pub fn run_detached(
 ) -> (u32, PathBuf) {
     delete_old_bg_logs(env);
 
-    let home = minion_home(env);
+    let home = afi_home(env);
     let bg_dir = home.join("bg-logs");
     let _ = fs::create_dir_all(&bg_dir);
 
@@ -216,7 +216,7 @@ pub fn find_bg_log_for_pid(
     pid: u32,
     env: &std::collections::HashMap<String, String>,
 ) -> Option<PathBuf> {
-    let bg_dir = minion_home(env).join("bg-logs");
+    let bg_dir = afi_home(env).join("bg-logs");
     let map_path = bg_dir.join(format!("bg-pid-{}.map", pid));
     if let Ok(data) = fs::read_to_string(&map_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
@@ -247,7 +247,7 @@ pub fn find_bg_log_for_pid(
 /// `max_age_days` and caps the count at `max_logs` (keeping newest). Also
 /// cleans stale `.map` files whose target log no longer exists.
 pub fn delete_old_bg_logs(env: &std::collections::HashMap<String, String>) {
-    let bg_dir = minion_home(env).join("bg-logs");
+    let bg_dir = afi_home(env).join("bg-logs");
     let entries = match fs::read_dir(&bg_dir) {
         Ok(e) => e,
         Err(_) => return,

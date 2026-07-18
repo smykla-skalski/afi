@@ -8,7 +8,7 @@ use afi::Runtime;
 
 /// Build a runtime with a clean env (only the vars you pass in).
 ///
-/// `args` is argv including argv[0] (typically `"minion"`). `env` is the
+/// `args` is argv including argv[0] (typically `"afi"`). `env` is the
 /// starting env; no `AFI_*` vars leak from the shell. `env_file` is
 /// optional - pass `Some(path)` to exercise the `~/.env` loader.
 #[allow(dead_code)]

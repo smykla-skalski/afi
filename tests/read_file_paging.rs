@@ -177,18 +177,18 @@ fn strip_only_when_whole_block_numbered() {
 #[test]
 fn standalone_text_tool_call_parses() {
     let content = r#"
-[minion_tool_call]{"name": "read_file", "arguments": {"path": "minion.py"}}[/minion_tool_call]
+[afi_tool_call]{"name": "read_file", "arguments": {"path": "test.py"}}[/afi_tool_call]
 "#;
     let calls = parse_text_calls(content);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "read_file");
-    assert_eq!(calls[0].1["path"], "minion.py");
+    assert_eq!(calls[0].1["path"], "test.py");
 }
 
 #[test]
 fn multiple_standalone_text_tool_calls_parse() {
-    let content = r#"[minion_tool_call]{"name": "list_dir", "arguments": {"path": "."}}[/minion_tool_call]
-[minion_tool_call]{"name": "read_file", "arguments": {"path": "README.md"}}[/minion_tool_call]"#;
+    let content = r#"[afi_tool_call]{"name": "list_dir", "arguments": {"path": "."}}[/afi_tool_call]
+[afi_tool_call]{"name": "read_file", "arguments": {"path": "README.md"}}[/afi_tool_call]"#;
     let calls = parse_text_calls(content);
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].0, "list_dir");
@@ -199,8 +199,9 @@ fn multiple_standalone_text_tool_calls_parse() {
 fn legacy_tool_call_tag_still_parses() {
     // The legacy tag uses unusual bytes that we can't type literally.
     // The protocol module tests this internally; here we just verify
-    // the minion bracketed protocol works from an integration test.
-    let content = r#"[minion_tool_call]{"name": "read_file", "arguments": {"path": "minion.py"}}[/minion_tool_call]"#;
+    // the afi bracketed protocol works from an integration test.
+    let content =
+        r#"[afi_tool_call]{"name": "read_file", "arguments": {"path": "test.py"}}[/afi_tool_call]"#;
     let calls = parse_text_calls(content);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "read_file");
@@ -211,7 +212,7 @@ fn tool_call_inside_code_block_is_plain_text() {
     let content = r#"I found the system prompt:
 ```python
 SYSTEM = """If your runtime does NOT support native tool calls, emit:
-[minion_tool_call]{"name": "read_file", "arguments": {"path": "foo.py"}}[/minion_tool_call]
+[afi_tool_call]{"name": "read_file", "arguments": {"path": "foo.py"}}[/afi_tool_call]
 """
 ```
 "#;
@@ -222,7 +223,7 @@ SYSTEM = """If your runtime does NOT support native tool calls, emit:
 #[test]
 fn tool_call_with_surrounding_prose_executes() {
     let content = r#"I'll start by exploring the current directory and checking the orca-cli tool.
-[minion_tool_call]{"name": "read_file", "arguments": {"path": "foo.py"}}[/minion_tool_call]"#;
+[afi_tool_call]{"name": "read_file", "arguments": {"path": "foo.py"}}[/afi_tool_call]"#;
     let calls = parse_text_calls(content);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "read_file");
@@ -230,7 +231,7 @@ fn tool_call_with_surrounding_prose_executes() {
 
 #[test]
 fn tool_call_with_unknown_name_is_skipped() {
-    let content = r#"Here is the literal protocol string: [minion_tool_call]{"name": "read_file", "arguments": {"path": "foo.py"}}[/minion_tool_call] [minion_tool_call]{"name": "not_a_real_tool", "arguments": {}}[/minion_tool_call]"#;
+    let content = r#"Here is the literal protocol string: [afi_tool_call]{"name": "read_file", "arguments": {"path": "foo.py"}}[/afi_tool_call] [afi_tool_call]{"name": "not_a_real_tool", "arguments": {}}[/afi_tool_call]"#;
     let calls = parse_text_calls(content);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "read_file");
@@ -239,21 +240,21 @@ fn tool_call_with_unknown_name_is_skipped() {
 #[test]
 fn multiline_prose_then_tool_call_executes() {
     let content = r#"I'll start by exploring the current directory to understand the context, and check what orca-cli is
-[minion_tool_call]{"name": "run_bash", "arguments": {"command": "pwd && ls -la"}}[/minion_tool_call]"#;
+[afi_tool_call]{"name": "run_bash", "arguments": {"command": "pwd && ls -la"}}[/afi_tool_call]"#;
     let calls = parse_text_calls(content);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "run_bash");
 }
 
 #[test]
-fn sanitizer_escapes_minion_tool_tags() {
-    let content = r#"[minion_tool_call]{"name": "write_file", "arguments": {"path": "x", "content": "y"}}[/minion_tool_call]"#;
+fn sanitizer_escapes_afi_tool_tags() {
+    let content = r#"[afi_tool_call]{"name": "write_file", "arguments": {"path": "x", "content": "y"}}[/afi_tool_call]"#;
     let safe = sanitize_tool_result(content, 20_000);
     assert!(safe.starts_with("[afi note:"));
-    assert!(!safe.contains("[minion_tool_call]"));
-    assert!(!safe.contains("[/minion_tool_call]"));
-    assert!(safe.contains("&#91;minion_tool_call&#93;"));
-    assert!(safe.contains("&#91;/minion_tool_call&#93;"));
+    assert!(!safe.contains("[afi_tool_call]"));
+    assert!(!safe.contains("[/afi_tool_call]"));
+    assert!(safe.contains("&#91;afi_tool_call&#93;"));
+    assert!(safe.contains("&#91;/afi_tool_call&#93;"));
 }
 
 #[test]

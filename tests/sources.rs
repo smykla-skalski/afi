@@ -137,7 +137,7 @@ fn test_9_builtin_together() {
         &["afi"],
         &[
             ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("TOGETHER_API_KEY", "fake-together-key"),
+            ("AFI_TOGETHER_API_KEY", "fake-together-key"),
         ],
     );
     assert!(rt.sources.contains_key("together"));
@@ -179,7 +179,7 @@ fn test_11_explicit_together_overrides_builtin() {
             ),
             ("AFI_SOURCE_TOGETHER_API_KEY", "custom-key"),
             ("AFI_SOURCE_TOGETHER_MODEL", "my-org/my-model"),
-            ("TOGETHER_API_KEY", "fake-together-key"),
+            ("AFI_TOGETHER_API_KEY", "fake-together-key"),
         ],
     );
     assert_eq!(
@@ -223,7 +223,7 @@ fn test_13_builtin_openrouter() {
         &["afi"],
         &[
             ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("OPENROUTER_API_KEY", "fake-or-key"),
+            ("AFI_OPENROUTER_API_KEY", "fake-or-key"),
         ],
     );
     let or_src = rt
@@ -272,7 +272,7 @@ fn test_15_explicit_openrouter_overrides_builtin() {
                 "AFI_SOURCE_OPENROUTER_EXTRA_BODY",
                 r#"{"provider":{"order":["Together"],"allow_fallbacks":true}}"#,
             ),
-            ("OPENROUTER_API_KEY", "fake-or-key"),
+            ("AFI_OPENROUTER_API_KEY", "fake-or-key"),
         ],
     );
     assert_eq!(
@@ -318,7 +318,7 @@ fn test_17_provider_order_helpers() {
         &["afi"],
         &[
             ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("OPENROUTER_API_KEY", "k"),
+            ("AFI_OPENROUTER_API_KEY", "k"),
         ],
     );
     let src = rt.sources.get_mut("openrouter").unwrap();
@@ -350,7 +350,7 @@ fn test_18_extra_request_kwargs_plumbing() {
         &["afi"],
         &[
             ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1"),
-            ("OPENROUTER_API_KEY", "k"),
+            ("AFI_OPENROUTER_API_KEY", "k"),
         ],
     );
     let src = rt.sources.get("openrouter").unwrap().clone();

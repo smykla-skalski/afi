@@ -27,7 +27,7 @@ fn test_default_prompts_for_everything() {
 
 // AFI_APPROVAL env var sets a persistent default.
 #[test]
-fn test_minion_approval_env_sets_persistent_default() {
+fn test_afi_approval_env_sets_persistent_default() {
     let rt = build(&["afi"], &[("AFI_APPROVAL", "medium")]);
     assert!(!rt.approval.yolo);
     assert_eq!(rt.approval.approve_level, Some(Level::Medium));
@@ -36,7 +36,7 @@ fn test_minion_approval_env_sets_persistent_default() {
 
 // AFI_APPROVAL can come from an env file (~/.env loader).
 #[test]
-fn test_minion_approval_can_come_from_env_file() {
+fn test_afi_approval_can_come_from_env_file() {
     let mut f = tempfile::NamedTempFile::new().unwrap();
     writeln!(f, "AFI_APPROVAL=low").unwrap();
     let rt = common::build_with_env_file(&["afi"], &[], Some(f.path()));
@@ -84,7 +84,7 @@ fn test_prompt_all_aliases_are_accepted() {
 
 // A bad AFI_APPROVAL value doesn't crash; it leaves the default (prompt all).
 #[test]
-fn test_bad_minion_approval_falls_back_safely() {
+fn test_bad_afi_approval_falls_back_safely() {
     let rt = build(&["afi"], &[("AFI_APPROVAL", "nonsense")]);
     assert!(!rt.approval.yolo);
     assert_eq!(rt.approval.approve_level, None);

@@ -119,7 +119,7 @@ When stdin and stdout are terminals, afi runs one persistent fullscreen Ratatui 
 
 - **Enter** submits; **Alt+Enter** or **Ctrl+J** inserts a newline.
 - **Paste** inserts text verbatim, including newlines.
-- **Alt+Up/Down** navigates prompt history; standard editor keys move and edit text.
+- **Up/Down** moves through multiline or wrapped input, then traverses prompt history at the boundary; moving past the newest entry restores the unfinished draft. **Alt+Up/Down** traverses history directly.
 - **PageUp/PageDown** or the **mouse wheel** scrolls the conversation or an open approval dialog; a scrollbar shows the current position.
 - **Esc** or **Ctrl+C** requests cancellation of active work; **Ctrl+C** exits while idle.
 - **Y** approves a requested action; **N**, **Enter**, or **Esc** denies or cancels it.

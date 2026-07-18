@@ -237,7 +237,7 @@ fn render_footer(frame: &mut Frame, app: &TuiApp, area: Rect) {
     } else if app.task_running {
         "Esc cancel · PgUp/PgDown or wheel scroll"
     } else {
-        "Enter send · Alt+Enter newline · Alt+↑/↓ history · PgUp/PgDown or wheel scroll · Ctrl+C quit"
+        "Enter send · Alt+Enter newline · ↑/↓ lines/history · PgUp/PgDown or wheel scroll · Ctrl+C quit"
     };
     frame.render_widget(
         Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),

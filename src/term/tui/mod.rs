@@ -6,4 +6,6 @@ mod view;
 pub use app::{InputAction, TuiApp};
 
 #[cfg(test)]
+mod history_tests;
+#[cfg(test)]
 mod tests;

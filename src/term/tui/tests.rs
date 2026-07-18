@@ -90,19 +90,6 @@ fn composer_submit_and_multiline_bindings() {
 }
 
 #[test]
-fn history_navigation_restores_draft() {
-    let mut app = TuiApp::new();
-    app.paste("prior");
-    let _ = app.handle_key(key(KeyCode::Enter));
-    app.paste("draft");
-
-    let _ = app.handle_key(modified(KeyCode::Up, KeyModifiers::ALT));
-    assert_eq!(app.input_text(), "prior");
-    let _ = app.handle_key(modified(KeyCode::Down, KeyModifiers::ALT));
-    assert_eq!(app.input_text(), "draft");
-}
-
-#[test]
 fn running_task_owns_escape_and_blocks_composer() {
     let mut app = TuiApp::new();
     app.set_task_running(true);

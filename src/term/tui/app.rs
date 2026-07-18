@@ -48,7 +48,7 @@ pub struct TuiApp {
     active_stream: Option<usize>,
     history: Vec<String>,
     history_index: Option<usize>,
-    history_draft: String,
+    history_draft: Option<TextArea<'static>>,
     pub(super) scroll_from_bottom: usize,
     pub(super) transcript_revision: u64,
     pub(super) rendered_transcript_revision: u64,
@@ -71,7 +71,7 @@ impl TuiApp {
             active_stream: None,
             history: Vec::new(),
             history_index: None,
-            history_draft: String::new(),
+            history_draft: None,
             scroll_from_bottom: 0,
             transcript_revision: 0,
             rendered_transcript_revision: 0,
@@ -164,8 +164,13 @@ impl TuiApp {
     }
 
     pub fn paste(&mut self, text: &str) {
-        if self.approval.is_none() && !self.task_running {
-            let _ = self.composer.insert_str(text);
+        if self.approval.is_some() || self.task_running {
+            return;
+        }
+        let before = self.input_text();
+        let was_selecting = self.composer.is_selecting();
+        let _ = self.composer.insert_str(text);
+        if self.input_text() != before || self.composer.is_selecting() != was_selecting {
             self.reset_history_navigation();
         }
     }
@@ -259,22 +264,47 @@ impl TuiApp {
     }
 
     fn handle_composer_key(&mut self, key: KeyEvent) -> InputAction {
+        if key.modifiers.is_empty() && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            self.move_or_navigate_history(key);
+            return InputAction::None;
+        }
+        self.handle_composer_edit_key(key)
+    }
+
+    fn handle_composer_edit_key(&mut self, key: KeyEvent) -> InputAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let history_alt = key.modifiers == KeyModifiers::ALT;
         match key.code {
             KeyCode::Enter if alt => self.insert_newline(),
             KeyCode::Char('j') if ctrl => self.insert_newline(),
             KeyCode::Enter => return self.submit(),
-            KeyCode::Up if alt => self.history_previous(),
-            KeyCode::Down if alt => self.history_next(),
+            KeyCode::Up if history_alt => self.history_previous(),
+            KeyCode::Down if history_alt => self.history_next(),
             KeyCode::Char('c') if ctrl => return InputAction::Quit,
             KeyCode::Char('d') if ctrl && self.composer.is_empty() => return InputAction::Quit,
-            _ => {
-                let _ = self.composer.input(key);
-                self.reset_history_navigation();
-            }
+            _ => self.apply_composer_input(key),
         }
         InputAction::None
+    }
+
+    fn apply_composer_input(&mut self, key: KeyEvent) {
+        if self.composer.input(key) {
+            self.reset_history_navigation();
+        }
+    }
+
+    fn move_or_navigate_history(&mut self, key: KeyEvent) {
+        let row = self.composer.screen_cursor().row;
+        let _ = self.composer.input(key);
+        if self.composer.screen_cursor().row != row || self.composer.is_selecting() {
+            return;
+        }
+        match key.code {
+            KeyCode::Up => self.history_previous(),
+            KeyCode::Down if self.history_index.is_some() => self.history_next(),
+            _ => {}
+        }
     }
 
     fn insert_newline(&mut self) {
@@ -301,11 +331,13 @@ impl TuiApp {
         if self.history.is_empty() {
             return;
         }
-        let index = if let Some(index) = self.history_index {
-            index.saturating_sub(1)
-        } else {
-            self.history_draft = self.input_text();
-            self.history.len() - 1
+        let index = match self.history_index {
+            Some(0) => return,
+            Some(index) => index - 1,
+            None => {
+                self.history_draft = Some(self.composer.clone());
+                self.history.len() - 1
+            }
         };
         self.history_index = Some(index);
         let text = self.history[index].clone();
@@ -322,20 +354,25 @@ impl TuiApp {
             self.set_composer_text(&text);
         } else {
             self.history_index = None;
-            let draft = self.history_draft.clone();
-            self.set_composer_text(&draft);
+            if let Some(draft) = self.history_draft.take() {
+                self.composer = draft;
+            }
         }
     }
 
     fn set_composer_text(&mut self, text: &str) {
-        self.composer = make_composer(text.split('\n').map(str::to_string).collect());
+        let max_histories = self.composer.max_histories();
+        self.composer.cancel_selection();
+        self.composer.clear();
+        let _ = self.composer.insert_str(text);
+        self.composer.set_max_histories(max_histories);
         self.composer.move_cursor(CursorMove::Bottom);
         self.composer.move_cursor(CursorMove::End);
     }
 
     fn reset_history_navigation(&mut self) {
         self.history_index = None;
-        self.history_draft.clear();
+        self.history_draft = None;
     }
 }
 

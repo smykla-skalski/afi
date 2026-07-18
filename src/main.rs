@@ -4,6 +4,7 @@ use std::io::stdout;
 use std::path::PathBuf;
 
 use minion::cli::cli_sessions;
+use minion::repl::run_repl;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -13,11 +14,13 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".env")));
 
-    // `minion sessions [query]` short-circuits before the REPL — print and exit.
+    // `minion sessions [query]` short-circuits before the REPL - print and exit.
     if cli_sessions(&args[1..], &env_map, &mut stdout().lock()) {
         return;
     }
 
-    let rt = minion::Runtime::build(&args, env_map, env_file.as_deref());
-    println!("{}", minion::banner(&rt));
+    let mut rt = minion::Runtime::build(&args, env_map.clone(), env_file.as_deref());
+
+    // Run the REPL.
+    run_repl(&mut rt, env_map);
 }

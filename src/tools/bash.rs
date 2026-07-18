@@ -1,10 +1,10 @@
-//! Bash tool: detached command execution via `setsid(2)`, background log
-//! management, and `wait_background` polling.
+//! Bash tool: detached command execution in a new process group, background
+//! log management, and `wait_background` polling.
 //!
-//! Commands always run via `sh -c` in a new session (setsid) so terminal
-//! Ctrl+C can't reach them. If a command finishes within a poll window, its
-//! output is returned directly and the log deleted; otherwise it continues
-//! in the background and the caller gets a PID + log path.
+//! Commands run via `sh -c` in their own process group (set with the safe
+//! `CommandExt::process_group`) so terminal Ctrl+C -- sent only to the
+//! foreground group -- can't reach them. Quick commands return output inline
+//! (log deleted); longer ones keep running and the caller gets a PID + log.
 
 use std::fs;
 use std::io::Write;
@@ -42,9 +42,9 @@ pub fn infer_timeout_from_sleep(command: &str, default: i64) -> i64 {
     }
 }
 
-/// Launch `command` detached in its own session via `setsid(2)`. Returns
-/// `(pid, log_path)`. The command runs in a subshell that echoes its exit
-/// status as `[exit: N]` at the end of the log.
+/// Launch `command` detached in its own process group via
+/// `CommandExt::process_group`. Returns `(pid, log_path)`. The command runs in
+/// a subshell that echoes its exit status as `[exit: N]` at the end of the log.
 pub fn run_detached(
     command: &str,
     env: &std::collections::HashMap<String, String>,
@@ -80,12 +80,11 @@ pub fn run_detached(
             .unwrap_or_else(|_| log_file.try_clone().unwrap()),
     ));
     cmd.stderr(Stdio::from(log_file));
-    unsafe {
-        cmd.pre_exec(|| {
-            nix::unistd::setsid()?;
-            Ok(())
-        });
-    }
+    // Put the child in its own process group (pgid == child pid) so a terminal
+    // Ctrl+C -- which the kernel delivers only to the foreground process group
+    // -- can't reach it. `process_group` is the safe `CommandExt` equivalent of
+    // a pre_exec `setpgid`: no `unsafe` and no post-fork closure.
+    cmd.process_group(0);
 
     let child = cmd.spawn().expect("failed to spawn detached command");
     let pid = child.id();

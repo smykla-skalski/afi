@@ -4,6 +4,11 @@
 //! native tool-calling isn't wired up yet by falling back to parsing
 //! `[minion_tool_call]...[/minion_tool_call]` tags out of the text.
 
+// The whole crate is safe Rust. Detached command execution uses the safe
+// `CommandExt::process_group` instead of a pre_exec setsid, so no module needs
+// `unsafe`; forbid it so a regression can't reintroduce one.
+#![forbid(unsafe_code)]
+
 pub mod approval;
 pub mod cli;
 pub mod config;

@@ -1,3 +1,6 @@
+// The binary crate is safe Rust; keep it that way (see `lib.rs`).
+#![forbid(unsafe_code)]
+
 use std::collections::HashMap;
 use std::env;
 use std::io::stdout;

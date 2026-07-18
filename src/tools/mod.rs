@@ -2,8 +2,8 @@
 //! run_bash, wait_background.
 //!
 //! Phase 3 implements the file tools + the text-protocol parser. Bash (with
-//! detached setsid + background polling) lands in `bash.rs`. The risk
-//! classifier and approval prompt (phase 4) wrap the dispatch layer.
+//! detached process-group execution + background polling) lands in `bash.rs`.
+//! The risk classifier and approval prompt (phase 4) wrap the dispatch layer.
 
 pub mod bash;
 pub mod protocol;
@@ -37,7 +37,7 @@ pub static TOOLS: Lazy<Value> = Lazy::new(|| {
             "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}, "required": ["path", "old", "new"]}}},
         {"type": "function", "function": {"name": "list_dir", "description": "List a directory",
             "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}},
-        {"type": "function", "function": {"name": "run_bash", "description": "Run a shell command. Commands are launched detached (new session via setsid(2)) and never block the agent loop. If the command finishes within a short poll window (~3 s by default), output is returned directly; otherwise it continues in the background and you get a PID + log path to check later with read_file() or wait_background().",
+        {"type": "function", "function": {"name": "run_bash", "description": "Run a shell command. Commands are launched detached in their own process group and never block the agent loop. If the command finishes within a short poll window (~3 s by default), output is returned directly; otherwise it continues in the background and you get a PID + log path to check later with read_file() or wait_background().",
             "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "description": "Seconds to wait for the command to finish synchronously (default unset = ~3 s poll; 0 = wait indefinitely)."}}, "required": ["command"]}}},
         {"type": "function", "function": {"name": "wait_background", "description": "Wait for a backgrounded command (previously started by run_bash) to finish and return its output.",
             "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "PID of the background command to wait for"}, "log_path": {"type": "string", "description": "Log file path from the background message (optional — auto-located by PID if omitted)"}, "timeout": {"type": "integer", "description": "Max seconds to wait (default 0 = wait indefinitely; almost never set this)"}}, "required": ["pid"]}}}

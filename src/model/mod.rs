@@ -10,15 +10,17 @@ pub mod compress;
 pub mod context_window;
 pub mod recovery;
 pub mod stream;
+pub mod turn;
 
 // --- turn status constants (match the Python TURN_* values) ---------------
 
 pub const TURN_DONE: &str = "done";
+pub const TURN_TOOL: &str = "tool";
 pub const TURN_ESC: &str = "esc";
 pub const TURN_STREAM_CUT: &str = "stream_cut";
 pub const TURN_EMPTY: &str = "empty";
 pub const TURN_FORCE_FINAL: &str = "force_final";
-pub const TURN_LOOP_CUT: &str = "loop_cut";
+pub const TURN_STALL: &str = "stall";
 
 // --- forced-final tool schema -----------------------------------------------
 

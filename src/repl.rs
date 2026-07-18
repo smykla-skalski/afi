@@ -161,9 +161,72 @@ pub fn handle_slash_command(
             CommandResult::Continue
         }
         "/compress" | "/compact" => {
-            println!("{DIM}  compressing context…{RESET}");
-            // The actual compression needs a model call; for now just report.
-            println!("{DIM}  (compression requires a live model connection){RESET}");
+            let body_len = messages.len().saturating_sub(1); // minus system
+            if body_len <= crate::model::compress::COMPRESS_KEEP {
+                println!("{DIM}  nothing to compress (too few turns){RESET}");
+            } else {
+                println!("{DIM}  compressing context...{RESET}");
+                if let (Some(source), Some(model)) = (rt.active_source(), &rt.model) {
+                    let client = crate::model::client::ReqwestClient::new();
+                    let runtime =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let extra_body = source.extra_request_kwargs();
+                    let result = runtime.block_on(async {
+                        let prompt =
+                            "Summarize the following conversation history for context retention.";
+                        use crate::model::client::ChatClient;
+                        match client
+                            .chat_completions(
+                                source,
+                                model,
+                                &[json!({"role": "user", "content": prompt})],
+                                30,
+                                extra_body.as_ref(),
+                            )
+                            .await
+                        {
+                            Ok(text) => {
+                                // Parse the response.
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    v.get("choices")
+                                        .and_then(|c| c.as_array())
+                                        .and_then(|c| c.first())
+                                        .and_then(|c| c.get("message"))
+                                        .and_then(|m| m.get("content"))
+                                        .and_then(|c| c.as_str())
+                                        .map(|s| s.to_string())
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("{RED}  compress failed: {e}{RESET}");
+                                None
+                            }
+                        }
+                    });
+                    if let Some(summary) = result {
+                        let header = format!("[Compressed context - earlier turns summarized; last {} turns kept verbatim]", crate::model::compress::COMPRESS_KEEP);
+                        // Keep system + summary + last COMPRESS_KEEP turns.
+                        let keep = crate::model::compress::COMPRESS_KEEP;
+                        let has_sys = messages
+                            .first()
+                            .map(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                            .unwrap_or(false);
+                        let split = messages.len().saturating_sub(keep);
+                        let mut new_msgs = Vec::new();
+                        if has_sys {
+                            new_msgs.push(messages[0].clone());
+                        }
+                        new_msgs.push(json!({"role": "user", "content": format!("{}\n\n{}", header, summary)}));
+                        new_msgs.extend(messages[split..].iter().cloned());
+                        *messages = new_msgs;
+                        println!("{DIM}  compressed context{RESET}");
+                    }
+                } else {
+                    eprintln!("{RED}  no active source{RESET}");
+                }
+            }
             CommandResult::Continue
         }
         "/save" => {
@@ -260,7 +323,40 @@ pub fn handle_slash_command(
             CommandResult::Continue
         }
         "/recover" => {
-            println!("{DIM}  (recover requires a live model connection){RESET}");
+            let note = if arg.is_empty() {
+                String::new()
+            } else {
+                format!(" - {}", arg)
+            };
+            let nudge = format!("{}{}", crate::model::recovery::MANUAL_RECOVERY_NUDGE, note);
+            messages.push(json!({"role": "user", "content": format!("[Runtime note: {}]", nudge)}));
+            if let (Some(source), Some(model)) = (rt.active_source(), &rt.model) {
+                let config = ModelConfig::from_env(env);
+                let client = crate::model::client::ReqwestClient::new();
+                let classifier = crate::risk::HighDefaultClassifier;
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let project_root = crate::risk::detect_project_root(Some(&cwd));
+                let runtime =
+                    tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                runtime.block_on(crate::model::turn::run_model_turn_loop(
+                    messages,
+                    crate::model::turn::LoopRequest {
+                        config: &config,
+                        client: &client,
+                        source,
+                        model,
+                        approval: &rt.approval,
+                        classifier: &classifier,
+                        cwd: &cwd,
+                        project_root: &project_root,
+                        env,
+                        force_final: true,
+                        recovery_sampling: true,
+                    },
+                ));
+            } else {
+                eprintln!("{RED}  no active source{RESET}");
+            }
             CommandResult::Continue
         }
         "/autocompress" => {
@@ -337,18 +433,41 @@ pub fn run_one_shot(prompt_file: &str, _rt: &Runtime) {
     }
 
     // Build the initial messages.
-    let messages = vec![
+    let mut messages = vec![
         json!({"role": "system", "content": SYSTEM}),
         json!({"role": "user", "content": prompt}),
     ];
 
-    // The actual model turn needs an async runtime + ChatClient.
-    // For now, log the intent.
     log_event("req", &json!({"prompt": prompt, "mode": "one_shot"}));
-    eprintln!("{DIM}  (one-shot mode requires a live model connection to complete){RESET}");
 
-    // Save the messages for debugging.
-    let _ = messages;
+    // Run the model turn loop.
+    if let (Some(source), Some(model)) = (_rt.active_source(), &_rt.model) {
+        let config = ModelConfig::from_env(&_rt.env);
+        let client = crate::model::client::ReqwestClient::new();
+        let classifier = crate::risk::HighDefaultClassifier;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let project_root = crate::risk::detect_project_root(Some(&cwd));
+
+        let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        runtime.block_on(crate::model::turn::run_model_turn_loop(
+            &mut messages,
+            crate::model::turn::LoopRequest {
+                config: &config,
+                client: &client,
+                source,
+                model,
+                approval: &_rt.approval,
+                classifier: &classifier,
+                cwd: &cwd,
+                project_root: &project_root,
+                env: &_rt.env,
+                force_final: false,
+                recovery_sampling: false,
+            },
+        ));
+    } else {
+        eprintln!("{RED}  no active source - set MINION_BASE_URL and MINION_MODEL{RESET}");
+    }
 }
 
 /// The main REPL loop. Reads input, dispatches slash commands, sends user
@@ -494,9 +613,35 @@ pub fn run_repl(rt: &mut Runtime, env: HashMap<String, String>) {
                 // It's a user message - add to context.
                 messages.push(json!({"role": "user", "content": input}));
 
-                // In a full implementation, this would call model_turn here.
-                // For now, just echo and save.
-                println!("{DIM}  (model turn requires a live connection){RESET}");
+                // Run the model turn loop.
+                if let (Some(source), Some(model)) = (rt.active_source(), &rt.model) {
+                    let client = crate::model::client::ReqwestClient::new();
+                    let classifier = crate::risk::HighDefaultClassifier;
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let project_root = crate::risk::detect_project_root(Some(&cwd));
+
+                    let runtime =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    runtime.block_on(crate::model::turn::run_model_turn_loop(
+                        &mut messages,
+                        crate::model::turn::LoopRequest {
+                            config: &config,
+                            client: &client,
+                            source,
+                            model,
+                            approval: &rt.approval,
+                            classifier: &classifier,
+                            cwd: &cwd,
+                            project_root: &project_root,
+                            env: &env,
+                            force_final: false,
+                            recovery_sampling: false,
+                        },
+                    ));
+                } else {
+                    eprintln!("{RED}  no active source - use /source to select one{RESET}");
+                }
 
                 // Auto-save the session.
                 let title = safe_title(Some(input), 60);
@@ -507,8 +652,6 @@ pub fn run_repl(rt: &mut Runtime, env: HashMap<String, String>) {
                     None => json!({"source": rt.active, "model": rt.model}),
                 };
                 let _ = sessions::write_session(&dir, &session_id, &mut messages, Some(&meta));
-
-                // Check for auto-compress.
                 let _ = config.autocompress_percent;
             }
         }

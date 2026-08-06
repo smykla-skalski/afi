@@ -61,8 +61,8 @@ pub struct RunSummary<'a> {
 impl RunSummary<'_> {
     /// Render as JSON.
     ///
-    /// `usage` is null rather than a zeroed object when no turn reported any, so
-    /// a consumer can tell "the provider sent no usage" from "the run used no
+    /// `usage` is null rather than a zeroed object when no request reported any,
+    /// so a consumer can tell "the provider sent no usage" from "the run used no
     /// tokens" instead of silently charting zeros.
     #[must_use]
     pub fn to_json(&self) -> Value {
@@ -87,7 +87,7 @@ impl RunSummary<'_> {
             "cache_read_tokens": self.usage.cache_read_tokens,
             "reasoning_tokens": self.usage.reasoning_tokens,
             "total_tokens": self.usage.total_tokens(),
-            "turns": self.usage.turns,
+            "requests": self.usage.requests,
         })
     }
 }

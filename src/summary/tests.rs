@@ -1,13 +1,13 @@
 use super::*;
 use serde_json::json;
 
-fn totals(turns: u64) -> UsageTotals {
+fn totals(requests: u64) -> UsageTotals {
     UsageTotals {
         input_tokens: 4085,
         output_tokens: 509,
         cache_read_tokens: 6837,
         reasoning_tokens: 0,
-        turns,
+        requests,
     }
 }
 
@@ -68,7 +68,7 @@ fn usage_totals_are_reported_and_add_up() {
     assert_eq!(usage["output_tokens"], 509);
     assert_eq!(usage["cache_read_tokens"], 6837);
     assert_eq!(usage["reasoning_tokens"], 0);
-    assert_eq!(usage["turns"], 3);
+    assert_eq!(usage["requests"], 3);
     // The four counts are disjoint, so the total must be their sum.
     assert_eq!(usage["total_tokens"], 4085 + 509 + 6837);
 }

@@ -27,6 +27,8 @@ use std::io;
 use super::sse::decoded_stream;
 use super::{ChatCompletionStream, ClientError, ReqwestClient, StreamRequest, limited_error_body};
 use crate::config::Source;
+use crate::model::stream::{PromptTokensDetails, Usage, normalize_usage};
+use crate::model::usage_totals;
 
 pub(crate) mod auth;
 mod decode;
@@ -273,7 +275,39 @@ pub(super) async fn complete(
             body: text,
         });
     }
+    record_completion_usage(&text);
     reshape_completion(&text)
+}
+
+/// Fold a non-streaming response's usage into the run totals.
+///
+/// The streaming path records through `finalize_turn`, which this never reaches,
+/// so without this a `/compress` request is billed but absent from the summary.
+/// Best effort: a response with no usage object is simply not counted.
+fn record_completion_usage(body: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return;
+    };
+    let Some(usage) = value.get("usage") else {
+        return;
+    };
+    let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or_default();
+    let cache_read = field("cache_read_input_tokens");
+    // Same re-inflation the SSE decoder applies: Anthropic's `input_tokens`
+    // already excludes cache, and creation is billed as fresh input.
+    let openai_shaped = Usage {
+        prompt_tokens: field("input_tokens")
+            .saturating_add(cache_read)
+            .saturating_add(field("cache_creation_input_tokens")),
+        completion_tokens: field("output_tokens"),
+        prompt_tokens_details: Some(PromptTokensDetails {
+            cached_tokens: cache_read,
+        }),
+        output_tokens_details: None,
+    };
+    if let Some(normalized) = normalize_usage(Some(&openai_shaped), None, 0) {
+        usage_totals::record(&normalized);
+    }
 }
 
 /// Anthropic `{"content":[{"type":"text","text":...}]}` ->

@@ -102,7 +102,7 @@ pub fn run_repl(rt: &mut Runtime) -> bool {
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
     if let Some(prompt_file) = owned.prompt_file.clone() {
         restore_prompt_resume(&mut owned);
-        let mut ui = PlainUi::new();
+        let mut ui = plain_ui_for(&owned);
         let ok = runtime.block_on(run_one_shot_async(&prompt_file, &owned, &mut ui));
         *rt = owned;
         return ok;
@@ -130,14 +130,26 @@ pub fn run_repl(rt: &mut Runtime) -> bool {
 #[must_use]
 pub fn run_one_shot(prompt_file: &str, rt: &Runtime) -> bool {
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
-    let mut ui = PlainUi::new();
+    let mut ui = plain_ui_for(rt);
     runtime.block_on(run_one_shot_async(prompt_file, rt, &mut ui))
+}
+
+/// A plain ui, with human output moved off stdout when the run summary claims it.
+///
+/// Otherwise the rendered answer and the JSON share stdout and the summary cannot
+/// be parsed - `afi --summary json -f p.txt | jq` fails on the prose.
+fn plain_ui_for(rt: &Runtime) -> PlainUi {
+    if rt.summary.is_json() {
+        PlainUi::diverted()
+    } else {
+        PlainUi::new()
+    }
 }
 
 /// Returns the updated runtime and whether every turn succeeded.
 async fn run_plain(rt: Runtime) -> (Runtime, bool) {
     let started = Instant::now();
-    let mut ui = PlainUi::new();
+    let mut ui = plain_ui_for(&rt);
     let mut core = ReplCore::new(rt, &mut ui);
     loop {
         match ui.read_prompt("  > ") {

@@ -22,13 +22,15 @@ pub struct UsageTotals {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub reasoning_tokens: u64,
-    /// Model turns that reported usage. A turn the provider gave no numbers for
-    /// is not counted, so a caller can tell "no turns" from "no data".
-    pub turns: u64,
+    /// Billed requests that reported usage. A model turn is one, and so is a
+    /// compression request, which is why this is not called `turns`. A request the
+    /// provider gave no numbers for is not counted, so a caller can tell "nothing
+    /// ran" from "the provider said nothing".
+    pub requests: u64,
 }
 
 impl UsageTotals {
-    /// Fold one turn's normalized usage in.
+    /// Fold one request's normalized usage in.
     pub fn add(&mut self, usage: &NormalizedUsage) {
         self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
@@ -36,7 +38,7 @@ impl UsageTotals {
             .cache_read_tokens
             .saturating_add(usage.cache_read_tokens);
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
-        self.turns = self.turns.saturating_add(1);
+        self.requests = self.requests.saturating_add(1);
     }
 
     /// Every token the run was billed for. The four fields are disjoint, so this
@@ -49,10 +51,10 @@ impl UsageTotals {
             .saturating_add(self.reasoning_tokens)
     }
 
-    /// Whether any turn reported usage at all.
+    /// Whether any request reported usage at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.turns == 0
+        self.requests == 0
     }
 }
 

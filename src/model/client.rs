@@ -14,7 +14,8 @@ use tokio_util::io::StreamReader;
 use serde_json::Value;
 
 use crate::config::Source;
-use crate::model::stream::StreamChunk;
+use crate::model::stream::{StreamChunk, Usage, normalize_usage};
+use crate::model::usage_totals;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
@@ -100,6 +101,29 @@ pub enum ClientError {
 
 /// The `OpenAI`-only probe endpoints have no Anthropic equivalent. None of them
 /// has a production caller today, so a clear error beats a half implementation.
+/// Fold a non-streaming response's usage into the run totals.
+///
+/// The streaming path records through `finalize_turn`, which this never reaches,
+/// so without this a `/compress` request is billed but missing from the run
+/// summary. Best effort: a body with no usage object is simply not counted.
+fn record_completion_usage(body: &str) {
+    let Ok(parsed) = serde_json::from_str::<CompletionUsage>(body) else {
+        return;
+    };
+    let Some(usage) = parsed.usage else {
+        return;
+    };
+    if let Some(normalized) = normalize_usage(Some(&usage), None, 0) {
+        usage_totals::record(&normalized);
+    }
+}
+
+/// Just the usage object, so an unknown response shape still parses.
+#[derive(serde::Deserialize)]
+struct CompletionUsage {
+    usage: Option<Usage>,
+}
+
 fn unsupported(source: &Source, what: &str) -> ClientError {
     ClientError::Config(format!(
         "{what} is not available on the Anthropic protocol (source {})",
@@ -304,9 +328,12 @@ impl ChatClient for ReqwestClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(ClientError::Http { status, body });
         }
-        resp.text()
+        let text = resp
+            .text()
             .await
-            .map_err(|e| ClientError::Connection(e.to_string()))
+            .map_err(|e| ClientError::Connection(e.to_string()))?;
+        record_completion_usage(&text);
+        Ok(text)
     }
 
     async fn list_models(&self, source: &Source) -> Result<Value, ClientError> {

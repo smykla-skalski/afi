@@ -128,6 +128,7 @@ impl ReplCore {
             &mut self.session_id,
             &env,
             ui,
+            &mut self.failed,
         )
         .await
         {

@@ -6,7 +6,11 @@ All notable changes to `afi` from this point forward.
 
 ### Added — machine-readable run summary
 
-`--summary json`, or `AFI_SUMMARY=json`, prints one JSON object on stdout after a one-shot run: `ok`, `error`, `source`, `model`, `answer`, `usage`, and `elapsed_secs`. `answer` is the last assistant message carrying text, so a review flow can post it without parsing the transcript. Off by default.
+`--summary json`, or `AFI_SUMMARY=json`, prints one JSON object on stdout after a non-interactive run: `ok`, `error`, `source`, `model`, `answer`, `usage`, and `elapsed_secs`. `answer` is the last assistant message carrying text, so a review flow can post it without parsing the transcript. Off by default.
+
+Both non-interactive entry points report it - `--prompt-file` and piped stdin - and while it is set, human output moves to stderr so stdout holds nothing but the JSON and pipes straight into a parser.
+
+`usage.requests` counts billed requests rather than model turns, because a compression request is billed too and is now counted.
 
 This also fixes the token accounting it reports. `normalize_usage` computed the input / output / cache-read / reasoning split and `turn_finalize` discarded the result, so the breakdown was thrown away on every provider and only a bare total reached the footer. Totals now accumulate across the run and are verified against the per-request numbers Anthropic reports. The four counts are disjoint and sum to `total_tokens`; `usage` is `null` rather than zeros when no turn reported any, so a silent provider is distinguishable from a free run.
 

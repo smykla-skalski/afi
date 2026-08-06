@@ -10,7 +10,7 @@ fn usage(input: u64, output: u64, cache: u64, reasoning: u64) -> NormalizedUsage
 }
 
 #[test]
-fn turns_accumulate_rather_than_overwrite() {
+fn requests_accumulate_rather_than_overwrite() {
     // The bug this exists to prevent: a per-turn value replacing the run total,
     // which under-reports every run after the first turn.
     let mut totals = UsageTotals::default();
@@ -24,7 +24,7 @@ fn turns_accumulate_rather_than_overwrite() {
             output_tokens: 509,
             cache_read_tokens: 6837,
             reasoning_tokens: 0,
-            turns: 3,
+            requests: 3,
         }
     );
 }
@@ -37,15 +37,15 @@ fn total_is_the_sum_of_four_disjoint_fields() {
 }
 
 #[test]
-fn no_turns_is_distinguishable_from_zero_tokens() {
+fn no_requests_is_distinguishable_from_zero_tokens() {
     let mut totals = UsageTotals::default();
     assert!(totals.is_empty(), "nothing recorded yet");
     totals.add(&usage(0, 0, 0, 0));
     assert!(
         !totals.is_empty(),
-        "a turn that reported all zeros still happened"
+        "a request that reported all zeros still happened"
     );
-    assert_eq!(totals.turns, 1);
+    assert_eq!(totals.requests, 1);
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn the_process_accumulator_records_and_resets() {
     let snap = snapshot();
     assert_eq!((snap.input_tokens, snap.output_tokens), (7, 8));
     assert_eq!((snap.cache_read_tokens, snap.reasoning_tokens), (9, 1));
-    assert_eq!(snap.turns, 1);
+    assert_eq!(snap.requests, 1);
     reset();
     assert!(snapshot().is_empty(), "reset must clear the accumulator");
 }

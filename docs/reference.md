@@ -35,7 +35,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 
 ## Run summary
 
-`--summary json` (or `AFI_SUMMARY=json`) prints one JSON object on stdout after a one-shot run, for CI that needs the result rather than the rendered transcript:
+`--summary json` (or `AFI_SUMMARY=json`) prints one JSON object on stdout after a non-interactive run, for CI that needs the result rather than the rendered transcript:
 
 ```json
 {
@@ -50,7 +50,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
     "cache_read_tokens": 6837,
     "reasoning_tokens": 0,
     "total_tokens": 11447,
-    "turns": 3
+    "requests": 3
   },
   "elapsed_secs": 12.17
 }
@@ -58,7 +58,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 
 `answer` is the last assistant message with text, so a review flow can post it directly. Turns that only called tools are skipped.
 
-The four token counts are disjoint and sum to `total_tokens`. They are per-run totals across every request, which is what a provider bills: each turn resends the whole history. `usage` is `null` rather than a row of zeros when no turn reported any, so a caller can tell a silent provider from a free run.
+The four token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run.
 
 **No cost field.** Anthropic returns no cost, so any figure here would come from a price table that goes stale without anyone noticing. Multiply the token counts by rates you control.
 
@@ -66,7 +66,9 @@ The four token counts are disjoint and sum to `total_tokens`. They are per-run t
 
 A failed run sets `ok` to false, fills in `error`, and exits 1.
 
-Both non-interactive entry points report it: `--prompt-file`, and piped stdin with no prompt file. A piped session summarizes the whole session, so `answer` is its last assistant text and `usage` covers every turn; any turn failing outright makes the run fail. An interactive TTY session prints nothing extra and always exits 0 — stdout there is the rendered interface, and a human is already reading it.
+Both non-interactive entry points report it: `--prompt-file`, and piped stdin with no prompt file. A piped session summarizes the whole session, so `answer` is its last assistant text and `usage` covers every request it made, `/compress` included; any turn failing outright makes the run fail, `/recover` included. An interactive TTY session prints nothing extra and always exits 0 — stdout there is the rendered interface, and a human is already reading it.
+
+**Human output moves to stderr** while `--summary json` is set, so stdout holds nothing but the JSON and pipes straight into a parser. Errors go to stderr either way.
 
 ## Anthropic
 

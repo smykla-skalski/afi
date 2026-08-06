@@ -181,7 +181,9 @@ The policy count also covers calls thrown away before dispatch could rule on the
 
 **These are attempts, not distinct intentions.** Every blocked call in a discarded batch counts, including one whose own arguments parsed, and a retried batch counts again - so a persistently truncated stream carrying two blocked calls reports six with the default two recoveries, for what a human would call one thing the model wanted. Read the count as "how many times was this run told no", and alert on whether it is zero rather than on how large it is. `AFI_MALFORMED_STREAM_RETRIES` bounds the multiplier.
 
-`auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, and `federated` for one afi minted itself. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
+`auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, `federated` for one afi minted itself, and `none` for a source with no credential configured, which is the local llama.cpp case. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
+
+It names the credential the tokens were **billed** to, not the one that happens to be active when the run ends. Those differ in a piped session that `/source`-switches after spending: `source` and `model` report where the session finished, while `auth` stays with whoever paid. A session that spent on two sources gets `"auth": null`, since no single credential paid for it - as does a run with no source at all. A run that billed nothing reports the credential it tried, which is what a failed run has to show.
 
 The identifiers are the non-secret ones the [federation](#anthropic) exchange sends, and only those. A rule covering one workspace passes no `ANTHROPIC_WORKSPACE_ID`, so no `workspace_id` comes back here, and a static-key run has nothing to identify at all - both name the mode and stop rather than emitting empty strings. Neither the access token nor the OIDC identity token is ever in the block: this JSON usually ends up as a build artifact, and an artifact carries no masking, so a value redacted in a log would be plain text there.
 
@@ -314,7 +316,7 @@ steps:
       ANTHROPIC_SERVICE_ACCOUNT_ID: svac_...
 ```
 
-The [run summary](#run-summary) reports the rule, organization, service account, and workspace the exchange used, so which budget a job billed is readable from the job's own output.
+The [run summary](#run-summary) reports the rule, organization, service account, and workspace the exchange was configured with, so which budget a job billed is readable from the job's own output.
 
 A read-only job needs nothing else: there is no terminal to answer a prompt, and `--read-only` leaves nothing that would raise one. A job that has to write does need `--yolo` or `AFI_APPROVAL=yolo`, or every write and bash call is denied rather than hanging - pair it with a [tool policy](#tool-policy) so "do not ask me" does not also mean unrestricted.
 

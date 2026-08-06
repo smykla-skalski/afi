@@ -33,14 +33,16 @@ const OIDC_AUDIENCE: &str = "https://api.anthropic.com";
 /// Re-mint this long before expiry so a request never races the deadline.
 const EXPIRY_SKEW: Duration = Duration::from_mins(1);
 
-/// A static key, whichever header carries it.
+/// A static key out of the environment, whichever header carries it.
 const MODE_API_KEY: &str = "api_key";
 /// A bearer token minted elsewhere and handed to afi.
 const MODE_OAUTH: &str = "oauth";
 /// A bearer token afi minted itself, through [`exchange`].
 const MODE_FEDERATED: &str = "federated";
+/// No credential was configured at all - a local server that wants none.
+const MODE_NONE: &str = "none";
 
-/// Describe the credential a request on this protocol uses, for the run summary.
+/// Describe the credential this source authenticates with, for the run summary.
 ///
 /// Built here rather than in `summary.rs` because the identifiers it reports are
 /// exactly the non-secret ones [`exchange`] puts in the grant: an id that stops
@@ -51,10 +53,15 @@ const MODE_FEDERATED: &str = "federated";
 /// Anthropic returns a token and nothing to attribute it with, so a rule that
 /// resolves a single workspace server-side leaves `workspace_id` absent here.
 ///
-/// `OpenAiCompat` reports `api_key` too: its credential is a static key out of
-/// the environment just as `AnthropicApiKey`'s is, and only the header differs.
-pub(crate) fn run_auth(protocol: &Protocol) -> RunAuth<'_> {
-    match protocol {
+/// A source holding the placeholder reports `none` rather than `api_key`. It is
+/// the llama.cpp case: `Source::new` stores [`NOOP_KEY`] when nothing was
+/// configured, so a keyless local server would otherwise claim a credential it
+/// never had. `OpenAiCompat` with a real key does report `api_key` - a static
+/// key is a static key, and only the header differs from `AnthropicApiKey`.
+pub(crate) fn run_auth(source: &Source) -> RunAuth<'_> {
+    match &source.protocol {
+        // The one mode whose credential is minted rather than stored, so the
+        // placeholder in `api_key` says nothing about whether it has one.
         Protocol::AnthropicFederated(federation) => RunAuth {
             mode: MODE_FEDERATED,
             organization_id: Some(&federation.organization_id),
@@ -64,6 +71,7 @@ pub(crate) fn run_auth(protocol: &Protocol) -> RunAuth<'_> {
             workspace_id: federation.workspace_id.as_deref(),
             federation_rule_id: Some(&federation.rule_id),
         },
+        _ if is_placeholder(&source.api_key) => RunAuth::mode_only(MODE_NONE),
         Protocol::AnthropicOAuth => RunAuth::mode_only(MODE_OAUTH),
         Protocol::AnthropicApiKey | Protocol::OpenAiCompat => RunAuth::mode_only(MODE_API_KEY),
     }
@@ -98,9 +106,17 @@ pub(super) fn auth_headers(
     into_header_map(pairs)
 }
 
+/// Whether a stored credential is really no credential at all.
+///
+/// One definition, shared by the wire path and the run summary, so a source afi
+/// refuses to authenticate cannot be reported as having a key.
+fn is_placeholder(credential: &str) -> bool {
+    credential.is_empty() || credential == NOOP_KEY
+}
+
 /// Reject the placeholder and blanks before they reach the wire.
 fn usable(credential: &str, label: &str) -> Result<String, ClientError> {
-    if credential.is_empty() || credential == NOOP_KEY {
+    if is_placeholder(credential) {
         return Err(ClientError::Auth(format!(
             "no Anthropic {label} configured. Set ANTHROPIC_API_KEY, \
              ANTHROPIC_AUTH_TOKEN, or the ANTHROPIC_FEDERATION_* variables."

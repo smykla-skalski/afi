@@ -212,10 +212,23 @@ fn a_response_without_an_access_token_is_an_error() {
 
 // --- what the run summary reports ---------------------------------------------
 
+/// A source on `protocol` holding a real credential.
+fn keyed_source(protocol: Protocol) -> Source {
+    Source::new(
+        "test",
+        "https://api.anthropic.com".to_string(),
+        Some("sk-real-credential".to_string()),
+        None,
+        None,
+        None,
+    )
+    .with_protocol(protocol)
+}
+
 #[test]
 fn a_federated_run_reports_the_ids_the_grant_sent() {
-    let protocol = federated_protocol();
-    let auth = run_auth(&protocol);
+    let source = keyed_source(federated_protocol());
+    let auth = run_auth(&source);
     assert_eq!(auth.mode, MODE_FEDERATED);
     assert_eq!(auth.federation_rule_id, Some("fdrl_1"));
     assert_eq!(auth.organization_id, Some("org"));
@@ -229,17 +242,56 @@ fn a_federated_run_reports_the_ids_the_grant_sent() {
 fn a_workspace_scoped_rule_reports_the_workspace_it_billed() {
     let mut federation = federation();
     federation.workspace_id = Some("wrkspc_ci".to_string());
-    let protocol = Protocol::AnthropicFederated(Box::new(federation));
-    assert_eq!(run_auth(&protocol).workspace_id, Some("wrkspc_ci"));
+    let source = keyed_source(Protocol::AnthropicFederated(Box::new(federation)));
+    assert_eq!(run_auth(&source).workspace_id, Some("wrkspc_ci"));
+}
+
+/// The mode is minted, not stored, so the placeholder in `api_key` says nothing
+/// about it. Reporting `none` here would deny a credential the run does have.
+#[test]
+fn a_federated_source_reports_federated_despite_holding_the_placeholder() {
+    let source = Source::new(
+        "anthropic",
+        "https://api.anthropic.com".to_string(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .with_protocol(federated_protocol());
+    assert_eq!(source.api_key, NOOP_KEY, "the fixture must hold no key");
+    assert_eq!(run_auth(&source).mode, MODE_FEDERATED);
 }
 
 #[test]
 fn each_mode_is_named_by_how_the_credential_was_obtained() {
     // `OpenAiCompat` is an api key too: a static value out of the environment,
     // differing from `AnthropicApiKey` only in which header carries it.
-    assert_eq!(run_auth(&Protocol::AnthropicApiKey).mode, MODE_API_KEY);
-    assert_eq!(run_auth(&Protocol::OpenAiCompat).mode, MODE_API_KEY);
-    assert_eq!(run_auth(&Protocol::AnthropicOAuth).mode, MODE_OAUTH);
+    let api_key = keyed_source(Protocol::AnthropicApiKey);
+    let openai = keyed_source(Protocol::OpenAiCompat);
+    let oauth = keyed_source(Protocol::AnthropicOAuth);
+    assert_eq!(run_auth(&api_key).mode, MODE_API_KEY);
+    assert_eq!(run_auth(&openai).mode, MODE_API_KEY);
+    assert_eq!(run_auth(&oauth).mode, MODE_OAUTH);
+}
+
+/// A keyless llama.cpp source must not claim a credential. `Source::new` stores
+/// the placeholder, and `auth_headers` refuses to send it, so reporting
+/// `api_key` would attest to something afi would not authenticate with.
+#[test]
+fn a_source_holding_the_placeholder_reports_no_credential() {
+    for protocol in [Protocol::OpenAiCompat, Protocol::AnthropicApiKey] {
+        let source = Source::new(
+            "local",
+            "http://localhost:8080/v1".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_protocol(protocol.clone());
+        assert_eq!(run_auth(&source).mode, MODE_NONE, "{protocol:?}");
+    }
 }
 
 #[test]
@@ -249,7 +301,8 @@ fn a_static_credential_has_no_ids_to_report() {
         Protocol::AnthropicOAuth,
         Protocol::OpenAiCompat,
     ] {
-        let auth = run_auth(&protocol);
+        let source = keyed_source(protocol.clone());
+        let auth = run_auth(&source);
         let ids = [
             auth.organization_id,
             auth.service_account_id,
@@ -265,11 +318,11 @@ fn the_identity_token_is_not_among_the_ids_reported() {
     // The summary is uploaded as an unmasked build artifact. The identity token
     // is a bearer credential in its own right, and it sits one field away from
     // the ids that are safe to publish.
-    let protocol = Protocol::AnthropicFederated(Box::new(Federation {
+    let source = keyed_source(Protocol::AnthropicFederated(Box::new(Federation {
         identity: Some(IdentitySource::Literal("eyJ.assertion".to_string())),
         ..federation()
-    }));
-    let auth = run_auth(&protocol);
+    })));
+    let auth = run_auth(&source);
     let reported = [
         auth.organization_id,
         auth.service_account_id,

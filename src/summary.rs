@@ -236,7 +236,7 @@ impl RunError {
 /// no masking, so a value redacted in a log is plain text there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunAuth<'a> {
-    /// `api_key`, `oauth`, or `federated`.
+    /// `api_key`, `oauth`, `federated`, or `none`.
     pub mode: &'static str,
     pub organization_id: Option<&'a str>,
     pub service_account_id: Option<&'a str>,
@@ -302,8 +302,8 @@ pub struct RunSummary<'a> {
     /// refusals". A tool that ran and failed is not counted - that is an error, and
     /// folding the two together would lose the signal.
     pub refused_tool_calls: RefusedToolCalls,
-    /// The credential the run billed. `None` only when the run had no source at
-    /// all, which is the same run that reports a null `source`.
+    /// The credential the run billed. `None` when no single one can be named:
+    /// a run with no source at all, or a session that spent on two of them.
     pub auth: Option<RunAuth<'a>>,
 }
 

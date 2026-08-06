@@ -123,7 +123,9 @@ A class you leave unpriced is fine as long as the run spent nothing there - an O
 
 Model ids match case-insensitively after trimming, and must otherwise be exactly the id afi sends to the provider - what `model` shows in the summary, or what `/source` reports. A mismatch drops the field, which is the point: an absent number is checkable, a wrong one is not.
 
-Rates are read as exact decimals, up to six places. A negative, an exponent (`3e-1`), a seventh decimal place, or a misspelled class key warns at startup and disables cost reporting for the run - one unreadable entry is not priced around.
+Rates are read as exact decimals, down to the sixth place - a millionth of a dollar per million tokens, which is a hundredth of a micro-dollar on a ten-million-token run. Exponent notation is read as the number it denotes, so `3e-1` and `0.3` are the same rate.
+
+Four things warn at startup and disable cost reporting for the whole run: a negative rate, a rate finer than the sixth decimal place or too large to hold, a misspelled class key, and a model named twice. The last one counts case and surrounding space as the same id, so `{"M": ..., "m": ...}` is a duplicate - one of the two would otherwise win at random and the bill would change between runs. One unreadable entry is not priced around.
 
 A session that switches models is billed against each model's own rates, so `cost_usd` stays right even though `model` can only name the last one.
 

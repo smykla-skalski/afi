@@ -99,16 +99,7 @@ impl Pricing {
                 return None;
             }
         };
-        let mut by_model = HashMap::with_capacity(table.len());
-        for (model, raw_rates) in table {
-            match raw_rates.to_rates() {
-                Ok(rates) => by_model.insert(key(&model), rates),
-                Err(field) => {
-                    report_bad_rate(&model, field);
-                    return None;
-                }
-            };
-        }
+        let by_model = normalize(table)?;
         if by_model.is_empty() {
             None
         } else {
@@ -135,6 +126,25 @@ impl Pricing {
     }
 }
 
+/// Check every rate and key the table by normalized model id.
+fn normalize(table: HashMap<String, RawRates>) -> Option<HashMap<String, Rates>> {
+    let mut by_model = HashMap::with_capacity(table.len());
+    for (model, raw_rates) in table {
+        let rates = raw_rates
+            .to_rates()
+            .map_err(|field| report_bad_rate(&model, field))
+            .ok()?;
+        // Two spellings of one id are refused rather than resolved. `table` is a
+        // HashMap, so which of them survived would vary from run to run, and so
+        // would the bill - the one failure this whole module exists to prevent.
+        if by_model.insert(key(&model), rates).is_some() {
+            report_duplicate(&model);
+            return None;
+        }
+    }
+    Some(by_model)
+}
+
 /// Model ids are matched case-insensitively after trimming, so a hand-written
 /// table is not defeated by stray whitespace.
 fn key(model: &str) -> String {
@@ -159,9 +169,18 @@ fn usd(micros: u128) -> Option<f64> {
 
 fn report_bad_rate(model: &str, field: &str) {
     eprintln!(
-        "afi: {PRICES_ENV}[{model:?}].{field} is not USD per million tokens \
-         written as a plain decimal with at most six places; \
+        "afi: {PRICES_ENV}[{model:?}].{field} is not a usable rate; \
+         want USD per million tokens, not negative, \
+         and no finer than six decimal places; \
          no cost_usd will be reported"
+    );
+}
+
+fn report_duplicate(model: &str) {
+    eprintln!(
+        "afi: {PRICES_ENV} names {:?} twice, counting case and surrounding \
+         space as the same id; no cost_usd will be reported",
+        key(model)
     );
 }
 
@@ -203,22 +222,55 @@ fn micros(raw: Option<&Number>, field: &'static str) -> Result<Option<u64>, &'st
 
 /// Parse a USD-per-million-tokens rate into micro-USD.
 ///
-/// Negatives, exponent forms, and a seventh decimal place are rejected rather
-/// than coerced. A rate that fine cannot move any figure afi reports, so a
-/// caller who wrote one has made a mistake worth hearing about.
+/// Read from the digits rather than from the float they denote, so `3`, `0.3`,
+/// `3e-1`, and `0.000001` all land exactly. Reading it from the rendered form
+/// instead would make the answer depend on how `serde_json` chose to print the
+/// number, and `1e-6` prints as an exponent while `0.00001` does not - so of
+/// the six decimal places this module promises, only five would work.
+///
+/// Negatives, and anything finer than a micro-dollar or too large to hold, are
+/// refused rather than coerced. A rate that fine cannot move a figure afi
+/// reports, so a caller who wrote one has made a mistake worth hearing about.
 fn micros_per_million(raw: &str) -> Option<u64> {
-    let (whole, frac) = raw.split_once('.').unwrap_or((raw, ""));
+    let (mantissa, exponent) = split_exponent(raw)?;
+    let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
-    if (whole.is_empty() && frac.is_empty()) || frac.len() > 6 || !digits(whole) || !digits(frac) {
+    if (whole.is_empty() && frac.is_empty()) || !digits(whole) || !digits(frac) {
         return None;
     }
-    let whole: u64 = if whole.is_empty() {
-        0
-    } else {
-        whole.parse().ok()?
-    };
-    let frac: u64 = format!("{frac:0<6}").parse().ok()?;
-    whole.checked_mul(1_000_000)?.checked_add(frac)
+    // Where the decimal point falls once the value is scaled to micro-USD.
+    let point = i64::try_from(whole.len()).ok()? + i64::from(exponent) + 6;
+    scaled(&format!("{whole}{frac}"), point)
+}
+
+/// Split `3e-1` into mantissa and exponent. No exponent means 0.
+fn split_exponent(raw: &str) -> Option<(&str, i32)> {
+    match raw.split_once(['e', 'E']) {
+        None => Some((raw, 0)),
+        Some((mantissa, exponent)) => Some((mantissa, exponent.parse().ok()?)),
+    }
+}
+
+/// Read `digits` as a whole number with the decimal point at `point`.
+///
+/// `None` when anything past the point is non-zero, which is a rate finer than
+/// the micro-dollar this is counted in.
+fn scaled(digits: &str, point: i64) -> Option<u64> {
+    // A u64 holds 20 digits, so a point past that is not a rate afi can use.
+    if !(0..=20).contains(&point) {
+        return None;
+    }
+    let point = usize::try_from(point).ok()?;
+    if digits.len() > point && digits[point..].bytes().any(|byte| byte != b'0') {
+        return None;
+    }
+    let whole: String = digits.chars().take(point).collect();
+    let padded = format!("{whole:0<point$}");
+    if padded.is_empty() {
+        // Every digit was zero and the point sits left of all of them.
+        return Some(0);
+    }
+    padded.parse().ok()
 }
 
 #[cfg(test)]

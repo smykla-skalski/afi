@@ -34,13 +34,34 @@ fn a_rate_is_read_as_an_exact_decimal() {
     assert_eq!(micros_per_million("3.75"), Some(3_750_000));
     assert_eq!(micros_per_million(".5"), Some(500_000));
     assert_eq!(micros_per_million("0.000001"), Some(1));
+    assert_eq!(micros_per_million("0"), Some(0));
 }
 
 #[test]
-fn a_rate_that_is_not_a_plain_decimal_is_refused() {
+fn an_exponent_is_the_number_it_denotes_rather_than_a_rejection() {
+    // These reach the parser whenever serde_json renders a rate that way, which
+    // it does by magnitude and not by how the caller wrote it.
+    assert_eq!(micros_per_million("3e-1"), Some(300_000));
+    assert_eq!(micros_per_million("1e-6"), Some(1));
+    assert_eq!(micros_per_million("1.5e3"), Some(1_500_000_000));
+    assert_eq!(micros_per_million("3E1"), Some(30_000_000));
+}
+
+#[test]
+fn a_rate_that_is_not_a_usable_number_is_refused() {
     // Each of these would otherwise be coerced into a number nobody wrote, and
-    // the run would be priced against it without saying so.
-    for bad in ["-3", "1e-9", "3.0000001", "three", "", "3.7.5", "1_000"] {
+    // the run would be priced against it without saying so. The last two are too
+    // fine to hold in micro-dollars; the rest are not rates at all.
+    for bad in [
+        "-3",
+        "three",
+        "",
+        "3.7.5",
+        "1_000",
+        "1e17",
+        "1e-9",
+        "3.0000001",
+    ] {
         assert_eq!(micros_per_million(bad), None, "{bad:?} must not parse");
     }
 }
@@ -68,6 +89,46 @@ fn an_unusable_table_prices_nothing_rather_than_part_of_the_run() {
     ] {
         assert_eq!(Pricing::parse(Some(bad)), None, "{bad} must not price");
     }
+}
+
+#[test]
+fn a_rate_survives_the_json_path_whatever_form_serde_renders_it_in() {
+    // The regression this exists to catch: reading the rate from serde_json's
+    // rendering made the answer depend on magnitude, because 1e-6 prints as an
+    // exponent and 0.00001 prints in full. The documented sixth decimal place
+    // was the one that did not work.
+    for (table, expected) in [
+        (r#"{"m": {"input": 0.000001}}"#, 0.000_001),
+        (r#"{"m": {"input": 0.00001}}"#, 0.000_01),
+        (r#"{"m": {"input": 3e-1}}"#, 0.3),
+        (r#"{"m": {"input": 0.3}}"#, 0.3),
+    ] {
+        let pricing = Pricing::parse(Some(table)).unwrap_or_else(|| panic!("{table} must parse"));
+        assert_eq!(
+            pricing.run_cost_usd(&run("m", totals(1_000_000, 0, 0, 0))),
+            Some(expected),
+            "{table} must price a million input tokens at its stated rate"
+        );
+    }
+}
+
+#[test]
+fn a_model_named_twice_in_different_cases_is_refused() {
+    // Both spellings normalize to one key, so one of them would win - and which
+    // one is HashMap iteration order, which varies from run to run. Observed
+    // before the fix: the same table reported $0.009168 on six runs of ten and
+    // $9.168 on the other four.
+    let table = r#"{"M": {"input": 1}, "m": {"input": 1000}}"#;
+    assert_eq!(
+        Pricing::parse(Some(table)),
+        None,
+        "a bill that changes between runs is worse than no bill"
+    );
+    // Trimming collides the same way.
+    assert_eq!(
+        Pricing::parse(Some(r#"{"m": {"input": 1}, " m ": {"input": 2}}"#)),
+        None
+    );
 }
 
 #[test]

@@ -75,5 +75,6 @@ fn build<'a>(
         // Read off the source rather than the flag, so what is reported is what
         // the requests carried - including a level `EXTRA_BODY` set by hand.
         effort: rt.active_source().and_then(Source::resolved_effort),
+        refused_tool_calls: usage_totals::refused_tool_calls(),
     }
 }

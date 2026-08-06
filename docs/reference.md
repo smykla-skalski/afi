@@ -90,7 +90,7 @@ Enforced in two places. Blocked tools are left out of the request, so the model 
 
 `final_answer` is never blockable. It carries the forced-final answer rather than doing anything, so blocking it would strand a run rather than restrict it.
 
-A restricted run shows `tools:` in the status line and lists the permitted set in the [run summary](#run-summary). An unrestricted one shows neither, so the segment appearing is itself the signal.
+A restricted run shows `tools:` in the status line and lists the permitted set in the [run summary](#run-summary), which also counts every call this policy refused. An unrestricted one shows neither, so the segment appearing is itself the signal.
 
 **This is not a sandbox.** It bounds which afi tools run, not what a permitted command does once started. A permitted `run_bash` can do anything the user can, including editing files, and nothing stops it unsetting these variables for a nested `afi`. Use it to keep a run inside the shape you intended, not to contain something adversarial.
 
@@ -145,6 +145,9 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
     "reasoning_tokens": 0,
     "total_tokens": 11447,
     "requests": 3,
+    "refused_tool_calls": 0,
+    "refused_by_policy": 0,
+    "refused_by_approval": 0,
     "cost_usd": 0.023398
   },
   "elapsed_secs": 12.17,
@@ -159,7 +162,19 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
 
 `effort` is there for the same reason: it is the level the requests actually carried, read back off the source rather than off the flag, so a capped level reads as the capped one and a level set by hand in `EXTRA_BODY` still shows up. `null` means the run took the endpoint's own default - either nobody asked for a level, or that endpoint has no [effort control](#reasoning-effort) afi knows of.
 
-The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run.
+`usage.refused_tool_calls` is what the run tried anyway, and it comes with the split that makes it readable: `refused_by_policy` for calls the [tool policy](#tool-policy) blocked, `refused_by_approval` for calls the approval gate denied, and the total of the two. A run that refused nothing reports `0` in all three rather than omitting them, so a caller can tell that apart from an older afi that never reported them. They live inside `usage`, so a run that never started - one refused over its own [tool policy](#tool-policy) or [summary path](#writing-the-summary-to-a-file) - carries none of them, and `error_kind` is what a caller reads there instead.
+
+**Alert on `refused_by_policy`.** That is the one that means the model reached for a tool the caller had ruled out, which is what matters when the input under review came from outside the trust boundary: `--read-only` guarantees an attempted write failed, and this count is what makes the attempt visible, so a run that was probed and a run that was not stop looking alike.
+
+`refused_by_approval` is a real refusal but a noisier signal, which is why it is a separate number. A run with no terminal and no `--yolo` denies every mutating call by default - see the plain interface above - so an ordinary unattended run that was asked to write reports one here without anything untoward happening. In a `--read-only` run the policy answers first and this stays `0`, which is why an audit reads the policy count.
+
+A tool that ran and failed is an error, not a refusal, and is not counted - a missing file or a command exiting non-zero must not inflate a number worth alerting on. Nor is a call you interrupted with Esc.
+
+The policy count also covers calls thrown away before dispatch could rule on them: a batch whose arguments will not parse, and a forced-final turn answered with a tool - alongside the answer or instead of it. Both discard the whole batch, so a blocked call in one used to leave no trace but a line on stderr, which is exactly what a caller reading the JSON cannot see. The policy reads names, not arguments, so its answer is known even for the call whose arguments were the problem.
+
+**These are attempts, not distinct intentions.** Every blocked call in a discarded batch counts, including one whose own arguments parsed, and a retried batch counts again - so a persistently truncated stream carrying two blocked calls reports six with the default two recoveries, for what a human would call one thing the model wanted. Read the count as "how many times was this run told no", and alert on whether it is zero rather than on how large it is. `AFI_MALFORMED_STREAM_RETRIES` bounds the multiplier.
+
+The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run - unless the run was refused a call, which afi observed itself and reports either way, with `requests` still `0` to mark the silence.
 
 `cache_write_tokens` is separate from `cache_read_tokens` and from `input_tokens` because the three are priced differently - Anthropic bills a write above base input and a read far below it, so a cost calculation needs its own rate for each. Only the Anthropic path reports writes; an OpenAI-compatible source reports `0`, as does llama.cpp, whose `timings.cache_n` counts a reused prefix and is therefore a read.
 

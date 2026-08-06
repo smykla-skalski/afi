@@ -3,7 +3,10 @@ use std::fs;
 use super::*;
 use crate::risk::{ApprovalChoice, HighDefaultClassifier};
 
-struct TestUi;
+struct TestUi {
+    /// What the approval prompt answers, so a test can be the user saying no.
+    choice: ApprovalChoice,
+}
 
 impl UserInterface for TestUi {
     fn emit(&mut self, _event: OutputEvent) {}
@@ -15,7 +18,7 @@ impl UserInterface for TestUi {
     fn stop_activity(&mut self) {}
 
     fn approve(&mut self, _prompt: &str) -> ApprovalChoice {
-        ApprovalChoice::Yes
+        self.choice
     }
 }
 
@@ -42,9 +45,19 @@ impl Harness {
             config,
             env: HashMap::new(),
             cancel: CancellationToken::new(),
-            ui: TestUi,
+            ui: TestUi {
+                choice: ApprovalChoice::Yes,
+            },
             temp: tempfile::tempdir().expect("tempdir"),
         }
+    }
+
+    /// The other refusal: approval on, and the user answering no.
+    fn denying() -> Self {
+        let mut harness = Self::new(ModelConfig::default());
+        harness.approval = ApprovalState::default();
+        harness.ui.choice = ApprovalChoice::No;
+        harness
     }
 
     /// A config whose policy comes from the two env vars, exercising the same
@@ -241,6 +254,29 @@ fn a_blocked_call_reports_back_so_the_turn_continues() {
             .expect("string content")
             .starts_with("ERROR:")
     );
+}
+
+/// The second way a call is refused, and the one the summary counts alongside a
+/// policy block. Asserted on behaviour rather than on the refusal counter: that
+/// counter is process-wide and every refusing test in this binary feeds it, so an
+/// exact figure only means something in a process of its own - see
+/// `tests/refused_tool_calls.rs`.
+#[test]
+fn a_user_denial_reports_back_without_writing() {
+    let mut h = Harness::denying();
+    let target = h.temp.path().join("denied.txt");
+
+    let result = dispatch_tool(
+        "write_file",
+        &json!({"path": &target, "content": "written"}),
+        &mut h.args(),
+    );
+
+    let ToolDispatchResult::Ok(message) = result else {
+        panic!("a denial reports back, it does not escape the turn");
+    };
+    assert_eq!(message, "DENIED by user");
+    assert!(!target.exists(), "the denied write happened anyway");
 }
 
 #[test]

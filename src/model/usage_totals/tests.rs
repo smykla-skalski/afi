@@ -169,3 +169,21 @@ fn merging_two_models_totals_adds_every_field() {
         }
     );
 }
+
+#[test]
+fn a_refusal_total_is_its_two_halves_and_nothing_more() {
+    // The split is why a total is derived rather than counted alongside the halves:
+    // a policy block means the model reached for a tool the caller ruled out, while
+    // an unattended run with no --yolo denies every mutating call at the gate, and
+    // one figure covering both cannot be alerted on. A separately tracked total is
+    // the version that drifts.
+    let refused = RefusedToolCalls {
+        by_policy: 2,
+        by_approval: 1,
+    };
+    assert_eq!(refused.total(), 3);
+    assert!(!refused.is_empty());
+    // Nothing refused is empty, which is what keeps `usage` null for a run that
+    // never started - see `RunSummary::refused`.
+    assert!(RefusedToolCalls::default().is_empty());
+}

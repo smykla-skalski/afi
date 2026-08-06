@@ -3,6 +3,8 @@ use crate::tools::known_tool_names;
 use serde_json::json;
 use tempfile::TempDir;
 
+mod refusals;
+
 fn totals(requests: u64) -> UsageTotals {
     UsageTotals {
         input_tokens: 4085,
@@ -27,6 +29,7 @@ fn summary(ok: bool, answer: &str, usage: UsageTotals) -> RunSummary<'_> {
         elapsed_secs: 14.2341,
         tools: known_tool_names().to_vec(),
         effort: None,
+        refused_tool_calls: RefusedToolCalls::default(),
     }
 }
 

@@ -18,8 +18,8 @@ use crate::model::recovery::{
 use crate::model::stream::normalize_usage;
 use crate::model::turn::TurnRequest;
 use crate::model::turn_dispatch::{
-    DispatchArgs, ToolCallAccum, ToolRunOutcome, dispatch_structured, dispatch_text,
-    order_tool_calls,
+    DispatchArgs, ToolCallAccum, ToolRunOutcome, count_discarded_refusals, dispatch_structured,
+    dispatch_text, order_tool_calls,
 };
 use crate::model::turn_stats::{TurnStats, handle_reasoning_stall, print_stats_footer};
 use crate::model::turn_stream::Accumulated;
@@ -129,7 +129,7 @@ fn forced_final_result(
     ui: &mut dyn UserInterface,
 ) -> Option<TurnOutcome> {
     if tr.forced_final && !tool_calls.is_empty() {
-        return Some(emit_forced_final(messages, tool_calls, ui));
+        return Some(emit_forced_final(messages, tr, tool_calls, ui));
     }
     if tr.forced_final
         && !text.trim().is_empty()
@@ -153,10 +153,15 @@ fn forced_final_result(
 /// or with another tool call - looked like a completed run.
 fn emit_forced_final(
     messages: &mut Vec<Value>,
+    tr: &TurnRequest<'_>,
     tool_calls: &HashMap<u32, ToolCallAccum>,
     ui: &mut dyn UserInterface,
 ) -> TurnOutcome {
     let ordered = order_tool_calls(tool_calls);
+    // Before the scan below, which returns as soon as it finds the answer: a model
+    // told to answer sends the blocked call beside the `final_answer` as readily as
+    // instead of it, and that shape would otherwise go uncounted.
+    count_discarded_refusals(&ordered, &tr.config.tool_policy);
     for c in &ordered {
         if c.name.as_deref() != Some("final_answer") {
             continue;
@@ -227,6 +232,8 @@ fn malformed_tool_retry(
     ui: &mut dyn UserInterface,
 ) -> TurnOutcome {
     let name = ordered[idx].name.as_deref().unwrap_or("tool");
+    // Before the retry branch, so the give-up path counts what it drops too.
+    count_discarded_refusals(ordered, &tr.config.tool_policy);
     let retry_limit = tr.config.malformed_stream_retry_limit;
     if tr.malformed_stream_cut_count >= retry_limit {
         // Out of recoveries with nothing dispatched and nothing pushed: the turn

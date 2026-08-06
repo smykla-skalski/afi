@@ -36,6 +36,25 @@ git_release_body = "{{ changelog }}"
 [changelog]
 protect_breaking_commits = true
 
+# Matches the format the existing entries were generated in, so the file reads as
+# one document rather than as a default template layered over a different one.
+# release-plz's own default renders the scope in italics and leaves the subject
+# lowercase; this uses bold and sentence case, like the rest of the file.
+body = """
+
+{% if version -%}
+## [{{ version | trim_start_matches(pat="v") }}]{% if timestamp %} - {{ timestamp | date(format="%Y-%m-%d") }}{% endif %}
+{%- else -%}
+## Unreleased
+{%- endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}** {% endif %}{{ commit.message | upper_first }}
+{%- endfor %}
+{% endfor %}
+"""
+
 # Grouped by what a reader wants to find, not by the commit type alphabet.
 # `default_scope` is unset on purpose: a scope is mandatory in this repository,
 # so anything without one is a mistake worth seeing in the changelog.

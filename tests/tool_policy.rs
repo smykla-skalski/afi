@@ -6,6 +6,8 @@ mod common;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+use afi::model::ModelConfig;
+use afi::repl::banner;
 use tempfile::TempDir;
 
 /// Run the real binary with a clean env so nothing leaks in from the shell.
@@ -111,7 +113,7 @@ fn the_model_config_agrees_with_the_runtime() {
     // Two parses of the same env. They must not be able to disagree, or the
     // banner would advertise a policy the dispatcher does not enforce.
     let rt = common::build(&["afi", "--allowed-tools", "read_file,list_dir"], &[]);
-    let config = afi::model::ModelConfig::from_env(&rt.env);
+    let config = ModelConfig::from_env(&rt.env);
     assert_eq!(config.tool_policy, rt.tool_policy);
 }
 
@@ -120,10 +122,10 @@ fn the_model_config_agrees_with_the_runtime() {
 #[test]
 fn the_banner_names_the_policy_only_when_one_applies() {
     let plain = common::build(&["afi"], &[]);
-    assert!(!afi::repl::banner(&plain).contains("tools:"));
+    assert!(!banner(&plain).contains("tools:"));
 
     let restricted = common::build(&["afi", "--allowed-tools", "read_file"], &[]);
-    assert!(afi::repl::banner(&restricted).contains("tools:read_file"));
+    assert!(banner(&restricted).contains("tools:read_file"));
 }
 
 // --- the process ---------------------------------------------------------------

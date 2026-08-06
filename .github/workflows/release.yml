@@ -60,7 +60,38 @@ jobs:
         run: |
           set -euo pipefail
 
-          manifest_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          # SemVer 2.0: no leading zeros, hyphens allowed inside a prerelease
+          # identifier, optional build metadata. Cargo accepts all of that, so a
+          # narrower pattern here would refuse to release a version the manifest
+          # legitimately holds.
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+
+          # Read the version without a toolchain. `cargo metadata` would need
+          # cargo on PATH before the mise step runs, and mise does not supply
+          # Rust here - rust-toolchain.toml plus rustup does - so a runner from
+          # vars.RUNNER_LABEL without Rust preinstalled would die on the version
+          # guard rather than on the build. It also keeps AGENTS.md's rule that
+          # repository commands go through mise, never raw cargo.
+          #
+          # Scoped to the [package] section: [dependencies] holds entries like
+          # `serde = { version = "1" }` that an unscoped match would pick up.
+          manifest_version="$(
+            awk '
+              /^[[:space:]]*\[/ { in_package = ($0 ~ /^[[:space:]]*\[package\]/); next }
+              in_package && /^[[:space:]]*version[[:space:]]*=/ {
+                sub(/^[^=]*=[[:space:]]*/, "")
+                sub(/[[:space:]]*#.*$/, "")
+                sub(/[[:space:]]*$/, "")
+                gsub(/^"|"$/, "")
+                print
+                exit
+              }
+            ' Cargo.toml
+          )"
+          if [[ ! "${manifest_version}" =~ ${semver} ]]; then
+            echo "::error::could not read a semver version from Cargo.toml's [package] section (got '${manifest_version}')."
+            exit 1
+          fi
           echo "Cargo.toml version: ${manifest_version}"
 
           if [[ "${EVENT_NAME}" == "pull_request" ]]; then
@@ -76,11 +107,6 @@ jobs:
 
           version="${INPUT_VERSION#v}"
 
-          # SemVer 2.0: no leading zeros, hyphens allowed inside a prerelease
-          # identifier, optional build metadata. Cargo accepts all of that, so a
-          # narrower pattern here would refuse to release a version the manifest
-          # legitimately holds.
-          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
           if [[ ! "${version}" =~ ${semver} ]]; then
             echo "::error::'${version}' is not a semver version. Expected e.g. 0.2.0 or 1.0.0-rc.1."
             exit 1
@@ -101,10 +127,13 @@ jobs:
             exit 1
           fi
 
-          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
-            publish=false
-          else
+          # Publish only on an explicit "false". Anything else - unset, empty,
+          # "True", "no" - stays a dry run, because a pushed tag and a published
+          # release are both awkward to walk back and a typo should not cut one.
+          if [[ "${INPUT_DRY_RUN}" == "false" ]]; then
             publish=true
+          else
+            publish=false
           fi
           {
             echo "version=${version}"

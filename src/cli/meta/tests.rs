@@ -59,6 +59,7 @@ fn help_documents_every_parsed_flag() {
         "--session",
         "--prompt-file",
         "--summary",
+        "--read-only",
         "--allowed-tools",
         "--disallowed-tools",
         "--version",

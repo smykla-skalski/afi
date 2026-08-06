@@ -61,7 +61,7 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_TOOL_RESULT_CHARS`                      | per-tool-result char cap (default 20000)                             |
 | `AFI_SUMMARY`                                | set to `json` for a run summary on stdout ([details](#run-summary))  |
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
-| `AFI_READ_ONLY`                              | deny every mutating tool ([details](#tool-policy))                    |
+| `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
 | `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
 
 ## Tool policy
@@ -72,11 +72,11 @@ Every field except the version and the profile is best-effort. A build with no g
 afi --read-only -f review-prompt.txt
 ```
 
-That is the whole posture for a job that reads. `--read-only` denies `write_file`, `edit_file`, and `run_bash`, which are the only tools approval ever asks about, so nothing is left to prompt for and an unattended run needs no approval bypass. **It does not need `--yolo`, and pairing the two grants nothing** - the flag would only decide whether afi asks about tools the run can no longer call.
+That is the whole posture for a job that reads. `--read-only` leaves `read_file` and `list_dir` and denies everything else: the two writers, the shell, and `wait_background`, which deletes the log it hands back. Approval only ever asks about the writers and the shell, so a read-only run has nothing left to prompt for and needs no approval bypass. **It does not need `--yolo`, and pairing the two grants nothing** - the flag would only decide whether afi asks about tools the run can no longer call.
 
 Approval alone cannot express "read but do not write": it decides whether afi *asks*, while the policy decides what exists to ask about. A run that genuinely must write still needs approval settled, and that is the one case for `--yolo`; give it a tool policy too, so "do not ask me" does not also mean "anything at all".
 
-Prefer `--read-only` to spelling out an allow list. It names no tools, so it cannot be mistyped, and it is a denial, so it cannot be widened: `--read-only --allowed-tools run_bash` still leaves `run_bash` blocked. A new mutating tool is covered the day it is added, because the posture and the approval gate read one list.
+Prefer `--read-only` to spelling out an allow list. It names no tools, so it cannot be mistyped, and it is a denial, so it cannot be widened: `--read-only --allowed-tools run_bash` still leaves `run_bash` blocked. A new mutating tool is covered the day it is added, because the posture and the approval gate read the same list.
 
 An absent or blank list means every tool, so `AFI_ALLOWED_TOOLS=""` from an unset shell variable is not a lockout. A non-empty allow list is exhaustive. Deny always wins, so `--allowed-tools read_file,run_bash --disallowed-tools run_bash` leaves only `read_file`. Names accept commas or whitespace and are case-insensitive. The tools are `read_file`, `write_file`, `edit_file`, `list_dir`, `run_bash`, and `wait_background`.
 

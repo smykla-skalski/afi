@@ -20,7 +20,9 @@ use crate::model::turn_dispatch::{
 use crate::model::turn_stats::{TurnStats, handle_reasoning_stall, print_stats_footer};
 use crate::model::turn_stream::Accumulated;
 use crate::model::usage_totals;
-use crate::model::{TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL};
+use crate::model::{
+    TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FAILED, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL,
+};
 use crate::term::{MessageKind, StreamKind, UserInterface};
 use crate::tools::protocol::parse_text_calls;
 use tokio_util::sync::CancellationToken;
@@ -374,6 +376,19 @@ fn handle_empty_or_final(
         );
         nudge_current_user_turn(messages, FORCED_FINAL_NUDGE);
         return TURN_FORCE_FINAL.to_string();
+    }
+    if tr.forced_final {
+        // The last turn of the run produced no text and no tool call, so there
+        // is no answer to save. Reporting DONE is what let a one-shot exit 0
+        // with an empty `answer`, which reads downstream as "the model had
+        // nothing to say" rather than "afi never got anything". The usual cause
+        // is a `max_tokens` spent entirely on reasoning.
+        ui.message(
+            MessageKind::Error,
+            "FORCED FINAL RETURNED NO ANSWER - raise AFI_MAX_TOKENS, or lower the effort"
+                .to_string(),
+        );
+        return TURN_FAILED.to_string();
     }
     TURN_DONE.to_string()
 }

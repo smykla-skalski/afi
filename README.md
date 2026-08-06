@@ -6,15 +6,34 @@ A no-nonsense coding agent that doesn't use 50K tokens of context to say "hello.
 
 `afi` is a Rust binary that talks to any OpenAI-compatible endpoint - a local llama.cpp, vLLM, or SGLang server, or a remote API like Z.ai or OpenAI - and gives you an agent that reads, writes, edits, and runs shell commands in your project.
 
-afi is a from-scratch Rust port of the original single-file Python [`minion.py`](https://github.com/Sentdex/minion). Flags, env vars, slash commands, and behavior match the original except for the changes in [CHANGELOG.md](CHANGELOG.md):
+## Install
 
-- the traffic log moved from `llamacpp.log` next to the script to `~/.afi/logs/traffic.jsonl`
-- the `~/.afi/sessions/<id>.json` schema is fresh and version-tagged. Sessions written by the Python version will not resume
+### Ubuntu and Debian
+
+```
+curl -1sLf 'https://dl.cloudsmith.io/public/smykla-skalski/afi/setup.deb.sh' | sudo -E bash
+sudo apt-get install afi
+```
+
+The setup script adds the signing key and the apt source, after which upgrades
+arrive through `apt-get upgrade` like any other package. The package holds a
+static binary and declares no dependencies, so it installs on any Debian
+derivative regardless of glibc version. amd64 and arm64 are both published.
+
+### Prebuilt binary
+
+Every release attaches a tarball per target to the
+[releases page](https://github.com/smykla-skalski/afi/releases).
+
+### From source
+
+```
+cargo install --path .
+```
 
 ## Quick start
 
 ```
-cargo install --path .
 export AFI_BASE_URL=http://localhost:8080/v1
 export AFI_MODEL=your-model-name
 export AFI_API_KEY=sk-noop        # any string - local servers ignore it
@@ -95,7 +114,13 @@ Restrict what a run may call with `--allowed-tools read_file,list_dir` or `--dis
 
 ## Credits
 
-Built on and influenced by [`minion.py`](https://github.com/Sentdex/minion), Sentdex's original single-file Python coding agent.
+Inspired by [`minion.py`](https://github.com/Sentdex/minion), Sentdex's single-file Python coding agent.
+
+## Package hosting
+
+[![OSS hosting by Cloudsmith](https://img.shields.io/badge/OSS%20hosting%20by-cloudsmith-blue?logo=cloudsmith&style=flat-square)](https://cloudsmith.com)
+
+Package repository hosting is graciously provided by [Cloudsmith](https://cloudsmith.com). The apt repository runs on their open-source plan, free of charge.
 
 ## License
 

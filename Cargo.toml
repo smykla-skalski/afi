@@ -15,6 +15,38 @@ path = "src/main.rs"
 name = "afi"
 path = "src/lib.rs"
 
+# Debian packaging, consumed by cargo-deb through `mise run deb`.
+#
+# `maintainer` is set explicitly because cargo-deb would otherwise take the
+# first entry of `authors`, and the Maintainer field names whoever answers for
+# *this package*, not whoever wrote the code.
+#
+# `depends` is empty rather than left to cargo-deb's dpkg-shlibdeps probe. The
+# package wraps the static musl binary, which links nothing at runtime, so the
+# probe has no shared objects to inspect and an inferred glibc floor would only
+# refuse installs that would in fact work.
+[package.metadata.deb]
+maintainer = "Bart Smykla <bartek@smykla.com>"
+copyright = "2025 Smykla Skalski"
+license-file = ["LICENSE", "0"]
+depends = ""
+section = "utils"
+priority = "optional"
+extended-description = """
+afi is a terminal coding agent for self-hosted and remote models. It speaks the \
+OpenAI-compatible /chat/completions protocol used by llama.cpp, vLLM, SGLang, \
+Z.ai, OpenAI, and OpenRouter, as well as Anthropic's native Messages API, and \
+gives you an agent that reads, writes, edits, and runs shell commands in the \
+current project.
+"""
+assets = [
+  ["target/release/afi", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/afi/README.md", "644"],
+  ["CHANGELOG.md", "usr/share/doc/afi/CHANGELOG.md", "644"],
+  ["docs/reference.md", "usr/share/doc/afi/reference.md", "644"],
+  ["sources.example.env", "usr/share/doc/afi/sources.example.env", "644"],
+]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

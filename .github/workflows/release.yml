@@ -7,6 +7,21 @@ name: release
 # file changes, the whole pipeline runs with publishing disabled, so a broken
 # release workflow is caught in review instead of at release time. It is scoped
 # to this one file, so it costs nothing on ordinary pull requests.
+#
+# apt publishing setup, needed once before the first release that publishes:
+#
+#   1. Create a Cloudsmith workspace and a public repository in it. The
+#      open-source plan covers this project and needs no application; the
+#      attribution it asks for is in the README's Credits section.
+#   2. Create a service account in that workspace, give it write access to the
+#      repository, and add a GitHub OIDC provider to it. Cloudsmith exchanges the
+#      token this workflow requests for a short-lived credential, so there is no
+#      API key to store or rotate.
+#   3. Set three repository variables (Settings -> Actions -> Variables):
+#      CLOUDSMITH_WORKSPACE, CLOUDSMITH_REPOSITORY, CLOUDSMITH_SERVICE_SLUG.
+#
+# The `verify` job refuses to publish while any of those variables is unset, so a
+# missing step fails before a tag exists rather than halfway through a release.
 on:
   workflow_dispatch:
     inputs:
@@ -70,24 +85,10 @@ jobs:
           # cargo on PATH before the mise step runs, and mise does not supply
           # Rust here - rust-toolchain.toml plus rustup does - so a runner from
           # vars.RUNNER_LABEL without Rust preinstalled would die on the version
-          # guard rather than on the build. It also keeps AGENTS.md's rule that
-          # repository commands go through mise, never raw cargo.
-          #
-          # Scoped to the [package] section: [dependencies] holds entries like
-          # `serde = { version = "1" }` that an unscoped match would pick up.
-          manifest_version="$(
-            awk '
-              /^[[:space:]]*\[/ { in_package = ($0 ~ /^[[:space:]]*\[package\]/); next }
-              in_package && /^[[:space:]]*version[[:space:]]*=/ {
-                sub(/^[^=]*=[[:space:]]*/, "")
-                sub(/[[:space:]]*#.*$/, "")
-                sub(/[[:space:]]*$/, "")
-                gsub(/^"|"$/, "")
-                print
-                exit
-              }
-            ' Cargo.toml
-          )"
+          # guard rather than on the build. The script is shared with
+          # scripts/deb-version.sh so the release and the Debian package can
+          # never disagree about which version is being built.
+          manifest_version="$(./scripts/cargo-version.sh)"
           if [[ ! "${manifest_version}" =~ ${semver} ]]; then
             echo "::error::could not read a semver version from Cargo.toml's [package] section (got '${manifest_version}')."
             exit 1
@@ -142,6 +143,28 @@ jobs:
           } >>"${GITHUB_OUTPUT}"
           echo "Releasing ${version}. publish=${publish}"
 
+      # The apt repository is checked here, before a tag exists, for the same
+      # reason as everything else in this job: a release that tags and publishes
+      # binaries but then fails to push the Debian packages leaves apt users on
+      # an older version with no signal that anything went wrong.
+      - name: Check the apt publishing configuration
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          CLOUDSMITH_WORKSPACE: ${{ vars.CLOUDSMITH_WORKSPACE }}
+          CLOUDSMITH_REPOSITORY: ${{ vars.CLOUDSMITH_REPOSITORY }}
+          CLOUDSMITH_SERVICE_SLUG: ${{ vars.CLOUDSMITH_SERVICE_SLUG }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "${CLOUDSMITH_WORKSPACE}" ]] || missing+=(CLOUDSMITH_WORKSPACE)
+          [[ -n "${CLOUDSMITH_REPOSITORY}" ]] || missing+=(CLOUDSMITH_REPOSITORY)
+          [[ -n "${CLOUDSMITH_SERVICE_SLUG}" ]] || missing+=(CLOUDSMITH_SERVICE_SLUG)
+          if (( ${#missing[@]} )); then
+            echo "::error::missing repository variables: ${missing[*]}. See the apt setup notes in this file's header."
+            exit 1
+          fi
+          echo "Publishing to Cloudsmith ${CLOUDSMITH_WORKSPACE}/${CLOUDSMITH_REPOSITORY} as ${CLOUDSMITH_SERVICE_SLUG}."
+
       - name: Install mise
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
 
@@ -189,19 +212,29 @@ jobs:
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     permissions:
       contents: write
+      # Cloudsmith exchanges this token for a short-lived credential, so no
+      # long-lived API key has to live in the repository secrets.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
         include:
           # Native build, no extra toolchain.
           - target: x86_64-unknown-linux-gnu
-          # Static, so it runs on any distro regardless of glibc version.
+          # Static, so it runs on any distro regardless of glibc version. Only
+          # the musl targets are packaged as .deb: a static binary needs no
+          # Depends and installs on every Debian derivative, which is what lets
+          # one package serve any-distro/any-version.
           - target: x86_64-unknown-linux-musl
             packages: musl-tools
+            deb: true
+            deb-arch: amd64
           # cross carries the aarch64 musl toolchain in a container, which is
           # less fragile than assembling one from apt.
           - target: aarch64-unknown-linux-musl
             build-tool: cross
+            deb: true
+            deb-arch: arm64
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -234,13 +267,88 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-      # Makes a dry run useful: the archive is downloadable from the run, so the
-      # binary can be smoke-tested before anything is published. `error` on no
-      # files also proves the archive was actually produced.
-      - name: Keep the dry-run archive
+      - name: Install mise
+        if: matrix.deb
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+
+      # Packages the binary the step above just built, rather than compiling
+      # again, so the .deb and the tarball ship identical bytes.
+      - name: Build the Debian package
+        if: matrix.deb
+        id: deb
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # build-deb.sh prints the package path and nothing else, but mise may
+          # add a task banner ahead of it, so take the last line.
+          path="$(mise run deb "${TARGET}" | tail -1)"
+          test -f "${path}"
+          echo "path=${path}" >>"${GITHUB_OUTPUT}"
+          echo "Built ${path}"
+
+      # The install check runs the package under its own architecture, which for
+      # arm64 on an x86_64 runner means emulation. Without this the arm64 package
+      # would be published having only ever been inspected, never installed.
+      - name: Set up QEMU
+        if: matrix.deb
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      # A dry run reaches here too, on purpose: a package that cannot be
+      # installed should fail review, not a release.
+      - name: Verify the Debian package installs
+        if: matrix.deb
+        env:
+          DEB: ${{ steps.deb.outputs.path }}
+        run: mise run deb:verify "${DEB}"
+
+      # Attached to the release as well as pushed to apt, so an offline or
+      # air-gapped install has a source that does not depend on Cloudsmith.
+      - name: Attach the Debian package to the release
+        if: matrix.deb && needs.verify.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          DEB: ${{ steps.deb.outputs.path }}
+        run: gh release upload "${TAG}" "${DEB}" --clobber
+
+      - name: Set up the Cloudsmith CLI
+        if: matrix.deb && needs.verify.outputs.publish == 'true'
+        uses: cloudsmith-io/cloudsmith-cli-action@ad73fafb92e3e29a5166c529464c2df7658a608e # v3.1.0
+        with:
+          oidc-namespace: ${{ vars.CLOUDSMITH_WORKSPACE }}
+          oidc-service-slug: ${{ vars.CLOUDSMITH_SERVICE_SLUG }}
+          verify-auth: true
+
+      - name: Push the Debian package to the apt repository
+        if: matrix.deb && needs.verify.outputs.publish == 'true'
+        env:
+          WORKSPACE: ${{ vars.CLOUDSMITH_WORKSPACE }}
+          REPOSITORY: ${{ vars.CLOUDSMITH_REPOSITORY }}
+          DEB: ${{ steps.deb.outputs.path }}
+        run: |
+          set -euo pipefail
+          # any-distro/any-version, not a codename: the package holds a static
+          # binary and declares no dependencies, so one upload serves every
+          # Debian and Ubuntu release instead of needing a copy per codename.
+          #
+          # --republish so re-running a release that failed after this point
+          # succeeds instead of stopping on "version already exists". The tag
+          # guard in `verify` is what stops a genuinely duplicate release.
+          cloudsmith push deb \
+            "${WORKSPACE}/${REPOSITORY}/any-distro/any-version" \
+            "${DEB}" \
+            --republish
+
+      # Makes a dry run useful: the archive and package are downloadable from the
+      # run, so both can be smoke-tested before anything is published. `error` on
+      # no files also proves the artifacts were actually produced.
+      - name: Keep the dry-run artifacts
         if: needs.verify.outputs.publish != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: afi-${{ matrix.target }}
-          path: afi-${{ matrix.target }}.tar.gz*
+          path: |
+            afi-${{ matrix.target }}.tar.gz*
+            target/debian/*.deb
           if-no-files-found: error

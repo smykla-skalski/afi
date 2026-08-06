@@ -21,6 +21,15 @@ fn normalize_usage_openai() {
     // No OpenAI-compatible provider reports a cache write, so this is 0 rather
     // than a guess derived from the other counts.
     assert_eq!(n.cache_write_tokens, 0);
+    // The same disjointness invariant, with reasoning actually non-zero.
+    assert_eq!(
+        n.input_tokens
+            + n.cache_read_tokens
+            + n.cache_write_tokens
+            + n.output_tokens
+            + n.reasoning_tokens,
+        usage.prompt_tokens + usage.completion_tokens
+    );
 }
 
 #[test]
@@ -44,8 +53,12 @@ fn normalize_usage_splits_cache_writes_out_of_input() {
     assert_eq!(n.output_tokens, 42);
     // Disjoint, so the five counts still add back up to the whole request.
     assert_eq!(
-        n.input_tokens + n.cache_read_tokens + n.cache_write_tokens + n.output_tokens,
-        1092
+        n.input_tokens
+            + n.cache_read_tokens
+            + n.cache_write_tokens
+            + n.output_tokens
+            + n.reasoning_tokens,
+        usage.prompt_tokens + usage.completion_tokens
     );
 }
 

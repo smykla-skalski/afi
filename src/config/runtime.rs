@@ -270,8 +270,9 @@ fn resolve_approval(env: &HashMap<String, String>, parsed: &ParsedArgs) -> Appro
 ///
 /// The env map is where the policy lives because `ModelConfig::from_env` is
 /// built in four places from an env map alone, and all four must agree on what
-/// the run may call. A child `run_bash` process inherits this env, so a nested
-/// `afi` inherits the restriction too rather than escaping it.
+/// the run may call. Note this map is afi's own view, not the child process
+/// environment: `run_detached` does not export it, so a `run_bash` child does
+/// not inherit a flag-supplied policy.
 fn apply_tool_flags(env: &mut HashMap<String, String>, parsed: &ParsedArgs) {
     for (flag, var) in [
         (&parsed.allowed_tools, "AFI_ALLOWED_TOOLS"),

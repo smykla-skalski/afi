@@ -56,7 +56,7 @@ Enforced in two places. Blocked tools are left out of the request, so the model 
 
 A restricted run shows `tools:` in the status line and lists the permitted set in the [run summary](#run-summary). An unrestricted one shows neither, so the segment appearing is itself the signal.
 
-A `run_bash` child inherits these variables, so a nested `afi` inherits the restriction rather than escaping it. That is not a sandbox: a permitted `run_bash` can do anything the user can, and `--allowed-tools` bounds which afi tools run, not what a permitted command does once it starts.
+**This is not a sandbox.** It bounds which afi tools run, not what a permitted command does once started. A permitted `run_bash` can do anything the user can, including editing files, and nothing stops it unsetting these variables for a nested `afi`. Use it to keep a run inside the shape you intended, not to contain something adversarial.
 
 ## Run summary
 

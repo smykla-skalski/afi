@@ -12,7 +12,7 @@ Blocked tools are withheld from the request, so the model is never told they exi
 
 A name matching no tool exits 2 without starting: a mistyped `--disallowed-tools run_bsah` would otherwise match nothing and leave `run_bash` available while the command line claimed otherwise. A restricted run shows `tools:` in the status line and reports the permitted set as `tools` in the JSON summary, so a CI log can be audited without trusting that the workflow passed the flag it claims to.
 
-This bounds which afi tools run, not what a permitted command does once started. A permitted `run_bash` can still do anything the user can.
+This is not a sandbox. It bounds which afi tools run, not what a permitted command does once started: a permitted `run_bash` can do anything the user can, and nothing stops it unsetting these variables for a nested `afi`.
 
 **Fixed — a failed one-shot run no longer exits 0.** `report_client_error` returned `TURN_DONE`, the same status a completed turn returns, so an unreachable server, an HTTP error, or a bad credential printed its message and then exited successfully. CI read a broken run as a passing one. Client errors now return a distinct `TURN_FAILED`, which the turn loop treats as terminal - retrying it would hammer a server that just refused us - and `main` exits 1.
 

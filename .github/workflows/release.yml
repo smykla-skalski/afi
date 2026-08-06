@@ -276,9 +276,13 @@ jobs:
       - name: Build the Debian package
         if: matrix.deb
         id: deb
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          path="$(mise run deb "${{ matrix.target }}" | tail -1)"
+          # build-deb.sh prints the package path and nothing else, but mise may
+          # add a task banner ahead of it, so take the last line.
+          path="$(mise run deb "${TARGET}" | tail -1)"
           test -f "${path}"
           echo "path=${path}" >>"${GITHUB_OUTPUT}"
           echo "Built ${path}"
@@ -294,7 +298,9 @@ jobs:
       # installed should fail review, not a release.
       - name: Verify the Debian package installs
         if: matrix.deb
-        run: mise run deb:verify "${{ steps.deb.outputs.path }}"
+        env:
+          DEB: ${{ steps.deb.outputs.path }}
+        run: mise run deb:verify "${DEB}"
 
       # Attached to the release as well as pushed to apt, so an offline or
       # air-gapped install has a source that does not depend on Cloudsmith.

@@ -35,9 +35,11 @@ if [ -n "$requested" ]; then
         printf 'Cargo.toml is already at %s; pick a different version\n' "$requested" >&2
         exit 1
     fi
-    release-plz set-version "$requested"
+    # release-plz reports what it did on stdout, and this script's stdout is
+    # the version alone, so its chatter goes to stderr with everything else.
+    release-plz set-version "$requested" >&2
 else
-    release-plz update
+    release-plz update >&2
 fi
 
 after=$("$repo_root/scripts/cargo-version.sh")
@@ -52,7 +54,7 @@ if [ "$after" = "$before" ]; then
     minor=$(printf '%s\n' "$before" | cut -d. -f2)
     patch=$(printf '%s\n' "$before" | cut -d. -f3 | cut -d- -f1 | cut -d+ -f1)
     after="${major}.${minor}.$((patch + 1))"
-    release-plz set-version "$after"
+    release-plz set-version "$after" >&2
 fi
 
 printf '%s\n' "$after"

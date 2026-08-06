@@ -93,6 +93,19 @@ impl ToolPolicy {
         &self.unknown
     }
 
+    /// The unknown-name refusal as a caller-printable line, or nothing when the
+    /// policy is usable.
+    #[must_use]
+    pub fn unknown_names_message(&self) -> Option<String> {
+        if self.unknown.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "unknown tool(s) in --allowed-tools/--disallowed-tools: {}",
+            self.unknown.join(", ")
+        ))
+    }
+
     /// The permitted tools in registration order. `final_answer` is left out:
     /// it is never offered alongside the others, and listing plumbing under a
     /// capability heading reads as a capability.

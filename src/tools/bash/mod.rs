@@ -208,6 +208,28 @@ pub fn run_bash<S: BuildHasher>(
     }
 }
 
+/// Resolve a caller-supplied `log_path` to a real background log, or `None`.
+///
+/// Compares canonicalized paths so `bg-logs/../../secrets` cannot pass, and
+/// requires the `bg-` name prefix that `run_detached` writes, so a sibling file
+/// someone dropped in the directory is not readable either. A path that does not
+/// exist is refused rather than treated as an empty log: the only paths worth
+/// waiting on are ones this process created.
+fn contained_bg_log<S: BuildHasher>(
+    candidate: &Path,
+    env: &HashMap<String, String, S>,
+) -> Option<PathBuf> {
+    let bg_dir = afi_home(env).join("bg-logs").canonicalize().ok()?;
+    let path = candidate.canonicalize().ok()?;
+    if path.parent() != Some(bg_dir.as_path()) {
+        return None;
+    }
+    if !path.file_name()?.to_str()?.starts_with("bg-") {
+        return None;
+    }
+    Some(path)
+}
+
 /// Wait for a backgrounded command to finish. Polls `pid` until it exits
 /// (default: indefinitely). Esc interrupts the wait (the command keeps
 /// running).
@@ -219,7 +241,21 @@ pub fn wait_background<S: BuildHasher>(
     check_esc: &dyn Fn() -> bool,
 ) -> String {
     let log_path = match log_path {
-        Some(p) => p.to_path_buf(),
+        // `log_path` comes from the model, and the exit path below unlinks it
+        // after reading. An uncontained path therefore hands out an arbitrary
+        // file read plus a delete, with no approval gate - `wait_background` is
+        // not one of the tools `dispatch_tool` prompts for. The only legitimate
+        // value is a log this process wrote, so anything else is refused.
+        Some(p) => match contained_bg_log(p, env) {
+            Some(path) => path,
+            None => {
+                return format!(
+                    "[error] {} is not a background log. Pass the log_path from the \
+                     background message, or omit it to look the log up by PID.",
+                    p.display()
+                );
+            }
+        },
         None => match find_bg_log_for_pid(pid, env) {
             Some(p) => p,
             None => {
@@ -266,72 +302,4 @@ pub fn wait_background<S: BuildHasher>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn infer_timeout_from_sleep_extracts_max() {
-        assert_eq!(infer_timeout_from_sleep("sleep 30 && cat file", 3), 40);
-        assert_eq!(infer_timeout_from_sleep("sleep 5; sleep 20", 3), 30);
-        assert_eq!(infer_timeout_from_sleep("echo hello", 3), 3);
-    }
-
-    #[test]
-    fn run_bash_quick_command() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut env = HashMap::new();
-        env.insert(
-            "AFI_HOME".to_string(),
-            tmp.path().to_string_lossy().to_string(),
-        );
-        let out = run_bash("echo hello", None, &env, &|| false);
-        assert!(out.contains("[exit 0]"));
-        assert!(out.contains("hello"));
-    }
-
-    #[test]
-    fn run_bash_backgrounds_long_command() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut env = HashMap::new();
-        env.insert(
-            "AFI_HOME".to_string(),
-            tmp.path().to_string_lossy().to_string(),
-        );
-        let out = run_bash("sleep 10", Some(1), &env, &|| false);
-        assert!(out.contains("[background]"));
-        assert!(out.contains("PID"));
-    }
-
-    #[test]
-    fn run_bash_esc_interrupts() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut env = HashMap::new();
-        env.insert(
-            "AFI_HOME".to_string(),
-            tmp.path().to_string_lossy().to_string(),
-        );
-        let out = run_bash("sleep 10", Some(5), &env, &|| true);
-        assert!(out.contains("[background]"));
-        assert!(out.contains("interrupted"));
-    }
-
-    #[test]
-    fn read_log_parses_exit_code() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("test.log");
-        fs::write(&log, "hello world\n[exit: 42]\n").unwrap();
-        let (out, code) = read_log(&log);
-        assert_eq!(out, "hello world");
-        assert_eq!(code, Some(42));
-    }
-
-    #[test]
-    fn read_log_no_exit_marker() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("test.log");
-        fs::write(&log, "no marker here\n").unwrap();
-        let (out, code) = read_log(&log);
-        assert_eq!(out, "no marker here\n");
-        assert_eq!(code, None);
-    }
-}
+mod tests;

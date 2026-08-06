@@ -157,6 +157,43 @@ fn an_unknown_name_in_the_env_var_also_refuses_to_start() {
 }
 
 #[test]
+fn a_policy_flag_with_no_value_refuses_to_start() {
+    // The fail-open. `afi --yolo -f task.txt --disallowed-tools $DENY` with DENY
+    // unset ends argv at the flag; resolving that to "no policy" would grant
+    // write_file, edit_file, and run_bash while the command line said otherwise,
+    // and one-shot mode prints no banner, so there would be no signal at all.
+    let home = TempDir::new().unwrap();
+    for flag in ["--allowed-tools", "--disallowed-tools"] {
+        let output = run_afi(&home, &[flag], &[], "/quit\n");
+        assert_eq!(output.status.code(), Some(2), "{flag} must not start");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!("{flag} needs a value")),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_policy_flag_swallowing_the_next_flag_refuses_to_start() {
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &["--disallowed-tools", "--yolo"], &[], "/quit\n");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("--disallowed-tools needs a value"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_missing_value_is_recorded_rather_than_silently_widening_the_policy() {
+    let rt = common::build(&["afi", "--disallowed-tools"], &[]);
+    assert_eq!(rt.flag_errors, ["--disallowed-tools needs a value"]);
+    assert!(!rt.refusals().is_empty(), "the run must be refused");
+}
+
+#[test]
 fn a_valid_policy_starts_normally() {
     let home = TempDir::new().unwrap();
     let output = run_afi(

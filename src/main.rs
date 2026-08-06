@@ -28,15 +28,16 @@ fn main() {
 
     let mut rt = afi::Runtime::build(&args, env_map, env_file.as_deref());
 
-    // A tool policy naming something that does not exist cannot be honoured, and
-    // the dangerous reading is silent: `--disallowed-tools run_bsah` would match
-    // no tool and leave `run_bash` available. Refuse to start instead.
-    let unknown = rt.tool_policy.unknown_names().join(", ");
-    if !unknown.is_empty() {
-        eprintln!(
-            "  \u{2717} unknown tool(s) in --allowed-tools/--disallowed-tools: {unknown}\n    known tools: {}",
-            known_tool_names().join(", ")
-        );
+    // A tool policy that cannot be honoured must not degrade into a wider grant
+    // than was asked for: `--disallowed-tools run_bsah` matches no tool, and a
+    // bare `--disallowed-tools` sets none at all. Both would leave `run_bash`
+    // available while the command line says otherwise, so refuse to start.
+    let refusals = rt.refusals();
+    if !refusals.is_empty() {
+        for refusal in &refusals {
+            eprintln!("  \u{2717} {refusal}");
+        }
+        eprintln!("    known tools: {}", known_tool_names().join(", "));
         process::exit(2);
     }
 

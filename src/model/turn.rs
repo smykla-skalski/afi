@@ -95,8 +95,11 @@ fn request_params(tr: &TurnRequest<'_>) -> (Value, Option<Value>, Option<u32>) {
     let tools_val = if tr.forced_final {
         json!([FINAL_ANSWER_TOOL.clone()])
     } else {
-        // Blocked tools are withheld rather than refused later: a model that is
-        // never told `write_file` exists does not spend a turn trying it.
+        // Blocked tools are withheld rather than only refused later, so a model
+        // has no schema to call. Not a guarantee it never tries: `SYSTEM`
+        // describes `run_bash` and `wait_background` in prose and carries a
+        // text-protocol example, so those two remain nameable from the prompt
+        // alone. Dispatch is what actually stops them.
         tr.config.tool_policy.filter_tools(&tools::TOOLS)
     };
     let tool_choice = tr.forced_final.then(|| FINAL_ANSWER_TOOL_CHOICE.clone());

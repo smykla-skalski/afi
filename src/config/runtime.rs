@@ -36,6 +36,8 @@ pub struct Runtime {
     /// header renders it on every frame; `ModelConfig::from_env` reads the same
     /// env vars, so the two cannot disagree.
     pub tool_policy: ToolPolicy,
+    /// Tool-policy flags given wrongly on the command line. See `refusals`.
+    pub flag_errors: Vec<String>,
 }
 
 /// Parsed CLI args - the subset that affects initial state. The `sessions`
@@ -52,6 +54,10 @@ pub struct ParsedArgs {
     pub summary: Option<String>,
     pub allowed_tools: Option<String>,
     pub disallowed_tools: Option<String>,
+    /// Flags that were given wrongly. Only the tool-policy flags record here,
+    /// because they are the only ones whose silent fallback widens what a run
+    /// may do.
+    pub flag_errors: Vec<String>,
 }
 
 /// Parse argv into the subset that affects runtime construction.
@@ -92,8 +98,7 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
         "--session" => return set_opt(&mut out.session, value),
         "--prompt-file" | "-f" => return set_opt(&mut out.prompt_file, value),
         "--summary" => return set_opt(&mut out.summary, value),
-        "--allowed-tools" => return set_opt(&mut out.allowed_tools, value),
-        "--disallowed-tools" => return set_opt(&mut out.disallowed_tools, value),
+        "--allowed-tools" | "--disallowed-tools" => return set_tool_flag(out, flag, value),
         "--resume" | "-r" => {
             // bare --resume, or --resume <target> where target doesn't start
             // with '-' (so `--resume --yolo` doesn't swallow --yolo).
@@ -106,6 +111,28 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
         _ => {}
     }
     false
+}
+
+/// Set one of the two tool-policy flags. Returns whether a value was consumed.
+///
+/// Unlike every other flag here, a missing value cannot be shrugged off. Falling
+/// back to "no policy" would make `afi --disallowed-tools $DENY` with `DENY`
+/// unset grant every tool while the command line says otherwise - the one
+/// failure a deny list must not have. The same goes for a value that looks like
+/// another flag, which is what `--disallowed-tools --yolo` produces. Both are
+/// recorded so the run refuses to start.
+fn set_tool_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
+    let Some(v) = value.filter(|v| !v.starts_with('-')) else {
+        out.flag_errors.push(format!("{flag} needs a value"));
+        // Not consumed, so `--disallowed-tools --yolo` still applies `--yolo`.
+        return false;
+    };
+    if flag == "--allowed-tools" {
+        out.allowed_tools = Some(v.to_string());
+    } else {
+        out.disallowed_tools = Some(v.to_string());
+    }
+    true
 }
 
 /// Set `slot` to `value` when present; returns whether a value was consumed.
@@ -161,6 +188,7 @@ impl Runtime {
                 env.get("AFI_ALLOWED_TOOLS").map(String::as_str),
                 env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
             ),
+            flag_errors: parsed.flag_errors,
             env,
         };
 
@@ -226,6 +254,17 @@ impl Runtime {
     #[must_use]
     pub fn active_source(&self) -> Option<&Source> {
         self.active.as_ref().and_then(|n| self.sources.get(n))
+    }
+
+    /// Why this run must not start, if it must not.
+    ///
+    /// Both cases are tool-policy problems whose quiet fallback is a wider grant
+    /// than the command line asked for, so neither may be a warning.
+    #[must_use]
+    pub fn refusals(&self) -> Vec<String> {
+        let mut out = self.flag_errors.clone();
+        out.extend(self.tool_policy.unknown_names_message());
+        out
     }
 }
 

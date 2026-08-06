@@ -48,9 +48,9 @@ Approval alone cannot express "read but do not write". Unattended there is nobod
 
 An absent or blank list means every tool, so `AFI_ALLOWED_TOOLS=""` from an unset shell variable is not a lockout. A non-empty allow list is exhaustive. Deny always wins, so `--allowed-tools read_file,run_bash --disallowed-tools run_bash` leaves only `read_file`. Names accept commas or whitespace and are case-insensitive. The tools are `read_file`, `write_file`, `edit_file`, `list_dir`, `run_bash`, and `wait_background`.
 
-**A name that matches no tool exits 2 without starting.** A mistyped `--disallowed-tools run_bsah` would otherwise match nothing and leave `run_bash` available while the command line claimed otherwise.
+**A policy that cannot be honoured exits 2 without starting.** A mistyped `--disallowed-tools run_bsah` would otherwise match nothing and leave `run_bash` available while the command line claimed otherwise. A flag with no value is refused the same way, since `--disallowed-tools $DENY` with `DENY` unset would grant everything.
 
-Enforced in two places. Blocked tools are left out of the request, so the model is never told they exist and does not spend a turn trying them. Dispatch then refuses them regardless, because the text protocol parses calls out of prose and a model can name a tool it was never offered - so a blocked call cannot reach the filesystem or the shell even when it arrives. The refusal goes back as a tool result naming the permitted tools, so the turn continues instead of stalling.
+Enforced in two places. Blocked tools are left out of the request, so the model has no schema to call. Dispatch then refuses them regardless, and that is the gate that actually holds: the text protocol parses calls out of prose, so a model can name a tool it was never offered, and the built-in system prompt describes `run_bash` and `wait_background` in prose besides. A blocked call cannot reach the filesystem or the shell even when it arrives. The refusal goes back as a tool result naming the permitted tools, so the turn continues instead of stalling.
 
 `final_answer` is never blockable. It carries the forced-final answer rather than doing anything, so blocking it would strand a run rather than restrict it.
 

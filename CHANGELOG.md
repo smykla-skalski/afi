@@ -3,6 +3,19 @@
 All notable changes to `afi`. Generated from the commit history; maintained by
 release-plz from the conventional-commit messages on `main`.
 
+## [0.3.0] - 2026-08-06
+
+### Added
+
+- **tools** Add a read-only posture ([#41](https://github.com/smykla-skalski/afi/pull/41))
+- **anthropic** Let thinking be turned on ([#36](https://github.com/smykla-skalski/afi/pull/36))
+- **release** Automate version and changelog ([#37](https://github.com/smykla-skalski/afi/pull/37))
+- **cli** Add --version and --help ([#38](https://github.com/smykla-skalski/afi/pull/38))
+
+### Fixed
+
+- **version** Hash without digest's io::Write impl ([#40](https://github.com/smykla-skalski/afi/pull/40))
+
 ## [0.2.0] - 2026-08-06
 
 ### Added

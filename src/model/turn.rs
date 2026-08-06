@@ -95,7 +95,12 @@ fn request_params(tr: &TurnRequest<'_>) -> (Value, Option<Value>, Option<u32>) {
     let tools_val = if tr.forced_final {
         json!([FINAL_ANSWER_TOOL.clone()])
     } else {
-        tools::TOOLS.clone()
+        // Blocked tools are withheld rather than only refused later, so a model
+        // has no schema to call. Not a guarantee it never tries: `SYSTEM`
+        // describes `run_bash` and `wait_background` in prose and carries a
+        // text-protocol example, so those two remain nameable from the prompt
+        // alone. Dispatch is what actually stops them.
+        tr.config.tool_policy.filter_tools(&tools::TOOLS)
     };
     let tool_choice = tr.forced_final.then(|| FINAL_ANSWER_TOOL_CHOICE.clone());
     let max_tokens = if tr.forced_final {
@@ -149,7 +154,9 @@ async fn fetch_stream(
         source: tr.source,
         model: tr.model,
         messages: messages.as_slice(),
-        tools: Some(params.tools),
+        // A policy can block every tool. Omit the key rather than send an empty
+        // array, which not every endpoint accepts.
+        tools: Some(params.tools).filter(|t| t.as_array().is_none_or(|a| !a.is_empty())),
         tool_choice: params.tool_choice,
         max_tokens: params.max_tokens,
         extra_body: params.extra_body,

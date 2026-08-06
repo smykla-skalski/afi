@@ -2,6 +2,7 @@ use super::*;
 use crate::model::stream::{Usage, normalize_usage};
 use crate::model::usage_totals::UsageTotals;
 use crate::summary::RunSummary;
+use crate::tools::known_tool_names;
 
 /// Decode one event payload, expecting a chunk.
 fn chunk(decoder: &mut AnthropicDecoder, data: &str) -> StreamChunk {
@@ -356,6 +357,7 @@ fn the_run_summary_reports_those_writes_separately() {
         answer: "done",
         usage: totals,
         elapsed_secs: 1.0,
+        tools: known_tool_names().to_vec(),
     }
     .to_json();
     assert_eq!(json["usage"]["cache_write_tokens"], 2279);

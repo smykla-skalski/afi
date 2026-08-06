@@ -6,6 +6,7 @@
 //! The risk classifier and approval prompt (phase 4) wrap the dispatch layer.
 
 pub mod bash;
+pub mod policy;
 pub mod protocol;
 
 use std::fmt::Write as _;

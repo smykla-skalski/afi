@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::known_tool_names;
 use serde_json::json;
 
 fn totals(requests: u64) -> UsageTotals {
@@ -21,6 +22,7 @@ fn summary(ok: bool, answer: &str, usage: UsageTotals) -> RunSummary<'_> {
         answer,
         usage,
         elapsed_secs: 14.2341,
+        tools: known_tool_names().to_vec(),
     }
 }
 

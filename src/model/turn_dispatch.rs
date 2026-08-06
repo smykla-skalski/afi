@@ -14,6 +14,7 @@ use crate::model::ModelConfig;
 use crate::risk::{RiskClassifier, confirm};
 use crate::term::{OutputEvent, UserInterface};
 use crate::tools;
+use crate::tools::policy::ToolPolicy;
 use crate::tools::protocol::sanitize_tool_result;
 use std::path::PathBuf;
 
@@ -109,6 +110,15 @@ pub(crate) fn dispatch_tool(
         return ToolDispatchResult::Escaped(action);
     }
 
+    // Second enforcement point. The request already withholds blocked schemas,
+    // but the text protocol parses calls out of prose, so a model can still name
+    // a tool it was never offered. Runs before the approval gate and before any
+    // side effect.
+    if let Some(refusal) = policy_refusal(name, &da.config.tool_policy) {
+        emit_tool_finished(da.ui, name, "blocked by policy");
+        return ToolDispatchResult::Ok(refusal);
+    }
+
     if matches!(name, "write_file" | "edit_file" | "run_bash") {
         let decision = {
             let ui = RefCell::new(&mut *da.ui);
@@ -142,6 +152,28 @@ pub(crate) fn dispatch_tool(
     let result = run_tool(name, args, da);
     emit_tool_finished(da.ui, name, tool_summary(name, &result));
     ToolDispatchResult::Ok(result)
+}
+
+/// The tool result to hand back when policy blocks `name`, or `None` when it is
+/// permitted.
+///
+/// Phrased as a permanent refusal listing the alternatives, because a model told
+/// only "denied" reasonably retries - and a retry loop against a fixed policy
+/// burns the whole turn budget.
+fn policy_refusal(name: &str, policy: &ToolPolicy) -> Option<String> {
+    if policy.permits(name) {
+        return None;
+    }
+    let permitted = policy.permitted();
+    let available = if permitted.is_empty() {
+        "none".to_string()
+    } else {
+        permitted.join(", ")
+    };
+    Some(format!(
+        "ERROR: tool '{name}' is blocked by this run's tool policy and will stay \
+         blocked. Do not retry it. Permitted tools: {available}."
+    ))
 }
 
 fn run_tool(name: &str, args: &Value, da: &mut DispatchArgs<'_>) -> String {
@@ -299,82 +331,4 @@ pub(crate) fn dispatch_text(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::risk::{ApprovalChoice, HighDefaultClassifier};
-
-    struct TestUi;
-
-    impl UserInterface for TestUi {
-        fn emit(&mut self, _event: OutputEvent) {}
-
-        fn start_activity(&mut self, _label: &str) -> CancellationToken {
-            CancellationToken::new()
-        }
-
-        fn stop_activity(&mut self) {}
-
-        fn approve(&mut self, _prompt: &str) -> ApprovalChoice {
-            ApprovalChoice::Yes
-        }
-    }
-
-    #[test]
-    fn tool_summary_never_echoes_result_payload() {
-        let secret = "TOP_SECRET=file contents";
-        assert_eq!(tool_summary("read_file", secret), "read complete");
-        assert!(!tool_summary("read_file", secret).contains("TOP_SECRET"));
-    }
-
-    #[test]
-    fn cancellation_skips_current_and_remaining_writes() {
-        let temp = tempfile::tempdir().unwrap();
-        let first = temp.path().join("first.txt");
-        let second = temp.path().join("second.txt");
-        let ordered = vec![
-            ToolCallAccum {
-                id: Some("one".to_string()),
-                name: Some("write_file".to_string()),
-                args: String::new(),
-            },
-            ToolCallAccum {
-                id: Some("two".to_string()),
-                name: Some("write_file".to_string()),
-                args: String::new(),
-            },
-        ];
-        let parsed = vec![
-            json!({"path": first, "content": "one"}),
-            json!({"path": second, "content": "two"}),
-        ];
-        let approval = ApprovalState {
-            yolo: true,
-            ..ApprovalState::default()
-        };
-        let classifier = HighDefaultClassifier;
-        let config = ModelConfig::default();
-        let env = HashMap::new();
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let mut ui = TestUi;
-        let mut da = DispatchArgs {
-            approval: &approval,
-            classifier: &classifier,
-            cwd: temp.path(),
-            project_root: temp.path(),
-            env: &env,
-            config: &config,
-            cancel: &cancel,
-            ui: &mut ui,
-        };
-        let mut messages = Vec::new();
-
-        let outcome = dispatch_structured(&mut messages, &ordered, &parsed, &mut da, 1_000);
-
-        assert!(matches!(outcome, ToolRunOutcome::Escaped(_)));
-        assert!(!first.exists());
-        assert!(!second.exists());
-        assert_eq!(messages[0]["content"], "CANCELLED by user (Esc)");
-        assert_eq!(messages[1]["content"], "SKIPPED");
-    }
-}
+mod tests;

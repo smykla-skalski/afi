@@ -203,7 +203,6 @@ impl Driver {
             }
         }
     }
-
     fn start_shutdown(&mut self) {
         self.shutdown_requested = true;
         self.answer_pending_approval(ApprovalChoice::Esc);
@@ -213,7 +212,6 @@ impl Driver {
             cancel.cancel();
         }
     }
-
     fn start_job(&mut self, job: CoreJob) {
         let Some(core) = self.core.take() else {
             return;
@@ -231,7 +229,6 @@ impl Driver {
             cancel,
         );
     }
-
     fn handle_backend(&mut self, event: BackendEvent) -> bool {
         match event {
             BackendEvent::Output(output) => {
@@ -264,7 +261,6 @@ impl Driver {
         }
         false
     }
-
     fn handle_result(&mut self, result: Option<WorkerResult>) {
         self.render.request();
         let _ = self.drain_backend();
@@ -294,7 +290,6 @@ impl Driver {
             self.start_job(CoreJob::Shutdown);
         }
     }
-
     fn resolve_approval(&mut self) {
         let Some(choice) = self.app.take_approval_choice() else {
             return;
@@ -303,24 +298,20 @@ impl Driver {
             let _ = reply.send(choice);
         }
     }
-
     fn deny_pending_approval(&mut self) {
         self.answer_pending_approval(ApprovalChoice::No);
     }
-
     fn cancel_current(&self) {
         if let Some(cancel) = &self.cancel {
             cancel.cancel();
         }
     }
-
     fn answer_pending_approval(&mut self, choice: ApprovalChoice) {
         if let Some(reply) = self.approval_reply.take() {
             let _ = reply.send(choice);
         }
         self.app.set_approval(None);
     }
-
     fn drain_backend(&mut self) -> bool {
         let mut urgent = false;
         for _ in 0..BACKEND_CAPACITY {
@@ -386,7 +377,6 @@ fn spawn_core(
 }
 
 struct TerminalGuard;
-
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         let guard = Self;

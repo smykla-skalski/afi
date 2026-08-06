@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::process::{Command, Output, Stdio};
 
 use afi::model::ModelConfig;
@@ -29,12 +29,21 @@ fn run_afi(home: &TempDir, args: &[&str], env: &[(&str, &str)], input: &str) -> 
         .stderr(Stdio::piped())
         .spawn()
         .expect("afi must start");
-    child
+    // A run that refuses to start exits before reading stdin, so the write races
+    // the pipe closing. Losing that race is the behaviour under test, not a
+    // failure - every assertion here is on the exit code and stderr. Treating a
+    // broken pipe as fatal made these tests pass on a fast machine and fail on a
+    // CI runner.
+    let write = child
         .stdin
         .take()
         .expect("piped stdin")
-        .write_all(input.as_bytes())
-        .expect("input must write");
+        .write_all(input.as_bytes());
+    match write {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("input must write: {error}"),
+    }
     child.wait_with_output().expect("afi must exit")
 }
 

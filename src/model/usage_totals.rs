@@ -10,6 +10,11 @@
 //! per-turn inputs are what a provider charges for. `input_tokens` excludes
 //! both cached prefixes and `output_tokens` excludes reasoning, so the five
 //! fields are disjoint and add up to the run's billable total.
+//!
+//! The accumulator keys on the model each request went to, because a piped
+//! session can `/source` its way onto a second one and the two are not billed
+//! at the same rates. `snapshot` folds the models together for the summary's
+//! flat counts; `snapshot_by_model` keeps them apart for pricing.
 
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -48,6 +53,20 @@ impl UsageTotals {
         self.requests = self.requests.saturating_add(1);
     }
 
+    /// Fold another model's totals in, for the run-wide flat counts.
+    pub fn merge(&mut self, other: &Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(other.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(other.cache_write_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
+        self.requests = self.requests.saturating_add(other.requests);
+    }
+
     /// Every token the run was billed for. The five fields are disjoint, so this
     /// is their sum rather than a separate provider figure.
     #[must_use]
@@ -66,28 +85,51 @@ impl UsageTotals {
     }
 }
 
-fn totals() -> &'static Mutex<UsageTotals> {
-    static TOTALS: OnceLock<Mutex<UsageTotals>> = OnceLock::new();
-    TOTALS.get_or_init(|| Mutex::new(UsageTotals::default()))
+/// Per-model totals in first-seen order. A `Vec` rather than a map because a run
+/// touches one or two models and the order is worth keeping.
+fn totals() -> &'static Mutex<Vec<(String, UsageTotals)>> {
+    static TOTALS: OnceLock<Mutex<Vec<(String, UsageTotals)>>> = OnceLock::new();
+    TOTALS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Record one turn's usage. A poisoned lock recovers rather than panicking: bad
-/// accounting must never take down a run.
-pub fn record(usage: &NormalizedUsage) {
+/// Record one request's usage against the model that served it. A poisoned lock
+/// recovers rather than panicking: bad accounting must never take down a run.
+pub fn record(model: &str, usage: &NormalizedUsage) {
     let mut guard = totals().lock().unwrap_or_else(PoisonError::into_inner);
-    guard.add(usage);
+    if let Some((_, totals)) = guard.iter_mut().find(|(name, _)| name == model) {
+        totals.add(usage);
+        return;
+    }
+    let mut totals = UsageTotals::default();
+    totals.add(usage);
+    guard.push((model.to_string(), totals));
 }
 
-/// The run's totals so far.
+/// The run's totals so far, every model folded together.
 #[must_use]
 pub fn snapshot() -> UsageTotals {
-    *totals().lock().unwrap_or_else(PoisonError::into_inner)
+    let guard = totals().lock().unwrap_or_else(PoisonError::into_inner);
+    guard.iter().fold(UsageTotals::default(), |mut acc, entry| {
+        acc.merge(&entry.1);
+        acc
+    })
+}
+
+/// The run's totals split by model, for anything that prices them.
+#[must_use]
+pub fn snapshot_by_model() -> Vec<(String, UsageTotals)> {
+    totals()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 /// Clear the totals. Exists for tests, which share one process.
 pub fn reset() {
-    let mut guard = totals().lock().unwrap_or_else(PoisonError::into_inner);
-    *guard = UsageTotals::default();
+    totals()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
 }
 
 #[cfg(test)]

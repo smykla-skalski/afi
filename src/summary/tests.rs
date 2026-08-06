@@ -21,6 +21,7 @@ fn summary(ok: bool, answer: &str, usage: UsageTotals) -> RunSummary<'_> {
         model: Some("claude-sonnet-5"),
         answer,
         usage,
+        cost_usd: None,
         elapsed_secs: 14.2341,
         tools: known_tool_names().to_vec(),
     }
@@ -101,12 +102,33 @@ fn a_failed_run_says_so_and_carries_the_reason() {
 }
 
 #[test]
-fn no_cost_field_is_emitted() {
-    // Deliberate: no provider returns cost here, so any figure would come from a
-    // hard-coded price table that goes stale without anyone noticing.
+fn an_unpriced_run_has_no_cost_key_at_all() {
+    // Not a null and not a zero: either one reads as "this run was free" to
+    // anything summing the field, and no provider here reports a cost afi could
+    // fall back on.
     let json = summary(true, "x", totals(1)).to_json();
+    assert!(json["usage"].get("cost_usd").is_none());
     assert!(json.get("cost_usd").is_none());
     assert!(json.get("total_cost_usd").is_none());
+}
+
+#[test]
+fn a_priced_run_reports_the_figure_beside_the_counts() {
+    let mut run = summary(true, "x", totals(3));
+    run.cost_usd = Some(0.041_823);
+    let json = run.to_json();
+    assert_eq!(json["usage"]["cost_usd"], 0.041_823);
+    // The counts it was derived from stay put, so the figure is auditable.
+    assert_eq!(json["usage"]["total_tokens"], 4085 + 509 + 6837 + 2279);
+}
+
+#[test]
+fn a_cost_without_usage_to_back_it_is_not_invented() {
+    // `usage` is null when no request reported any, and a cost hanging off
+    // nothing would be a number with no derivation.
+    let mut run = summary(true, "x", UsageTotals::default());
+    run.cost_usd = Some(1.0);
+    assert_eq!(run.to_json()["usage"], Value::Null);
 }
 
 // --- final answer extraction --------------------------------------------------

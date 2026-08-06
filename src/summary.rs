@@ -6,12 +6,13 @@
 //! so it can be reported. Both are printed as one JSON object on stdout after
 //! the run, leaving the workflow to decide what to do with it.
 //!
-//! Cost is deliberately absent. Anthropic returns no cost figure, so any number
-//! here would come from a hard-coded price table that silently goes stale and
-//! reports a wrong figure with total confidence. Token counts are exact; a
-//! caller that wants money multiplies them by rates it controls.
+//! Cost is reported only when the caller supplied rates in `AFI_PRICES`. No
+//! provider here returns a cost figure, so a price table compiled into afi would
+//! be the only source of one, and a table nobody notices going stale reports a
+//! wrong number with total confidence. Unpriced runs therefore carry no
+//! `cost_usd` key at all - see `crate::pricing`.
 
-use serde_json::{Value, json};
+use serde_json::{Number, Value, json};
 
 use crate::model::usage_totals::UsageTotals;
 
@@ -55,6 +56,10 @@ pub struct RunSummary<'a> {
     /// The last assistant text of the run - the answer a review flow posts.
     pub answer: &'a str,
     pub usage: UsageTotals,
+    /// What the run cost, when the caller configured rates for every model and
+    /// token class it used. `None` leaves the field out entirely rather than
+    /// reporting a zero a consumer would chart as free.
+    pub cost_usd: Option<f64>,
     pub elapsed_secs: f64,
     /// The tools the run was permitted to call. Reported so an audit of a CI run
     /// can confirm the restriction from the output alone, without trusting that
@@ -86,7 +91,7 @@ impl RunSummary<'_> {
         if self.usage.is_empty() {
             return Value::Null;
         }
-        json!({
+        let mut usage = json!({
             "input_tokens": self.usage.input_tokens,
             "output_tokens": self.usage.output_tokens,
             "cache_read_tokens": self.usage.cache_read_tokens,
@@ -94,7 +99,16 @@ impl RunSummary<'_> {
             "reasoning_tokens": self.usage.reasoning_tokens,
             "total_tokens": self.usage.total_tokens(),
             "requests": self.usage.requests,
-        })
+        });
+        // Inserted rather than declared in the object above, because an unpriced
+        // run must have no key here at all: a null would read as "the run was
+        // free" to anything summing the field.
+        if let (Some(cost), Some(fields)) = (self.cost_usd, usage.as_object_mut())
+            && let Some(number) = Number::from_f64(cost)
+        {
+            fields.insert("cost_usd".to_string(), Value::Number(number));
+        }
+        usage
     }
 }
 

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
 use crate::envfile;
+use crate::pricing::Pricing;
 use crate::summary::SummaryFormat;
 use crate::tools::policy::ToolPolicy;
 
@@ -38,6 +39,9 @@ pub struct Runtime {
     pub tool_policy: ToolPolicy,
     /// Tool-policy flags given wrongly on the command line. See `refusals`.
     pub flag_errors: Vec<String>,
+    /// Token rates for the summary's cost figure. `None` when the caller set
+    /// none, which is also what an unusable table falls back to.
+    pub pricing: Option<Pricing>,
 }
 
 /// Parsed CLI args - the subset that affects initial state. The `sessions`
@@ -167,6 +171,11 @@ impl Runtime {
         let parsed = parse_args(args);
         let approval = resolve_approval(&env, &parsed);
         apply_tool_flags(&mut env, &parsed);
+        // Read after the tool flags land, so `env` is fully resolved. Parsed at
+        // startup rather than at print time, so a typo in the table is
+        // complained about while someone is still watching the log rather than
+        // after the run it was meant to price.
+        let pricing = Pricing::from_env(&env);
 
         let mut rt = Runtime {
             sources,
@@ -189,6 +198,7 @@ impl Runtime {
                 env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
             ),
             flag_errors: parsed.flag_errors,
+            pricing,
             env,
         };
 

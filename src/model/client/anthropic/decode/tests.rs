@@ -356,6 +356,7 @@ fn the_run_summary_reports_those_writes_separately() {
         model: Some("claude-sonnet-5"),
         answer: "done",
         usage: totals,
+        cost_usd: None,
         elapsed_secs: 1.0,
         tools: known_tool_names().to_vec(),
     }

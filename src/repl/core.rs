@@ -356,6 +356,12 @@ fn print_json_summary(rt: &Runtime, messages: &[Value], error: Option<&str>, ela
         model: rt.model.as_deref(),
         answer: final_answer(messages),
         usage: usage_totals::snapshot(),
+        // Priced per model, so a session that switched models mid-run is still
+        // billed at each one's own rates.
+        cost_usd: rt
+            .pricing
+            .as_ref()
+            .and_then(|pricing| pricing.run_cost_usd(&usage_totals::snapshot_by_model())),
         elapsed_secs: elapsed.as_secs_f64(),
         tools: rt.tool_policy.permitted(),
     };

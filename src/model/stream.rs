@@ -56,9 +56,16 @@ pub struct Usage {
     pub output_tokens_details: Option<OutputTokensDetails>,
 }
 
+/// Subsets of `prompt_tokens`, following `OpenAI`'s convention that a detail
+/// here is part of the prompt total rather than an addition to it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptTokensDetails {
     pub cached_tokens: u64,
+    /// Prompt tokens written into the cache rather than read from it, which
+    /// Anthropic bills above both a read and plain input. No `OpenAI`-compatible
+    /// provider reports one, so it defaults to 0 rather than being guessed at.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -74,13 +81,22 @@ pub struct Timings {
     pub cache_n: u64,
 }
 
-/// Normalized token usage: input (minus cache), output (minus reasoning),
-/// `cache_read`, reasoning. Matches the `OpenAI` usage convention.
+/// Normalized token usage: input (minus both cache subsets), output (minus
+/// reasoning), `cache_read`, `cache_write`, reasoning.
+///
+/// The five counts are deliberately disjoint, so a caller pricing a run can
+/// multiply each by its own rate and sum. Cache reads and writes are split
+/// because they are not billed alike - Anthropic charges a write above base
+/// input and a read far below it, so folding either into `input_tokens` puts
+/// tokens at the wrong price.
 #[derive(Debug, Clone, Default)]
 pub struct NormalizedUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Prompt tokens written into the cache. Only the Anthropic path reports
+    /// this; every other provider leaves it 0.
+    pub cache_write_tokens: u64,
     pub reasoning_tokens: u64,
 }
 
@@ -105,23 +121,33 @@ pub fn normalize_usage(
             input_tokens: t.prompt_n.saturating_sub(t.cache_n),
             output_tokens: t.predicted_n,
             cache_read_tokens: t.cache_n,
+            // `cache_n` counts the reused prefix llama.cpp already held, which
+            // is a read. It has no separate figure for populating that prefix,
+            // and reporting one here would be an invention.
+            cache_write_tokens: 0,
             reasoning_tokens: 0,
         });
     }
 
     if let Some(u) = usage {
-        let cache_n = u
+        let (cache_read_n, cache_write_n) = u
             .prompt_tokens_details
             .as_ref()
-            .map_or(0, |d| d.cached_tokens);
+            .map_or((0, 0), |d| (d.cached_tokens, d.cache_write_tokens));
         let reasoning_n = u
             .output_tokens_details
             .as_ref()
             .map_or(0, |d| d.reasoning_tokens);
         return Some(NormalizedUsage {
-            input_tokens: u.prompt_tokens.saturating_sub(cache_n),
+            // Both cache counts are subsets of `prompt_tokens`, so both come
+            // out to leave the tokens billed at the plain input rate.
+            input_tokens: u
+                .prompt_tokens
+                .saturating_sub(cache_read_n)
+                .saturating_sub(cache_write_n),
             output_tokens: u.completion_tokens.saturating_sub(reasoning_n),
-            cache_read_tokens: cache_n,
+            cache_read_tokens: cache_read_n,
+            cache_write_tokens: cache_write_n,
             reasoning_tokens: reasoning_n,
         });
     }
@@ -133,6 +159,7 @@ pub fn normalize_usage(
             input_tokens: 0,
             output_tokens: estimated,
             cache_read_tokens: 0,
+            cache_write_tokens: 0,
             reasoning_tokens: 0,
         });
     }

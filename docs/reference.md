@@ -48,8 +48,9 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
     "input_tokens": 4126,
     "output_tokens": 484,
     "cache_read_tokens": 6837,
+    "cache_write_tokens": 2279,
     "reasoning_tokens": 0,
-    "total_tokens": 11447,
+    "total_tokens": 13726,
     "requests": 3
   },
   "elapsed_secs": 12.17
@@ -58,11 +59,13 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 
 `answer` is the last assistant message with text, so a review flow can post it directly. Turns that only called tools are skipped.
 
-The four token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run.
+The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run.
+
+`cache_write_tokens` is separate from `cache_read_tokens` and from `input_tokens` because the three are priced differently - Anthropic bills a write above base input and a read far below it, so a cost calculation needs its own rate for each. Only the Anthropic path reports writes; an OpenAI-compatible source reports `0`, as does llama.cpp, whose `timings.cache_n` counts a reused prefix and is therefore a read.
+
+Anthropic prices a 5-minute cache write differently from a 1-hour one and reports them separately. `afi` only ever requests the default TTL, so the single figure here covers every write it can make.
 
 **No cost field.** Anthropic returns no cost, so any figure here would come from a price table that goes stale without anyone noticing. Multiply the token counts by rates you control.
-
-**One gap.** Anthropic prices cache *writes* above cache reads, but `cache_creation_input_tokens` is folded into `input_tokens` rather than broken out, so a cost calculation treats a write as a plain input token and under-counts it.
 
 A failed run sets `ok` to false, fills in `error`, and exits 1.
 

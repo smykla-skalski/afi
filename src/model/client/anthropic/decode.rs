@@ -51,10 +51,19 @@ impl AnthropicDecoder {
 
     /// Combine the stashed input counts with `message_delta`'s output count.
     ///
-    /// `normalize_usage` derives `input_tokens = prompt_tokens - cached_tokens`,
-    /// but Anthropic's `input_tokens` *already excludes* cached tokens. So
-    /// `prompt_tokens` is the re-inflated total and only `cache_read` is
-    /// reported as cached - cache *creation* is billed as fresh input.
+    /// Anthropic's `input_tokens` *already excludes* both cache counts, so
+    /// `prompt_tokens` re-inflates them back into one context total, and the
+    /// two are reported as the subsets of it that they are. `normalize_usage`
+    /// subtracts both to recover the uncached input.
+    ///
+    /// Keeping the write inside `prompt_tokens` is what keeps the stats footer
+    /// honest: it renders that number as the context size, and on a cold turn
+    /// nearly the whole prompt is a cache write.
+    ///
+    /// `cache_creation_input_tokens` is the total across cache TTLs. Anthropic
+    /// prices a 5-minute write and a 1-hour one differently and breaks them out
+    /// under `cache_creation`, but afi only ever requests the default TTL, so
+    /// one figure covers every write it can make.
     fn merged_usage(&self, event: &Value) -> Usage {
         Usage {
             prompt_tokens: self
@@ -67,6 +76,7 @@ impl AnthropicDecoder {
                 .unwrap_or(0),
             prompt_tokens_details: Some(PromptTokensDetails {
                 cached_tokens: self.cache_read,
+                cache_write_tokens: self.cache_creation,
             }),
             // Anthropic bills thinking inside output_tokens without a separate
             // breakdown. Reporting it here would make `normalize_usage`

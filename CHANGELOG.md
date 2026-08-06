@@ -12,9 +12,11 @@ Both non-interactive entry points report it - `--prompt-file` and piped stdin - 
 
 `usage.requests` counts billed requests rather than model turns, because a compression request is billed too and is now counted.
 
-This also fixes the token accounting it reports. `normalize_usage` computed the input / output / cache-read / reasoning split and `turn_finalize` discarded the result, so the breakdown was thrown away on every provider and only a bare total reached the footer. Totals now accumulate across the run and are verified against the per-request numbers Anthropic reports. The four counts are disjoint and sum to `total_tokens`; `usage` is `null` rather than zeros when no turn reported any, so a silent provider is distinguishable from a free run.
+This also fixes the token accounting it reports. `normalize_usage` computed the input / output / cache-read / reasoning split and `turn_finalize` discarded the result, so the breakdown was thrown away on every provider and only a bare total reached the footer. Totals now accumulate across the run and are verified against the per-request numbers Anthropic reports. The counts are disjoint and sum to `total_tokens`; `usage` is `null` rather than zeros when no turn reported any, so a silent provider is distinguishable from a free run.
 
-No cost figure is emitted, deliberately: no provider here returns one, so it would have to come from a hard-coded price table that goes stale silently. One known gap - Anthropic prices cache writes above cache reads, but `cache_creation_input_tokens` folds into `input_tokens` instead of being broken out, so a cost calculation under-counts a write.
+No cost figure is emitted, deliberately: no provider here returns one, so it would have to come from a hard-coded price table that goes stale silently.
+
+**Fixed - cache writes are no longer counted as plain input.** Anthropic's `cache_creation_input_tokens` was folded into `input_tokens`, so a run summary reported a write at the base input rate. It is billed at 1.25x that, against 0.1x for a read, and the error grew with every rebuild of a lapsed cached prefix - once in a short CI job, repeatedly in a long session. The summary now carries `cache_write_tokens` as a fifth disjoint count, on both Anthropic paths - the non-streaming one a `/compress` request takes included. Providers that report no such figure send `0` rather than an estimate, llama.cpp included: its `timings.cache_n` is a reused prefix, which is a read.
 
 ### Added — native Anthropic Messages API
 

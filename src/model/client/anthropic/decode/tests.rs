@@ -1,5 +1,7 @@
 use super::*;
 use crate::model::stream::{Usage, normalize_usage};
+use crate::model::usage_totals::UsageTotals;
+use crate::summary::RunSummary;
 
 /// Decode one event payload, expecting a chunk.
 fn chunk(decoder: &mut AnthropicDecoder, data: &str) -> StreamChunk {
@@ -110,29 +112,35 @@ fn merged_usage() -> Usage {
 #[test]
 fn usage_is_merged_across_message_start_and_message_delta() {
     let usage = merged_usage();
-    // Anthropic's input_tokens excludes cache, so prompt_tokens re-inflates it.
-    let cached = usage
-        .prompt_tokens_details
-        .as_ref()
-        .map(|d| d.cached_tokens);
+    // Anthropic's input_tokens excludes both cache counts, so prompt_tokens
+    // re-inflates it to the whole context - what the stats footer renders as
+    // `ctx`, and what a cold first turn would otherwise under-report.
+    let details = usage.prompt_tokens_details.as_ref().expect("details");
     assert_eq!(
-        (usage.prompt_tokens, usage.completion_tokens, cached),
-        (1050, 42, Some(900))
+        (
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            details.cached_tokens,
+            details.cache_write_tokens
+        ),
+        (1050, 42, 900, 50)
     );
 }
 
 #[test]
 fn merged_usage_normalizes_the_way_the_footer_expects() {
-    // cache_creation counts as fresh input; only cache_read is a cache hit.
+    // A cache write is priced above plain input, so it comes out of
+    // input_tokens and is reported on its own rather than folded in.
     let norm = normalize_usage(Some(&merged_usage()), None, 0).expect("normalizes");
     assert_eq!(
         (
             norm.input_tokens,
             norm.cache_read_tokens,
+            norm.cache_write_tokens,
             norm.output_tokens,
             norm.reasoning_tokens
         ),
-        (150, 900, 42, 0)
+        (100, 900, 50, 42, 0)
     );
 }
 
@@ -272,4 +280,85 @@ fn a_fragmented_event_does_not_corrupt_usage_state() {
 
 fn counters(decoder: &AnthropicDecoder) -> (u64, u64, u64) {
     (decoder.input, decoder.cache_read, decoder.cache_creation)
+}
+
+/// One request's `message_start` / `message_delta` pair, with the usage numbers
+/// Anthropic reports on each.
+fn request_usage(input: u64, cache_read: u64, cache_creation: u64, output: u64) -> Usage {
+    let mut d = AnthropicDecoder::new();
+    let start = format!(
+        r#"{{"type":"message_start","message":{{"usage":{{"input_tokens":{input},"cache_read_input_tokens":{cache_read},"cache_creation_input_tokens":{cache_creation},"output_tokens":1}}}}}}"#
+    );
+    assert!(is_ignored(&mut d, &start));
+    let delta = format!(
+        r#"{{"type":"message_delta","delta":{{"stop_reason":"end_turn"}},"usage":{{"output_tokens":{output}}}}}"#
+    );
+    chunk(&mut d, &delta).usage.expect("merged usage")
+}
+
+#[test]
+fn a_multi_turn_run_sums_cache_writes_the_way_anthropic_reports_them() {
+    // The check a pass-through proxy performs against a live run, made
+    // deterministic: three requests whose cached prefix lapses and is rebuilt,
+    // driven through the real decoder and folded exactly as a run is. A
+    // warm-cache run reports zero creation on every request and proves nothing,
+    // so the writes here are non-zero on purpose.
+    let requests = [
+        // cold: the whole prefix is written, nothing is read back
+        request_usage(123, 0, 2279, 120),
+        // warm: the prefix is read, a little more is appended and written
+        request_usage(924, 2279, 310, 216),
+        // lapsed: the 5-minute TTL expired, so the prefix is rebuilt in full
+        request_usage(3038, 0, 2589, 173),
+    ];
+
+    let mut totals = UsageTotals::default();
+    for usage in &requests {
+        totals.add(&normalize_usage(Some(usage), None, 0).expect("normalizes"));
+    }
+
+    // Summed by hand from the per-request cache_creation_input_tokens above.
+    assert_eq!(
+        (
+            totals.cache_write_tokens,
+            totals.input_tokens,
+            totals.cache_read_tokens,
+            totals.output_tokens,
+            totals.requests
+        ),
+        (
+            2279 + 310 + 2589,
+            // Anthropic's own input_tokens, unchanged - no write leaked in.
+            123 + 924 + 3038,
+            2279,
+            120 + 216 + 173,
+            3
+        )
+    );
+
+    // Every token of every request is accounted for exactly once.
+    let reported: u64 = requests
+        .iter()
+        .map(|u| u.prompt_tokens + u.completion_tokens)
+        .sum();
+    assert_eq!(totals.total_tokens(), reported);
+}
+
+#[test]
+fn the_run_summary_reports_those_writes_separately() {
+    let mut totals = UsageTotals::default();
+    totals.add(&normalize_usage(Some(&request_usage(123, 0, 2279, 120)), None, 0).unwrap());
+    let json = RunSummary {
+        ok: true,
+        error: None,
+        source: Some("anthropic"),
+        model: Some("claude-sonnet-5"),
+        answer: "done",
+        usage: totals,
+        elapsed_secs: 1.0,
+    }
+    .to_json();
+    assert_eq!(json["usage"]["cache_write_tokens"], 2279);
+    assert_eq!(json["usage"]["input_tokens"], 123);
+    assert_eq!(json["usage"]["total_tokens"], 123 + 2279 + 120);
 }

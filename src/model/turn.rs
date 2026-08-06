@@ -71,7 +71,7 @@ pub async fn model_turn(
     };
 
     let acc = match stream_result {
-        StreamResult::Done(a) => a,
+        StreamResult::Done(a) => *a,
         StreamResult::ReasoningStall {
             chars,
             reasoning_parts,

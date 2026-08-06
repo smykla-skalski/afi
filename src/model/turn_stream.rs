@@ -25,8 +25,11 @@ pub(crate) struct Accumulated {
 }
 
 /// Either the folded turn, or a reasoning-only stall the caller must handle.
+///
+/// `Accumulated` is boxed so the stall variant does not carry its footprint.
+/// One allocation per turn, against an HTTP round trip.
 pub(crate) enum StreamResult {
-    Done(Accumulated),
+    Done(Box<Accumulated>),
     ReasoningStall {
         chars: usize,
         reasoning_parts: Vec<String>,
@@ -171,7 +174,7 @@ impl StreamAccumulator {
     /// model/tool data.
     pub(crate) fn finish(self, ui: &mut dyn UserInterface) -> StreamResult {
         ui.finish_stream();
-        StreamResult::Done(self.into_accumulated())
+        StreamResult::Done(Box::new(self.into_accumulated()))
     }
 
     fn into_accumulated(self) -> Accumulated {
@@ -220,7 +223,7 @@ mod tests {
 
     fn finish(accumulator: StreamAccumulator, ui: &mut RecordingUi) -> super::Accumulated {
         match accumulator.finish(ui) {
-            StreamResult::Done(result) => result,
+            StreamResult::Done(result) => *result,
             StreamResult::ReasoningStall { .. } => panic!("stream must finish"),
         }
     }

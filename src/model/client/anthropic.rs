@@ -27,7 +27,7 @@ use std::io;
 use super::sse::decoded_stream;
 use super::{ChatCompletionStream, ClientError, ReqwestClient, StreamRequest, limited_error_body};
 use crate::config::Source;
-use crate::model::stream::{PromptTokensDetails, Usage, normalize_usage};
+use crate::model::stream::{NormalizedUsage, PromptTokensDetails, Usage, normalize_usage};
 use crate::model::usage_totals;
 
 pub(crate) mod auth;
@@ -285,29 +285,35 @@ pub(super) async fn complete(
 /// so without this a `/compress` request is billed but absent from the summary.
 /// Best effort: a response with no usage object is simply not counted.
 fn record_completion_usage(body: &str) {
-    let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return;
-    };
-    let Some(usage) = value.get("usage") else {
-        return;
-    };
+    if let Some(normalized) = completion_usage(body) {
+        usage_totals::record(&normalized);
+    }
+}
+
+/// Normalize a non-streaming response's `usage` object, or `None` when it has
+/// none. Split from the recording so the accounting is testable without the
+/// process-wide accumulator.
+fn completion_usage(body: &str) -> Option<NormalizedUsage> {
+    let value = serde_json::from_str::<Value>(body).ok()?;
+    let usage = value.get("usage")?;
     let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or_default();
     let cache_read = field("cache_read_input_tokens");
+    let cache_write = field("cache_creation_input_tokens");
     // Same re-inflation the SSE decoder applies: Anthropic's `input_tokens`
-    // already excludes cache, and creation is billed as fresh input.
+    // already excludes both cache counts, so `prompt_tokens` is the whole
+    // context and the two are reported as the subsets of it that they are.
     let openai_shaped = Usage {
         prompt_tokens: field("input_tokens")
             .saturating_add(cache_read)
-            .saturating_add(field("cache_creation_input_tokens")),
+            .saturating_add(cache_write),
         completion_tokens: field("output_tokens"),
         prompt_tokens_details: Some(PromptTokensDetails {
             cached_tokens: cache_read,
+            cache_write_tokens: cache_write,
         }),
         output_tokens_details: None,
     };
-    if let Some(normalized) = normalize_usage(Some(&openai_shaped), None, 0) {
-        usage_totals::record(&normalized);
-    }
+    normalize_usage(Some(&openai_shaped), None, 0)
 }
 
 /// Anthropic `{"content":[{"type":"text","text":...}]}` ->

@@ -1,12 +1,14 @@
 use super::*;
 
-
 #[test]
 fn normalize_usage_openai() {
     let usage = Usage {
         prompt_tokens: 1000,
         completion_tokens: 500,
-        prompt_tokens_details: Some(PromptTokensDetails { cached_tokens: 200 }),
+        prompt_tokens_details: Some(PromptTokensDetails {
+            cached_tokens: 200,
+            ..PromptTokensDetails::default()
+        }),
         output_tokens_details: Some(OutputTokensDetails {
             reasoning_tokens: 50,
         }),
@@ -16,6 +18,52 @@ fn normalize_usage_openai() {
     assert_eq!(n.output_tokens, 450); // 500 - 50 reasoning
     assert_eq!(n.cache_read_tokens, 200);
     assert_eq!(n.reasoning_tokens, 50);
+    // No OpenAI-compatible provider reports a cache write, so this is 0 rather
+    // than a guess derived from the other counts.
+    assert_eq!(n.cache_write_tokens, 0);
+}
+
+#[test]
+fn normalize_usage_splits_cache_writes_out_of_input() {
+    // The Anthropic shape: prompt_tokens is the whole context, and both cache
+    // subsets sit inside it. A write must not land in input_tokens, which is
+    // priced below it.
+    let usage = Usage {
+        prompt_tokens: 1050,
+        completion_tokens: 42,
+        prompt_tokens_details: Some(PromptTokensDetails {
+            cached_tokens: 900,
+            cache_write_tokens: 50,
+        }),
+        output_tokens_details: None,
+    };
+    let n = normalize_usage(Some(&usage), None, 0).unwrap();
+    assert_eq!(n.input_tokens, 100); // 1050 - 900 read - 50 write
+    assert_eq!(n.cache_read_tokens, 900);
+    assert_eq!(n.cache_write_tokens, 50);
+    assert_eq!(n.output_tokens, 42);
+    // Disjoint, so the five counts still add back up to the whole request.
+    assert_eq!(
+        n.input_tokens + n.cache_read_tokens + n.cache_write_tokens + n.output_tokens,
+        1092
+    );
+}
+
+#[test]
+fn normalize_usage_saturates_when_cache_subsets_exceed_the_prompt() {
+    // A provider reporting subsets larger than the total it claims must floor
+    // input at zero rather than wrapping to something enormous.
+    let usage = Usage {
+        prompt_tokens: 10,
+        completion_tokens: 1,
+        prompt_tokens_details: Some(PromptTokensDetails {
+            cached_tokens: 900,
+            cache_write_tokens: 50,
+        }),
+        output_tokens_details: None,
+    };
+    let n = normalize_usage(Some(&usage), None, 0).unwrap();
+    assert_eq!(n.input_tokens, 0);
 }
 
 #[test]
@@ -30,6 +78,9 @@ fn normalize_usage_llamacpp_timings() {
     assert_eq!(n.output_tokens, 500);
     assert_eq!(n.cache_read_tokens, 200);
     assert_eq!(n.reasoning_tokens, 0);
+    // llama.cpp's `cache_n` is a prefix-reuse hit, not a write, so there is
+    // nothing to report here.
+    assert_eq!(n.cache_write_tokens, 0);
 }
 
 #[test]
@@ -37,6 +88,7 @@ fn normalize_usage_fallback_chars() {
     let n = normalize_usage(None, None, 8000).unwrap();
     assert_eq!(n.output_tokens, 2000); // 8000 / 4
     assert_eq!(n.input_tokens, 0);
+    assert_eq!(n.cache_write_tokens, 0);
 }
 
 #[test]

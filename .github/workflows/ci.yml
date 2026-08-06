@@ -1,0 +1,47 @@
+name: ci
+
+# Runs the same gate an agent runs locally: `mise run check`, which is rustfmt,
+# clippy, the 420-line source cap, and the test suite.
+#
+# Nothing gated ordinary changes before this. release.yml runs the gate too, but
+# only when a release is cut or when release.yml itself changes, so pull requests
+# reported "no checks reported" and merged unverified.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push supersedes the run it interrupted, and nothing here has a side
+# effect worth finishing.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Gate
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Rust comes from rust-toolchain.toml via rustup, which the runner already
+      # has; mise supplies the task lane, not the toolchain.
+      - name: Install mise
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+
+      # Caches the dependency build only, keyed on the lockfile, so a cache hit
+      # cannot mask a change to this crate's own sources.
+      - name: Cache the cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # AGENTS.md routes every repository command through mise, never raw cargo,
+      # so the gate here is the gate a contributor ran.
+      - name: Run the repository gate
+        run: mise run check

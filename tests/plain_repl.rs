@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{self, Write};
 use std::process::{Command, Output, Stdio};
 
 use afi::sessions::write_session;
@@ -18,12 +18,20 @@ fn run_afi(home: &TempDir, args: &[&str], input: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("afi must start");
-    child
+    // A subcommand that prints and exits can be gone before this write lands, so
+    // a broken pipe means "the child already finished", not a test failure. Only
+    // the empty-input `sessions` case reaches that here today, and an empty
+    // `write_all` never touches the fd - so harden it before it does bite.
+    let write = child
         .stdin
         .take()
         .expect("piped stdin")
-        .write_all(input.as_bytes())
-        .expect("input must write");
+        .write_all(input.as_bytes());
+    match write {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("input must write: {error}"),
+    }
     child.wait_with_output().expect("afi must exit")
 }
 

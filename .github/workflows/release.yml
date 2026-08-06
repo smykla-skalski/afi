@@ -1,154 +1,97 @@
 name: release
 
-# Manual only. Cutting a release is a deliberate act, so nothing here fires on a
-# push or a tag.
+# Releases decide their own version. release-plz reads the conventional-commit
+# history, works out the next version from it, rewrites Cargo.toml, Cargo.lock,
+# and CHANGELOG.md, tags, and writes that version's changelog into the release
+# notes. Nobody edits a version by hand, so the manifest, the tag, the changelog,
+# and the Debian packages cannot disagree about what shipped.
 #
-# The `pull_request` trigger is a self-test rather than a release path: when this
-# file changes, the whole pipeline runs with publishing disabled, so a broken
-# release workflow is caught in review instead of at release time. It is scoped
-# to this one file, so it costs nothing on ordinary pull requests.
+# Daily rather than on every push to main: a release rebuilds three targets,
+# packages two of them, and pushes to the apt repository, which is a lot of
+# motion to attach to a single merge. Once a day collects a day's work into one
+# version. On a quiet day the job finds nothing releasable and stops.
+#
+# `release_commits` in release-plz.toml decides what counts: feat, fix, perf, and
+# refactor. docs, chore, test, style, and ci land on main and wait for the next
+# release that something else triggers.
+#
+# The manual trigger is the escape hatch, for releasing off-schedule, pinning an
+# exact version, or forcing one when the history says there is nothing to do.
 #
 # apt publishing setup, needed once before the first release that publishes:
 #
-#   1. Create a Cloudsmith workspace and a public repository in it. The
-#      open-source plan covers this project and needs no application; the
-#      attribution it asks for is in the README's Credits section.
-#   2. Create a service account in that workspace, give it write access to the
-#      repository, and add a GitHub OIDC provider to it. Cloudsmith exchanges the
-#      token this workflow requests for a short-lived credential, so there is no
-#      API key to store or rotate.
-#   3. Set three repository variables (Settings -> Actions -> Variables):
-#      CLOUDSMITH_WORKSPACE, CLOUDSMITH_REPOSITORY, CLOUDSMITH_SERVICE_SLUG.
+#   1. Create a Cloudsmith workspace and an open-source repository in it. The
+#      repository type has to be chosen at creation; it cannot be converted
+#      afterwards, and deletion is soft, so the slug stays reserved.
+#   2. Create a service account, give it write access to the repository, and add
+#      a GitHub OIDC provider to it. Cloudsmith exchanges the token this workflow
+#      requests for a short-lived credential, so there is no API key to store.
+#   3. Set three repository variables: CLOUDSMITH_WORKSPACE,
+#      CLOUDSMITH_REPOSITORY, CLOUDSMITH_SERVICE_SLUG.
 #
-# The `verify` job refuses to publish while any of those variables is unset, so a
-# missing step fails before a tag exists rather than halfway through a release.
+# The plan job refuses to publish while any of those is unset, so a missing step
+# fails before a tag exists rather than halfway through a release.
 on:
+  schedule:
+    # 04:17 UTC. Off the hour on purpose: GitHub queues scheduled jobs across all
+    # repositories, and the top of the hour is where everyone else is waiting.
+    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release, no leading v (e.g. 0.2.0). Must already match Cargo.toml."
-        required: true
+        description: "Exact version, no leading v (e.g. 0.3.0). Empty means work it out from the commits."
+        required: false
         type: string
-      dry_run:
-        description: "Build and verify everything, publish nothing."
+      force:
+        description: "Release even when no commit since the last tag is releasable."
         type: boolean
-        default: true
-  pull_request:
-    paths:
-      - .github/workflows/release.yml
+        default: false
+      dry_run:
+        description: "Work out the version and print it, publish nothing."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
-# Two releases at once would race on the tag. Never cancel a run in flight: it
-# may already have pushed a tag or created a release.
+# Two releases at once would race on the tag and on the version in Cargo.toml.
+# Never cancel one in flight: it may already have pushed a tag or a package.
 concurrency:
-  group: release-${{ inputs.version || github.ref }}
+  group: release
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  verify:
-    name: Verify
+  plan:
+    name: Plan and tag
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     outputs:
+      released: ${{ steps.plan.outputs.released }}
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
-      publish: ${{ steps.plan.outputs.publish }}
     steps:
+      # The bump lands on main without a pull request, which the branch ruleset
+      # otherwise forbids. This app is a bypass actor on that ruleset, so it is
+      # the identity that can do it. GITHUB_TOKEN cannot.
+      - name: Mint an app token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SMYKLOT_CLIENT_ID || 'Iv23liMyF31aNYay8IXy' }}
+          private-key: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
+
+      # Full history and tags: release-plz compares against the last tag to work
+      # out what changed, so a shallow clone would make every release look like
+      # the first one.
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.token.outputs.token }}
 
-      # Everything that could make a release wrong is rejected here, before a tag
-      # exists, because a pushed tag and a published release are both awkward to
-      # walk back.
-      - name: Plan the release
-        id: plan
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_DRY_RUN: ${{ inputs.dry_run }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-
-          # SemVer 2.0: no leading zeros, hyphens allowed inside a prerelease
-          # identifier, optional build metadata. Cargo accepts all of that, so a
-          # narrower pattern here would refuse to release a version the manifest
-          # legitimately holds.
-          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
-
-          # Read the version without a toolchain. `cargo metadata` would need
-          # cargo on PATH before the mise step runs, and mise does not supply
-          # Rust here - rust-toolchain.toml plus rustup does - so a runner from
-          # vars.RUNNER_LABEL without Rust preinstalled would die on the version
-          # guard rather than on the build. The script is shared with
-          # scripts/deb-version.sh so the release and the Debian package can
-          # never disagree about which version is being built.
-          manifest_version="$(./scripts/cargo-version.sh)"
-          if [[ ! "${manifest_version}" =~ ${semver} ]]; then
-            echo "::error::could not read a semver version from Cargo.toml's [package] section (got '${manifest_version}')."
-            exit 1
-          fi
-          echo "Cargo.toml version: ${manifest_version}"
-
-          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
-            # Self-test: build whatever the manifest currently says, publish nothing.
-            {
-              echo "version=${manifest_version}"
-              echo "tag=v${manifest_version}"
-              echo "publish=false"
-            } >>"${GITHUB_OUTPUT}"
-            echo "Self-test run: building ${manifest_version}, publishing nothing."
-            exit 0
-          fi
-
-          version="${INPUT_VERSION#v}"
-
-          if [[ ! "${version}" =~ ${semver} ]]; then
-            echo "::error::'${version}' is not a semver version. Expected e.g. 0.2.0 or 1.0.0-rc.1."
-            exit 1
-          fi
-
-          if [[ "${version}" != "${manifest_version}" ]]; then
-            echo "::error::Cargo.toml says ${manifest_version}, but you asked to release ${version}. Bump Cargo.toml on ${DEFAULT_BRANCH} first."
-            exit 1
-          fi
-
-          if [[ "${REF_NAME}" != "${DEFAULT_BRANCH}" ]]; then
-            echo "::error::Releases must be cut from ${DEFAULT_BRANCH}, not ${REF_NAME}."
-            exit 1
-          fi
-
-          if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
-            echo "::error::Tag v${version} already exists. Bump the version rather than re-releasing."
-            exit 1
-          fi
-
-          # Publish only on an explicit "false". Anything else - unset, empty,
-          # "True", "no" - stays a dry run, because a pushed tag and a published
-          # release are both awkward to walk back and a typo should not cut one.
-          if [[ "${INPUT_DRY_RUN}" == "false" ]]; then
-            publish=true
-          else
-            publish=false
-          fi
-          {
-            echo "version=${version}"
-            echo "tag=v${version}"
-            echo "publish=${publish}"
-          } >>"${GITHUB_OUTPUT}"
-          echo "Releasing ${version}. publish=${publish}"
-
-      # The apt repository is checked here, before a tag exists, for the same
-      # reason as everything else in this job: a release that tags and publishes
-      # binaries but then fails to push the Debian packages leaves apt users on
-      # an older version with no signal that anything went wrong.
       - name: Check the apt publishing configuration
-        if: steps.plan.outputs.publish == 'true'
         env:
           CLOUDSMITH_WORKSPACE: ${{ vars.CLOUDSMITH_WORKSPACE }}
           CLOUDSMITH_REPOSITORY: ${{ vars.CLOUDSMITH_REPOSITORY }}
@@ -163,52 +106,83 @@ jobs:
             echo "::error::missing repository variables: ${missing[*]}. See the apt setup notes in this file's header."
             exit 1
           fi
-          echo "Publishing to Cloudsmith ${CLOUDSMITH_WORKSPACE}/${CLOUDSMITH_REPOSITORY} as ${CLOUDSMITH_SERVICE_SLUG}."
 
       - name: Install mise
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
 
-      # AGENTS.md routes every repository command through mise, and a release
-      # should not ship a binary the gate rejects.
+      # A release should not ship a tree the gate rejects, and this runs before
+      # anything is written, tagged, or pushed.
       - name: Run the repository gate
         run: mise run check
 
-  tag:
-    name: Tag and release
-    needs: verify
-    if: needs.verify.outputs.publish == 'true'
-    runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
-    permissions:
-      contents: write
-    steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # The upload action attaches assets to an existing release, so the tag and
-      # the release have to exist before the build matrix runs.
-      - name: Create and push the tag
+      - name: Work out the version
+        id: plan
         env:
-          TAG: ${{ needs.verify.outputs.tag }}
+          AFI_RELEASE_VERSION: ${{ inputs.version }}
+          AFI_RELEASE_FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "${TAG}"
-          git push origin "refs/tags/${TAG}"
+          # Exit 3 is "nothing releasable", the ordinary outcome of a quiet day.
+          set +e
+          version="$(mise x -- ./scripts/plan-release.sh)"
+          status=$?
+          set -e
+          if (( status == 3 )); then
+            echo "released=false" >>"${GITHUB_OUTPUT}"
+            echo "No releasable commit since the last tag. Nothing to do."
+            exit 0
+          fi
+          (( status == 0 )) || exit "${status}"
 
-      - name: Create the release
+          if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
+            echo "::error::Tag v${version} already exists."
+            exit 1
+          fi
+
+          {
+            echo "released=true"
+            echo "version=${version}"
+            echo "tag=v${version}"
+          } >>"${GITHUB_OUTPUT}"
+          echo "Releasing ${version}."
+
+      - name: Show the planned release
+        if: steps.plan.outputs.released == 'true'
+        run: git --no-pager diff --stat
+
+      # Signed because the ruleset requires it. The key belongs to the app, so
+      # the bump commit is attributable to the automation rather than to a person
+      # who did not write it.
+      - name: Commit the version bump
+        if: steps.plan.outputs.released == 'true' && !inputs.dry_run
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.verify.outputs.tag }}
-        run: gh release create "${TAG}" --title "${TAG}" --generate-notes --verify-tag
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "smyklot[bot]"
+          git config user.email "smyklot[bot]@users.noreply.github.com"
+          git commit -s -m "chore(release): ${VERSION}" \
+            -- Cargo.toml Cargo.lock CHANGELOG.md
+          git push origin HEAD:main
+
+      # release-plz creates the tag and the GitHub release, and fills the release
+      # body with this version's changelog section. Publishing to crates.io is off
+      # in release-plz.toml: that name belongs to an unrelated crate.
+      - name: Tag and create the release
+        if: steps.plan.outputs.released == 'true'
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=()
+          [[ "${DRY_RUN}" == "true" ]] && args+=(--dry-run)
+          mise x -- release-plz release "${args[@]+"${args[@]}"}"
 
   upload:
     name: ${{ matrix.target }}
-    needs:
-      - verify
-      - tag
-    # `tag` is skipped on a dry run, which must not skip the build.
-    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.tag.result != 'failure' }}
+    needs: plan
+    if: needs.plan.outputs.released == 'true'
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     permissions:
       contents: write
@@ -221,34 +195,31 @@ jobs:
         include:
           # Native build, no extra toolchain.
           - target: x86_64-unknown-linux-gnu
-          # Static, so it runs on any distro regardless of glibc version. Only
+          # Static, so they run on any distro regardless of glibc version. Only
           # the musl targets are packaged as .deb: a static binary needs no
           # Depends and installs on every Debian derivative, which is what lets
           # one package serve any-distro/any-version.
+          #
+          # Both use cross rather than apt's musl-tools. musl-tools installs
+          # /lib/ld-musl-x86_64.so.1, and the Cloudsmith CLI installer treats the
+          # presence of that file as proof the runner is a musl system: it then
+          # fetches a musl build of the CLI, which cannot run on this glibc
+          # runner, and the push step dies after the release is already public.
           - target: x86_64-unknown-linux-musl
-            packages: musl-tools
+            build-tool: cross
             deb: true
-            deb-arch: amd64
-          # cross carries the aarch64 musl toolchain in a container, which is
-          # less fragile than assembling one from apt.
           - target: aarch64-unknown-linux-musl
             build-tool: cross
             deb: true
-            deb-arch: arm64
     steps:
-      - name: Check out
+      # The tag exists only on the remote at this point, and it is what the
+      # release assets have to be built from.
+      - name: Check out the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install build dependencies
-        if: matrix.packages != ''
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
 
       # Builds, archives, checksums, and attaches to the release in one step.
-      # With dry-run set it does everything except the upload, so the self-test
-      # exercises the real build path.
       - name: Build and upload
         uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
@@ -260,10 +231,7 @@ jobs:
           tar: unix
           zip: none
           include: README.md,LICENSE,CHANGELOG.md
-          dry-run: ${{ needs.verify.outputs.publish != 'true' }}
-          dry-run-intended: true
-          # Unset on a dry run, where no tag exists yet.
-          ref: ${{ needs.verify.outputs.publish == 'true' && format('refs/tags/{0}', needs.verify.outputs.tag) || '' }}
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -294,8 +262,6 @@ jobs:
         if: matrix.deb
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
-      # A dry run reaches here too, on purpose: a package that cannot be
-      # installed should fail review, not a release.
       - name: Verify the Debian package installs
         if: matrix.deb
         env:
@@ -305,15 +271,15 @@ jobs:
       # Attached to the release as well as pushed to apt, so an offline or
       # air-gapped install has a source that does not depend on Cloudsmith.
       - name: Attach the Debian package to the release
-        if: matrix.deb && needs.verify.outputs.publish == 'true'
+        if: matrix.deb
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.verify.outputs.tag }}
+          TAG: ${{ needs.plan.outputs.tag }}
           DEB: ${{ steps.deb.outputs.path }}
         run: gh release upload "${TAG}" "${DEB}" --clobber
 
       - name: Set up the Cloudsmith CLI
-        if: matrix.deb && needs.verify.outputs.publish == 'true'
+        if: matrix.deb
         uses: cloudsmith-io/cloudsmith-cli-action@ad73fafb92e3e29a5166c529464c2df7658a608e # v3.1.0
         with:
           oidc-namespace: ${{ vars.CLOUDSMITH_WORKSPACE }}
@@ -321,7 +287,7 @@ jobs:
           verify-auth: true
 
       - name: Push the Debian package to the apt repository
-        if: matrix.deb && needs.verify.outputs.publish == 'true'
+        if: matrix.deb
         env:
           WORKSPACE: ${{ vars.CLOUDSMITH_WORKSPACE }}
           REPOSITORY: ${{ vars.CLOUDSMITH_REPOSITORY }}
@@ -330,25 +296,12 @@ jobs:
           set -euo pipefail
           # any-distro/any-version, not a codename: the package holds a static
           # binary and declares no dependencies, so one upload serves every
-          # Debian and Ubuntu release instead of needing a copy per codename.
+          # Debian and Ubuntu release. Cloudsmith then offers it under each
+          # codename path its clients ask for.
           #
           # --republish so re-running a release that failed after this point
-          # succeeds instead of stopping on "version already exists". The tag
-          # guard in `verify` is what stops a genuinely duplicate release.
+          # succeeds instead of stopping on "version already exists".
           cloudsmith push deb \
             "${WORKSPACE}/${REPOSITORY}/any-distro/any-version" \
             "${DEB}" \
             --republish
-
-      # Makes a dry run useful: the archive and package are downloadable from the
-      # run, so both can be smoke-tested before anything is published. `error` on
-      # no files also proves the artifacts were actually produced.
-      - name: Keep the dry-run artifacts
-        if: needs.verify.outputs.publish != 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: afi-${{ matrix.target }}
-          path: |
-            afi-${{ matrix.target }}.tar.gz*
-            target/debian/*.deb
-          if-no-files-found: error

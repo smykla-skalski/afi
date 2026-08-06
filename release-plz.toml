@@ -1,0 +1,55 @@
+# Release automation. release-plz reads the conventional-commit history, decides
+# the next version, rewrites CHANGELOG.md, tags, and writes the release notes.
+#
+# Nothing here is a version number: the version lives in Cargo.toml and is
+# rewritten by the release job, so no human edits it and the manifest, the tag,
+# the changelog, and the Debian package can never disagree.
+
+[workspace]
+
+# The crates.io name `afi` belongs to an unrelated audio/video crate published in
+# 2017, so there is nothing to publish to. Releases are the GitHub release, its
+# tarballs, and the Debian packages in the apt repository.
+publish = false
+
+# afi exposes a lib target, but only so the binary and the tests can share code.
+# It is not an API anyone depends on, so a semver check on it would block
+# releases over changes that cannot affect a user.
+semver_check = false
+
+# In 0.x, semver leaves the meaning of a minor bump to the project. Treating
+# features as minor keeps the minor number as the release train and the patch
+# number for fixes, which is how this project has moved so far. Breaking changes
+# also land on minor, because below 1.0 nothing is promised stable.
+features_always_increment_minor = true
+
+# Only changes a user could notice cut a release. docs, chore, test, style, and
+# ci land on main and wait, then appear in the changelog of whatever release
+# comes next. Without this, a README typo would ship a version, rebuild every
+# Debian package, and push them to the apt repository.
+release_commits = "^(feat|fix|perf|refactor)"
+
+# The release notes are that version's changelog section, so the GitHub release
+# and CHANGELOG.md cannot drift apart.
+git_release_body = "{{ changelog }}"
+
+[changelog]
+protect_breaking_commits = true
+
+# Grouped by what a reader wants to find, not by the commit type alphabet.
+# `default_scope` is unset on purpose: a scope is mandatory in this repository,
+# so anything without one is a mistake worth seeing in the changelog.
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^chore\\(deps\\)", group = "Dependencies" },
+  # Housekeeping that never reaches a user. Skipped rather than grouped, so the
+  # changelog stays a description of the software instead of the repository.
+  { message = "^chore", skip = true },
+  { message = "^test", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^style", skip = true },
+]

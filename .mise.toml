@@ -61,6 +61,11 @@ run = "cargo install --path . --locked --force --bin afi"
 # release binaries only as an amd64 .deb.
 [tools]
 "cargo:cargo-deb" = "3.7.0"
+# release-plz decides the next version from the conventional-commit history,
+# rewrites CHANGELOG.md, tags, and writes the release notes. Pinned so a release
+# cannot change shape because upstream shipped while nobody was looking. It
+# installs from a prebuilt binary, so this one is quick.
+release-plz = "0.3.160"
 
 [tasks."deb:version"]
 description = "Print the Debian package version derived from Cargo.toml"

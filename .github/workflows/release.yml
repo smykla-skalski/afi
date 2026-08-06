@@ -1,0 +1,212 @@
+name: release
+
+# Manual only. Cutting a release is a deliberate act, so nothing here fires on a
+# push or a tag.
+#
+# The `pull_request` trigger is a self-test rather than a release path: when this
+# file changes, the whole pipeline runs with publishing disabled, so a broken
+# release workflow is caught in review instead of at release time. It is scoped
+# to this one file, so it costs nothing on ordinary pull requests.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, no leading v (e.g. 0.2.0). Must already match Cargo.toml."
+        required: true
+        type: string
+      dry_run:
+        description: "Build and verify everything, publish nothing."
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+
+permissions:
+  contents: read
+
+# Two releases at once would race on the tag. Never cancel a run in flight: it
+# may already have pushed a tag or created a release.
+concurrency:
+  group: release-${{ inputs.version || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Everything that could make a release wrong is rejected here, before a tag
+      # exists, because a pushed tag and a published release are both awkward to
+      # walk back.
+      - name: Plan the release
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          manifest_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          echo "Cargo.toml version: ${manifest_version}"
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            # Self-test: build whatever the manifest currently says, publish nothing.
+            {
+              echo "version=${manifest_version}"
+              echo "tag=v${manifest_version}"
+              echo "publish=false"
+            } >>"${GITHUB_OUTPUT}"
+            echo "Self-test run: building ${manifest_version}, publishing nothing."
+            exit 0
+          fi
+
+          version="${INPUT_VERSION#v}"
+
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'${version}' is not a semver version. Expected e.g. 0.2.0 or 1.0.0-rc.1."
+            exit 1
+          fi
+
+          if [[ "${version}" != "${manifest_version}" ]]; then
+            echo "::error::Cargo.toml says ${manifest_version}, but you asked to release ${version}. Bump Cargo.toml on ${DEFAULT_BRANCH} first."
+            exit 1
+          fi
+
+          if [[ "${REF_NAME}" != "${DEFAULT_BRANCH}" ]]; then
+            echo "::error::Releases must be cut from ${DEFAULT_BRANCH}, not ${REF_NAME}."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
+            echo "::error::Tag v${version} already exists. Bump the version rather than re-releasing."
+            exit 1
+          fi
+
+          if [[ "${INPUT_DRY_RUN}" == "true" ]]; then
+            publish=false
+          else
+            publish=true
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=v${version}"
+            echo "publish=${publish}"
+          } >>"${GITHUB_OUTPUT}"
+          echo "Releasing ${version}. publish=${publish}"
+
+      - name: Install mise
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+
+      # AGENTS.md routes every repository command through mise, and a release
+      # should not ship a binary the gate rejects.
+      - name: Run the repository gate
+        run: mise run check
+
+  tag:
+    name: Tag and release
+    needs: verify
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The upload action attaches assets to an existing release, so the tag and
+      # the release have to exist before the build matrix runs.
+      - name: Create and push the tag
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "${TAG}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: gh release create "${TAG}" --title "${TAG}" --generate-notes --verify-tag
+
+  upload:
+    name: ${{ matrix.target }}
+    needs:
+      - verify
+      - tag
+    # `tag` is skipped on a dry run, which must not skip the build.
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.tag.result != 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native build, no extra toolchain.
+          - target: x86_64-unknown-linux-gnu
+          # Static, so it runs on any distro regardless of glibc version.
+          - target: x86_64-unknown-linux-musl
+            packages: musl-tools
+          # cross carries the aarch64 musl toolchain in a container, which is
+          # less fragile than assembling one from apt.
+          - target: aarch64-unknown-linux-musl
+            build-tool: cross
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build dependencies
+        if: matrix.packages != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+
+      # Builds, archives, checksums, and attaches to the release in one step.
+      # With dry-run set it does everything except the upload, so the self-test
+      # exercises the real build path.
+      - name: Build and upload
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: afi
+          target: ${{ matrix.target }}
+          build-tool: ${{ matrix.build-tool }}
+          locked: true
+          checksum: sha256
+          tar: unix
+          zip: none
+          include: README.md,LICENSE,CHANGELOG.md
+          dry-run: ${{ needs.verify.outputs.publish != 'true' }}
+          dry-run-intended: true
+          # Unset on a dry run, where no tag exists yet.
+          ref: ${{ needs.verify.outputs.publish == 'true' && format('refs/tags/{0}', needs.verify.outputs.tag) || '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # Makes a dry run useful: the archive is downloadable from the run, so the
+      # binary can be smoke-tested before anything is published. `error` on no
+      # files also proves the archive was actually produced.
+      - name: Keep the dry-run archive
+        if: needs.verify.outputs.publish != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: afi-${{ matrix.target }}
+          path: afi-${{ matrix.target }}.tar.gz*
+          if-no-files-found: error

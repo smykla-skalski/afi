@@ -25,6 +25,9 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::path::PathBuf;
 
+mod meta;
+pub use meta::cli_meta;
+
 mod transcript;
 pub use transcript::print_transcript;
 

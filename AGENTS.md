@@ -43,7 +43,7 @@ Run validation in the session worktree. Do not run unrelated gates. Unit tests b
 - **Sessions:** atomic writes, modification-time ordering, short-ID resolution, and schema versioning.
 - **Risk:** command classification, approval gates, Esc-to-chat control flow, and project-root detection.
 - **Terminal UI:** Conway's Life spinner, multiline chatbox with bracketed paste, Esc interrupt watcher, and OSC terminal title.
-- **CLI:** session listing, resume and session flag resolution, and transcript printing.
+- **CLI:** session listing, resume and session flag resolution, transcript printing, and the `--help` and `--version` short-circuits, the latter carrying build metadata from `build.rs` plus the running executable's own digest.
 - **Memory:** developer-memory save, remember, and list operations backed by Markdown files.
 - **Metrics:** abbreviated token counts in the statistics footer.
 

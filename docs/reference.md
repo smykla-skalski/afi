@@ -15,6 +15,31 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary)) |
 | `--allowed-tools <a,b>`                     | only these tools may be called ([details](#tool-policy))    |
 | `--disallowed-tools <a,b>`                  | these tools may not be called ([details](#tool-policy))     |
+| `--version` / `-V`                          | print the version and build metadata ([details](#version-and-build-metadata)) |
+| `--help` / `-h`                             | print usage and exit                                        |
+
+`--help` and `--version` are answered before anything else, so neither depends on an env file loading or a source resolving, and both work as the last word of a command you were already typing. `--help` wins when both are given.
+
+## Version and build metadata
+
+`afi --version` identifies the exact binary, one `label: value` per line so it can be read with `grep` rather than a JSON parser:
+
+```
+afi 0.2.0
+  commit:      eab85680abce54c56e1ce07f0c51208288ab7f02
+  commit-date: 2026-08-06T17:25:27+02:00
+  target:      aarch64-apple-darwin
+  profile:     release
+  rustc:       1.97.1
+  executable:  /home/you/.cargo/bin/afi
+  sha256:      1cec5f3a9eb9663b5d9cce1d12d1b8c792cdc6f38d8d3504fd6203137a294be7
+```
+
+`sha256` is the digest of the executable itself, computed as it runs, so it matches `sha256sum $(command -v afi)` and can be recorded from a CI log to prove which binary produced a result. It is not the digest of the release tarball, which covers the archive rather than the file inside it.
+
+`commit` carries a `(dirty)` marker when tracked files had been modified relative to that commit, since otherwise the sha would describe code that was never compiled. `commit-date` is the commit's own date rather than a build timestamp: cargo caches build-script output, so a "built at" stamp would record when the script last ran and drift away from the binary beside it.
+
+Every field except the version and the profile is best-effort. A build with no git repository, or with no `git` binary at all - a release tarball, `cargo install` from a registry, a container holding only the sources - reports `unknown` instead of failing to compile. `AFI_BUILD_COMMIT` and `AFI_BUILD_COMMIT_DATE` pin those two fields at build time for exactly that case, and `GITHUB_SHA` is picked up automatically, so CI on the runner itself needs no wiring. A build inside a container has to pass the variable in, since neither the runner's environment nor its git repository is visible there by default.
 
 ## Environment variables
 

@@ -31,6 +31,14 @@ Every release attaches a tarball per target to the
 cargo install --path .
 ```
 
+### Which build is this
+
+```
+afi --version
+```
+
+Prints the version, the commit it was built from, the target triple, and the sha256 of the executable itself, so a binary can be identified from a CI log. See [version and build metadata](docs/reference.md#version-and-build-metadata).
+
 ## Quick start
 
 ```

@@ -154,6 +154,9 @@ fn an_unknown_name_in_the_env_var_also_refuses_to_start() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("reed_file"), "{stderr}");
+    // Naming only the flags would send someone debugging a CI failure hunting
+    // for a flag that was never passed.
+    assert!(stderr.contains("AFI_ALLOWED_TOOLS"), "{stderr}");
 }
 
 #[test]

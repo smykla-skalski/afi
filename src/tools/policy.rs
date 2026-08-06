@@ -95,13 +95,18 @@ impl ToolPolicy {
 
     /// The unknown-name refusal as a caller-printable line, or nothing when the
     /// policy is usable.
+    ///
+    /// Names both sources because the policy cannot tell them apart - the flags
+    /// are materialized into the env vars before parsing - and a CI failure where
+    /// only the variables were set should not send the reader hunting for a flag.
     #[must_use]
     pub fn unknown_names_message(&self) -> Option<String> {
         if self.unknown.is_empty() {
             return None;
         }
         Some(format!(
-            "unknown tool(s) in --allowed-tools/--disallowed-tools: {}",
+            "unknown tool(s) in --allowed-tools/--disallowed-tools or \
+             AFI_ALLOWED_TOOLS/AFI_DISALLOWED_TOOLS: {}",
             self.unknown.join(", ")
         ))
     }

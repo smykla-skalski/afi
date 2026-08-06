@@ -44,7 +44,6 @@ fn piped_repl_has_no_prompt_or_terminal_escapes() {
 fn stdin_prompt_file_stays_plain_and_session_free() {
     let home = TempDir::new().unwrap();
     let output = run_afi(&home, &["--prompt-file", "-"], "hello\n");
-    assert!(output.status.success());
     assert!(!output.stdout.contains(&b'\x1b'));
     assert!(!output.stderr.contains(&b'\x1b'));
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -53,6 +52,55 @@ fn stdin_prompt_file_stays_plain_and_session_free() {
         "unexpected stderr: {stderr:?}"
     );
     assert!(!home.path().join("sessions").exists());
+}
+
+#[test]
+fn a_one_shot_run_against_an_unreachable_server_exits_nonzero() {
+    // The base url points at a closed port, so this run cannot succeed. It used
+    // to exit 0 regardless, which let CI read a failed review as a passing one.
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &["--prompt-file", "-"], "hello\n");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a failed run must exit 1: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn the_json_summary_reports_a_failed_run_as_not_ok() {
+    let home = TempDir::new().unwrap();
+    let output = run_afi(
+        &home,
+        &["--prompt-file", "-", "--summary", "json"],
+        "hello\n",
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|l| l.starts_with('{'))
+        .unwrap_or_else(|| panic!("no json summary in stdout: {stdout:?}"));
+    let summary: serde_json::Value =
+        serde_json::from_str(line).expect("summary must be valid json");
+    assert_eq!(summary["ok"], false);
+    assert!(!summary["error"].is_null(), "a failure must name a reason");
+    assert_eq!(summary["model"], "test-model");
+    // No turn ever reported usage, so this stays null rather than a row of zeros.
+    assert_eq!(summary["usage"], serde_json::Value::Null);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn no_summary_is_printed_unless_asked_for() {
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &["--prompt-file", "-"], "hello\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.lines().any(|l| l.starts_with('{')),
+        "unexpected summary on stdout: {stdout:?}"
+    );
 }
 
 #[test]

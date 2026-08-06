@@ -96,15 +96,15 @@ fn styled_approval(rt: &Runtime) -> String {
 /// # Panics
 ///
 /// Panics when the process cannot initialize its Tokio runtime.
-pub fn run_repl(rt: &mut Runtime) {
+pub fn run_repl(rt: &mut Runtime) -> bool {
     let mut owned = rt.clone();
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
     if let Some(prompt_file) = owned.prompt_file.clone() {
         restore_prompt_resume(&mut owned);
         let mut ui = PlainUi::new();
-        runtime.block_on(run_one_shot_async(&prompt_file, &owned, &mut ui));
+        let ok = runtime.block_on(run_one_shot_async(&prompt_file, &owned, &mut ui));
         *rt = owned;
-        return;
+        return ok;
     }
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
         match runtime.block_on(tui::run(owned)) {
@@ -114,6 +114,8 @@ pub fn run_repl(rt: &mut Runtime) {
     } else {
         *rt = runtime.block_on(run_plain(owned));
     }
+    // An interactive session ending is not a failure.
+    true
 }
 
 /// Public one-shot helper. Output stays plain even when caller owns a TTY.
@@ -121,10 +123,11 @@ pub fn run_repl(rt: &mut Runtime) {
 /// # Panics
 ///
 /// Panics when the process cannot initialize its Tokio runtime.
-pub fn run_one_shot(prompt_file: &str, rt: &Runtime) {
+#[must_use]
+pub fn run_one_shot(prompt_file: &str, rt: &Runtime) -> bool {
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
     let mut ui = PlainUi::new();
-    runtime.block_on(run_one_shot_async(prompt_file, rt, &mut ui));
+    runtime.block_on(run_one_shot_async(prompt_file, rt, &mut ui))
 }
 
 async fn run_plain(rt: Runtime) -> Runtime {

@@ -19,7 +19,9 @@ use crate::model::recovery::recovery_sampling_opts;
 use crate::model::turn_finalize::finalize_turn;
 use crate::model::turn_stats::handle_reasoning_stall;
 use crate::model::turn_stream::{StreamAccumulator, StreamResult};
-use crate::model::{FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, ModelConfig, TURN_DONE, TURN_ESC};
+use crate::model::{
+    FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, ModelConfig, TURN_ESC, TURN_FAILED,
+};
 use crate::risk::RiskClassifier;
 use crate::term::{MessageKind, UserInterface};
 use crate::tools;
@@ -239,7 +241,9 @@ fn report_client_error(error: ClientError, source: &Source, ui: &mut dyn UserInt
         ClientError::Config(message) => message,
     };
     ui.message(MessageKind::Error, message);
-    TURN_DONE.to_string()
+    // Not TURN_DONE: the run failed, and reporting it as done is what made a
+    // one-shot exit 0 after printing an HTTP error.
+    TURN_FAILED.to_string()
 }
 
 fn interrupt_generation(

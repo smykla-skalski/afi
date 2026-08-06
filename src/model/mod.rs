@@ -16,6 +16,7 @@ pub mod turn_finalize;
 pub mod turn_loop;
 pub mod turn_stats;
 pub mod turn_stream;
+pub mod usage_totals;
 
 // --- turn status constants (match the Python TURN_* values) ---------------
 
@@ -26,6 +27,12 @@ pub const TURN_STREAM_CUT: &str = "stream_cut";
 pub const TURN_EMPTY: &str = "empty";
 pub const TURN_FORCE_FINAL: &str = "force_final";
 pub const TURN_STALL: &str = "stall";
+/// The request itself failed - unreachable server, HTTP error, bad config.
+///
+/// Terminal like `TURN_DONE`, but distinct from it so a caller can tell a failed
+/// run from a finished one. Client errors used to report `TURN_DONE`, which made
+/// a one-shot run exit 0 after printing an HTTP error.
+pub const TURN_FAILED: &str = "failed";
 
 // --- forced-final tool schema -----------------------------------------------
 

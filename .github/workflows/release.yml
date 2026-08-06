@@ -162,6 +162,12 @@ jobs:
           AFI_RELEASE_TAG: ${{ steps.plan.outputs.tag }}
         run: |
           set -euo pipefail
+          # Nothing to commit means a previous run already landed this bump and
+          # died before tagging. HEAD is that commit, which is what to tag.
+          if git diff --quiet -- Cargo.toml Cargo.lock CHANGELOG.md; then
+            echo "The bump for ${AFI_RELEASE_TAG} is already on main at $(git rev-parse HEAD)."
+            exit 0
+          fi
           oid="$(./scripts/commit-release.sh Cargo.toml Cargo.lock CHANGELOG.md)"
           echo "Committed ${oid} to main."
           # release-plz tags whatever is checked out, so move to the commit the
@@ -176,18 +182,24 @@ jobs:
       - name: Tag and create the release
         if: steps.plan.outputs.released == 'true'
         env:
-          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          # release-plz reads the release credential from GIT_TOKEN, not
+          # GITHUB_TOKEN, and refuses to create a release without it. Passing only
+          # GITHUB_TOKEN got as far as the bump commit and then failed with "git
+          # release not configured", leaving a version on main with no tag.
+          GIT_TOKEN: ${{ steps.token.outputs.token }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          args=()
+          # --forge is required alongside the token; release-plz infers it only
+          # when driven by its own action, and this calls the CLI directly.
+          args=(--forge github)
           # --allow-dirty goes with --dry-run: a dry run skips the commit, so the
           # bump is still sitting in the working tree and release-plz would
           # otherwise refuse to look at it.
           if [[ "${DRY_RUN}" == "true" ]]; then
             args+=(--dry-run --allow-dirty)
           fi
-          mise x -- release-plz release "${args[@]+"${args[@]}"}"
+          mise x -- release-plz release "${args[@]}"
 
   upload:
     name: ${{ matrix.target }}

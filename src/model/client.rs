@@ -26,8 +26,10 @@ use std::time::Duration;
 pub type ChatCompletionStream =
     Pin<Box<dyn Stream<Item = Result<StreamChunk, ClientError>> + Send>>;
 
+mod anthropic;
 mod sse;
-use sse::decoded_stream;
+use anthropic::TokenCache;
+use sse::{OpenAiDecoder, decoded_stream};
 
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
@@ -55,6 +57,10 @@ pub trait ChatClient: Send + Sync {
     ) -> Result<ChatCompletionStream, ClientError>;
 
     /// POST /v1/chat/completions without streaming. Returns the response text.
+    ///
+    /// `extra_body` is the source's own body keys, **unwrapped** - they are
+    /// merged at the top level of the request. Passing `{"extra_body": {...}}`
+    /// would send a literal `extra_body` key, which every backend ignores.
     async fn chat_completions(
         &self,
         source: &Source,
@@ -75,7 +81,8 @@ pub trait ChatClient: Send + Sync {
     async fn overrun_probe(&self, source: &Source, model: &str) -> Result<String, ClientError>;
 }
 
-/// Client errors: connection failures, HTTP errors, parse errors.
+/// Client errors: connection failures, HTTP errors, parse errors, and local
+/// misconfiguration caught before any request goes out.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("connection error: {0}")]
@@ -84,6 +91,20 @@ pub enum ClientError {
     Http { status: u16, body: String },
     #[error("parse error: {0}")]
     Parse(String),
+    /// Nothing was sent because the source is not usable as configured. Kept
+    /// separate so the REPL does not blame an unreachable server for what is
+    /// actually a missing credential.
+    #[error("{0}")]
+    Config(String),
+}
+
+/// The `OpenAI`-only probe endpoints have no Anthropic equivalent. None of them
+/// has a production caller today, so a clear error beats a half implementation.
+fn unsupported(source: &Source, what: &str) -> ClientError {
+    ClientError::Config(format!(
+        "{what} is not available on the Anthropic protocol (source {})",
+        source.name
+    ))
 }
 
 async fn limited_error_body(response: reqwest::Response) -> String {
@@ -104,8 +125,13 @@ async fn limited_error_body(response: reqwest::Response) -> String {
 }
 
 /// A reqwest-based implementation of `ChatClient`.
+///
+/// Speaks both wire protocols. Which one a request uses is resolved per call
+/// from `Source::protocol`, because `/source` can switch endpoints mid-session.
 pub struct ReqwestClient {
     client: reqwest::Client,
+    /// Federated Anthropic access tokens, cached until they near expiry.
+    tokens: TokenCache,
 }
 
 impl Default for ReqwestClient {
@@ -126,6 +152,7 @@ impl ReqwestClient {
             client: Client::builder()
                 .build()
                 .expect("failed to build reqwest client"),
+            tokens: TokenCache::default(),
         }
     }
 
@@ -164,6 +191,9 @@ impl ChatClient for ReqwestClient {
         &self,
         stream_req: StreamRequest<'_>,
     ) -> Result<ChatCompletionStream, ClientError> {
+        if stream_req.source.is_anthropic() {
+            return anthropic::stream(&self.client, &self.tokens, stream_req).await;
+        }
         let StreamRequest {
             source,
             model,
@@ -218,7 +248,10 @@ impl ChatClient for ReqwestClient {
             return Err(ClientError::Http { status, body });
         }
         let bytes = resp.bytes_stream().map_err(io::Error::other);
-        Ok(decoded_stream(StreamReader::new(bytes)))
+        Ok(decoded_stream(
+            StreamReader::new(bytes),
+            Box::new(OpenAiDecoder),
+        ))
     }
 
     async fn chat_completions(
@@ -229,6 +262,18 @@ impl ChatClient for ReqwestClient {
         timeout: u64,
         extra_body: Option<&Value>,
     ) -> Result<String, ClientError> {
+        if source.is_anthropic() {
+            return anthropic::complete(
+                &self.client,
+                &self.tokens,
+                source,
+                model,
+                messages,
+                timeout,
+                extra_body,
+            )
+            .await;
+        }
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -265,6 +310,9 @@ impl ChatClient for ReqwestClient {
     }
 
     async fn list_models(&self, source: &Source) -> Result<Value, ClientError> {
+        if source.is_anthropic() {
+            return Err(unsupported(source, "model listing"));
+        }
         let mut req = self
             .client
             .get(Self::models_url(source))
@@ -288,6 +336,9 @@ impl ChatClient for ReqwestClient {
     }
 
     async fn get_props(&self, source: &Source) -> Result<Value, ClientError> {
+        if source.is_anthropic() {
+            return Err(unsupported(source, "the llama.cpp /props probe"));
+        }
         let resp = self
             .client
             .get(Self::props_url(source))
@@ -306,6 +357,9 @@ impl ChatClient for ReqwestClient {
     }
 
     async fn overrun_probe(&self, source: &Source, model: &str) -> Result<String, ClientError> {
+        if source.is_anthropic() {
+            return Err(unsupported(source, "the context-overrun probe"));
+        }
         let body = serde_json::json!({
             "model": model,
             "messages": [{"role": "user", "content": "hi"}],

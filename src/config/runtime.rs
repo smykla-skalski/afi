@@ -7,7 +7,8 @@ use std::path::Path;
 use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
 use crate::envfile;
 
-use super::{Source, build_http_headers, parse_extra_body};
+use super::builtins::add_builtin_sources;
+use super::{Protocol, Source, build_http_headers, parse_extra_body};
 
 // --- Runtime -----------------------------------------------------------------
 
@@ -256,8 +257,7 @@ pub fn discover_sources<S: BuildHasher>(
     if sources.is_empty() {
         add_legacy_source(env, &mut sources, &mut order);
     }
-    add_together_source(env, &mut sources, &mut order);
-    add_openrouter_source(env, &mut sources, &mut order);
+    add_builtin_sources(env, &mut sources, &mut order);
 
     (sources, order)
 }
@@ -300,14 +300,13 @@ fn configured_source<S: BuildHasher>(
         env.get(&format!("{p}APP_NAME")).map(String::as_str),
         env.get(&format!("{p}APP_URL")).map(String::as_str),
     );
-    Some(Source::new(
-        name,
-        base_url,
-        api_key,
-        model,
-        extra_body,
-        http_headers,
-    ))
+    let protocol = env
+        .get(&format!("{p}PROTOCOL"))
+        .map_or(Protocol::default(), |raw| Protocol::from_env_value(raw));
+    Some(
+        Source::new(name, base_url, api_key, model, extra_body, http_headers)
+            .with_protocol(protocol),
+    )
 }
 
 /// Legacy single-source fallback from the bare `AFI_*` vars.
@@ -328,76 +327,4 @@ fn add_legacy_source<S: BuildHasher>(
     );
     sources.insert("local".to_string(), src);
     order.push("local".to_string());
-}
-
-/// Register the built-in `together` source when `AFI_TOGETHER_API_KEY` is set.
-fn add_together_source<S: BuildHasher>(
-    env: &HashMap<String, String, S>,
-    sources: &mut HashMap<String, Source>,
-    order: &mut Vec<String>,
-) {
-    if sources.contains_key("together") {
-        return;
-    }
-    let Some(key) =
-        envfile::resolve_api_key(env, env.get("AFI_TOGETHER_API_KEY").map(String::as_str))
-            .filter(|k| !k.is_empty())
-    else {
-        return;
-    };
-    let src = Source::new(
-        "together",
-        "https://api.together.xyz/v1".to_string(),
-        Some(key),
-        Some("zai-org/GLM-5.2".to_string()),
-        None,
-        None,
-    );
-    sources.insert("together".to_string(), src);
-    order.push("together".to_string());
-}
-
-/// Register the built-in `openrouter` source when `AFI_OPENROUTER_API_KEY` is set.
-fn add_openrouter_source<S: BuildHasher>(
-    env: &HashMap<String, String, S>,
-    sources: &mut HashMap<String, Source>,
-    order: &mut Vec<String>,
-) {
-    if sources.contains_key("openrouter") {
-        return;
-    }
-    let Some(key) =
-        envfile::resolve_api_key(env, env.get("AFI_OPENROUTER_API_KEY").map(String::as_str))
-            .filter(|k| !k.is_empty())
-    else {
-        return;
-    };
-    let or_body = parse_extra_body(
-        env.get("AFI_SOURCE_OPENROUTER_EXTRA_BODY")
-            .map(String::as_str),
-    )
-    .unwrap_or_else(|| {
-        serde_json::json!({
-            "provider": { "order": ["parasail/fp8"], "allow_fallbacks": false }
-        })
-    });
-    let app_name = env
-        .get("AFI_SOURCE_OPENROUTER_APP_NAME")
-        .map(String::as_str)
-        .or(Some("Afi"));
-    let app_url = env
-        .get("AFI_SOURCE_OPENROUTER_APP_URL")
-        .map(String::as_str)
-        .or(Some("https://github.com/smykla-skalski/afi"));
-    let headers = build_http_headers(app_name, app_url);
-    let src = Source::new(
-        "openrouter",
-        "https://openrouter.ai/api/v1".to_string(),
-        Some(key),
-        Some("z-ai/glm-5.2".to_string()),
-        Some(or_body),
-        headers,
-    );
-    sources.insert("openrouter".to_string(), src);
-    order.push("openrouter".to_string());
 }

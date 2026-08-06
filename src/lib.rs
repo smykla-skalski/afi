@@ -26,6 +26,7 @@ pub mod summary;
 pub mod term;
 pub mod tools;
 pub mod util;
+pub mod version;
 
 pub use approval::{ApprovalKind, ApprovalState, Level};
 pub use config::{Runtime, Source};

@@ -7,7 +7,7 @@ use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
 use std::process;
 
-use afi::cli::cli_sessions_with_style;
+use afi::cli::{cli_meta, cli_sessions_with_style};
 use afi::repl::run_repl;
 use afi::tools::known_tool_names;
 
@@ -19,8 +19,16 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".env")));
 
-    // `afi sessions [query]` short-circuits before the REPL - print and exit.
     let stdout = stdout();
+
+    // `--help` and `--version` answer first, so neither depends on an env file
+    // loading, a source resolving, or a tool policy being honourable. Ahead of
+    // `sessions` too, or `afi sessions --help` would search for a session.
+    if cli_meta(&args[1..], &mut stdout.lock()) {
+        return;
+    }
+
+    // `afi sessions [query]` short-circuits before the REPL - print and exit.
     let styled = stdout.is_terminal();
     if cli_sessions_with_style(&args[1..], &env_map, &mut stdout.lock(), styled) {
         return;

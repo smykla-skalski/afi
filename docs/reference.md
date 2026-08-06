@@ -13,6 +13,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--session <id>`                            | start a fresh run attached to a specific session id         |
 | `--prompt-file <path>` / `-f`               | non-interactive single-shot mode (reads from file or stdin) |
 | `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary)) |
+| `--summary-file <path>`                     | also write that summary to a path ([details](#writing-the-summary-to-a-file)) |
 | `--read-only`                               | deny every tool that can change anything ([details](#tool-policy)) |
 | `--allowed-tools <a,b>`                     | only these tools may be called ([details](#tool-policy))    |
 | `--disallowed-tools <a,b>`                  | these tools may not be called ([details](#tool-policy))     |
@@ -60,6 +61,7 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_READ_FILE_LINES`                        | default lines returned by `read_file` (default 400)                  |
 | `AFI_TOOL_RESULT_CHARS`                      | per-tool-result char cap (default 20000)                             |
 | `AFI_SUMMARY`                                | set to `json` for a run summary on stdout ([details](#run-summary))  |
+| `AFI_SUMMARY_FILE`                           | path to also write the run summary to ([details](#writing-the-summary-to-a-file)) |
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
 | `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
 | `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
@@ -135,6 +137,27 @@ A failed run sets `ok` to false, fills in `error`, and exits 1.
 Both non-interactive entry points report it: `--prompt-file`, and piped stdin with no prompt file. A piped session summarizes the whole session, so `answer` is its last assistant text and `usage` covers every request it made, `/compress` included; any turn failing outright makes the run fail, `/recover` included. An interactive TTY session prints nothing extra and always exits 0 — stdout there is the rendered interface, and a human is already reading it.
 
 **Human output moves to stderr** while `--summary json` is set, so stdout holds nothing but the JSON and pipes straight into a parser. Errors go to stderr either way.
+
+## Writing the summary to a file
+
+`--summary-file <path>` (or `AFI_SUMMARY_FILE=<path>`) writes the same object to a path:
+
+```bash
+afi -f review-prompt.txt --summary-file "$RUNNER_TEMP/afi-run.json"
+jq -r .answer "$RUNNER_TEMP/afi-run.json"
+```
+
+**It does not imply `--summary json`.** The two are asked for separately, and stdout keeps the rendered run unless you also ask for the JSON there. That is the reason to want a file: capturing stdout to get the summary costs the readable output, so a workflow that wants both ends up redirecting stdout to a file and reading the answer back out to print it, and the human view becomes a copy of the machine one. Pass both flags to get both channels; they render one object built once, so the file and the pipe cannot disagree about what the run did.
+
+It also takes stdout out of the failure surface. Anything touching the pipe between afi and the parser corrupts the only machine copy - a wrapper, a `tee`, a shell that prints one line of its own. A path is addressed rather than piped, so a caller can upload it as a build artifact without capturing anything.
+
+The file is written to a sibling temp file, flushed, and renamed into place, so a reader that opens the path sees either nothing or one complete object, never the prefix of one still being written. It holds the object and a trailing newline. A rerun replaces it. The temp name is unpredictable and is created with `O_EXCL`, so another local user who can write the directory - a shared runner workspace, a mounted volume - cannot plant a symlink there and have afi truncate and overwrite whatever it points at.
+
+**A path that cannot be written refuses to start**, exiting 2 with the reason, before the run is paid for. A missing directory, an unwritable one, a directory in place of the file, and a path ending in `/` are all found by touching the path at startup; the existing file, if there is one, is left alone until there is a whole object to replace it with. A write that fails anyway - the directory went away mid-run - reports on stderr and exits 1. Falling back to stdout would be no fallback at all, because a caller that named a path is not watching stdout for the answer.
+
+The flag is stricter than the variable about being given nothing. `--summary-file` with no value, with a blank value, or with something that looks like another flag exits 2 the way a broken [tool policy](#tool-policy) does. Both `afi --summary-file $OUT` and `afi --summary-file "$OUT"` with `OUT` unset are refused - the quoted form arrives as an empty argument rather than as no argument, and it is the form a CI script is written in. Either would otherwise exit 0 having written nothing to the path the next step is about to read, or leave a file from an earlier run standing as this run's result. A blank `AFI_SUMMARY_FILE` names no file and is not an error, since that is what an exported-but-unset shell variable looks like.
+
+The same entry points report it as `--summary json` does, and an interactive TTY session writes no file.
 
 ## Cost
 

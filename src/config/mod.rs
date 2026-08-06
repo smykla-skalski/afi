@@ -7,12 +7,14 @@ use std::collections::HashMap;
 use regex::Regex;
 use serde_json::{Map, Value};
 
+mod args;
 mod builtins;
 mod protocol;
 mod runtime;
 mod tools;
+pub use args::{ParsedArgs, parse_args};
 pub use protocol::{Federation, IdentitySource, NOOP_KEY, Protocol};
-pub use runtime::{ParsedArgs, Runtime, discover_sources, parse_args};
+pub use runtime::{Runtime, discover_sources};
 
 // --- HTTP headers for aggregators like OpenRouter ---------------------------
 

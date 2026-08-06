@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::commands::handle_slash_command;
+use super::report::report_run;
 use super::{CommandResult, header};
 use crate::approval::ApprovalState;
 use crate::cli::session_id_from_args;
@@ -22,7 +23,6 @@ use crate::model::{ModelConfig, TURN_FAILED};
 use crate::prompt::SYSTEM;
 use crate::risk::{HighDefaultClassifier, detect_project_root};
 use crate::sessions::{self, new_session_id, safe_title};
-use crate::summary::{RunSummary, final_answer};
 use crate::term::{MessageKind, UserInterface};
 
 /// Inputs for one model loop shared by REPL, one-shot, and `/recover`.
@@ -199,17 +199,16 @@ impl ReplCore {
         self.failed
     }
 
-    /// Print the run summary, if one was asked for.
-    pub(crate) fn print_summary(&self, elapsed: Duration) {
-        if !self.rt.summary.is_json() {
-            return;
-        }
-        print_json_summary(
+    /// Report the run, if a report was asked for. Returns whether it was
+    /// delivered - see `report_run`.
+    pub(crate) fn report(&self, elapsed: Duration, ui: &mut dyn UserInterface) -> bool {
+        report_run(
             &self.rt,
             &self.messages,
             self.failed.then_some("a model request failed"),
             elapsed,
-        );
+            ui,
+        )
     }
 
     fn auto_save(&mut self, input: &str) {
@@ -289,7 +288,8 @@ pub(crate) fn restore_prompt_resume(rt: &mut Runtime) {
 /// Run a single prompt and report whether it succeeded.
 ///
 /// The bool is the process exit status: a one-shot run that printed an HTTP error
-/// used to exit 0, so CI treated a failed run as a passing one.
+/// used to exit 0, so CI treated a failed run as a passing one. An undelivered
+/// summary counts the same way - the answer got no further than this process.
 pub(crate) async fn run_one_shot_async(
     prompt_file: &str,
     rt: &Runtime,
@@ -300,11 +300,9 @@ pub(crate) async fn run_one_shot_async(
     let started = Instant::now();
     let mut messages = Vec::new();
     let outcome = one_shot_run(prompt_file, rt, ui, &mut messages).await;
-    if rt.summary.is_json() {
-        let error = outcome.as_ref().err().map(String::as_str);
-        print_json_summary(rt, &messages, error, started.elapsed());
-    }
-    outcome.is_ok()
+    let error = outcome.as_ref().err().map(String::as_str);
+    let reported = report_run(rt, &messages, error, started.elapsed(), ui);
+    outcome.is_ok() && reported
 }
 
 /// The run itself. `Err` carries the reason, already reported to the ui.
@@ -345,30 +343,6 @@ async fn one_shot_run(
         return Err("the model request failed".to_string());
     }
     Ok(())
-}
-
-/// Print the machine-readable run summary on stdout.
-fn print_json_summary(rt: &Runtime, messages: &[Value], error: Option<&str>, elapsed: Duration) {
-    // One read of the accumulator, folded for the counts and priced for the
-    // cost. Reading it twice would let the two describe different instants.
-    let by_model = usage_totals::snapshot_by_model();
-    let run = RunSummary {
-        ok: error.is_none(),
-        error,
-        source: rt.active.as_deref(),
-        model: rt.model.as_deref(),
-        answer: final_answer(messages),
-        usage: usage_totals::total(&by_model),
-        // Priced per model, so a session that switched models mid-run is still
-        // billed at each one's own rates.
-        cost_usd: rt
-            .pricing
-            .as_ref()
-            .and_then(|pricing| pricing.run_cost_usd(&by_model)),
-        elapsed_secs: elapsed.as_secs_f64(),
-        tools: rt.tool_policy.permitted(),
-    };
-    println!("{}", run.to_json());
 }
 
 fn read_prompt_file(prompt_file: &str) -> Result<String, String> {

@@ -25,7 +25,7 @@ env:
 
 jobs:
   check:
-    name: Gate
+    name: gate
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     steps:
       - name: Check out

@@ -1,17 +1,15 @@
 # afi
 
-![afi](minion.png)
+![afi](afi.png)
 
 A no-nonsense coding agent that doesn't use 50K tokens of context to say "hello."
 
-`afi` is a Rust binary that talks to any OpenAI-compatible endpoint - a local llama.cpp / vLLM / SGLang server, or a remote API like Z.ai or OpenAI itself - and opens an agent that can read, write, edit, and run shell commands in your project.
+`afi` is a Rust binary that talks to any OpenAI-compatible endpoint - a local llama.cpp, vLLM, or SGLang server, or a remote API like Z.ai or OpenAI - and gives you an agent that reads, writes, edits, and runs shell commands in your project.
 
-This is a from-scratch Rust port of the original single-file Python [`minion.py`](https://github.com/Sentdex/minion). The CLI flags, env vars, slash commands, and behavior remain compatible except for the intentional interface and storage changes documented in [CHANGELOG.md](CHANGELOG.md):
+afi is a from-scratch Rust port of the original single-file Python [`minion.py`](https://github.com/Sentdex/minion). Flags, env vars, slash commands, and behavior match the original except for the changes in [CHANGELOG.md](CHANGELOG.md):
 
-- the traffic log moved from `llamacpp.log` next to the script to
-  `~/.afi/logs/traffic.jsonl`
-- the `~/.afi/sessions/<id>.json` schema is fresh and version-tagged;
-  sessions written by the Python version will not resume
+- the traffic log moved from `llamacpp.log` next to the script to `~/.afi/logs/traffic.jsonl`
+- the `~/.afi/sessions/<id>.json` schema is fresh and version-tagged. Sessions written by the Python version will not resume
 
 ## Quick start
 
@@ -19,7 +17,7 @@ This is a from-scratch Rust port of the original single-file Python [`minion.py`
 cargo install --path .
 export AFI_BASE_URL=http://localhost:8080/v1
 export AFI_MODEL=your-model-name
-export AFI_API_KEY=sk-noop        # any string; local servers ignore it
+export AFI_API_KEY=sk-noop        # any string - local servers ignore it
 afi
 ```
 
@@ -27,8 +25,7 @@ If `AFI_MODEL` is unset, afi asks the server what it's serving.
 
 ## Configuration
 
-afi reads configuration from environment variables, and automatically loads
-`~/.env` at startup (so you don't have to export things in every terminal).
+afi reads configuration from environment variables and loads `~/.env` automatically at startup, so you don't need to export variables in every terminal.
 
 ### Single source (simple)
 
@@ -63,7 +60,7 @@ Switch at runtime with `/source [name]`.
 | `--yolo`                      | start in never-prompt mode (auto-approve everything)      |
 | `--approval <all\|low\|medium\|high\|yolo>` | start with a non-default approval mode       |
 | `--source <name>`             | start on a specific source                                |
-| `--resume [target]`           | resume a saved session; bare = most recent                |
+| `--resume [target]`           | resume a saved session - bare = most recent                |
 | `--session <id>`              | start a fresh run attached to a specific session id       |
 | `--prompt-file <path>` / `-f` | non-interactive single-shot mode (reads from file or stdin) |
 
@@ -79,7 +76,7 @@ Switch at runtime with `/source [name]`.
 | `OPENROUTER_API_KEY` | auto-registers a built-in `openrouter` source |
 | `AFI_BACKEND` | set to `vllm` to disable llama.cpp-only recovery knobs |
 | `AFI_HOME` / `AFI_SESSIONS_DIR` | where session JSON files are stored |
-| `AFI_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; 0=off) |
+| `AFI_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85, 0=off) |
 | `AFI_MAX_TOKENS` | token cap for normal streaming requests (default 16000) |
 | `AFI_READ_FILE_LINES` | default lines returned by `read_file` (default 400) |
 | `AFI_TOOL_RESULT_CHARS` | per-tool-result char cap (default 20000) |
@@ -89,7 +86,7 @@ Switch at runtime with `/source [name]`.
 | subcommand          | what it does                                          |
 | ------------------- | ---------------------------------------------------- |
 | `afi`               | start the REPL                                        |
-| `afi sessions [query]` | list saved sessions, 10 per page (prints + exits); optional substring filter |
+| `afi sessions [query]` | list saved sessions, 10 per page (prints + exits) - optional substring filter |
 
 ## Commands
 
@@ -117,38 +114,31 @@ Switch at runtime with `/source [name]`.
 
 When stdin and stdout are terminals, afi runs one persistent fullscreen Ratatui interface. The header, Markdown conversation, activity indicator, multiline composer, footer, and approval dialog share one layout and one input loop.
 
-- **Enter** submits; **Alt+Enter** or **Ctrl+J** inserts a newline.
+- **Enter** submits. **Alt+Enter** or **Ctrl+J** inserts a newline.
 - **Paste** preserves indentation, blank lines, and trailing newlines across LF, CRLF, and CR line endings. The composer grows to five visible rows, then scrolls internally with a scrollbar.
-- **Up/Down** moves through multiline or wrapped input, then traverses prompt history at the boundary; moving past the newest entry restores the unfinished draft. **Alt+Up/Down** traverses history directly.
+- **Up/Down** moves through multiline or wrapped input, then traverses prompt history at the boundary. Moving past the newest entry restores the unfinished draft. **Alt+Up/Down** traverses history directly.
 - **PageUp/PageDown** or the **mouse wheel** scrolls the conversation or an open approval dialog. The conversation and overflowing composer each show their current position with a scrollbar.
-- **Esc** or **Ctrl+C** requests cancellation of active work; **Ctrl+C** exits while idle.
-- **Y** approves a requested action; **N**, **Enter**, or **Esc** denies or cancels it.
+- **Esc** or **Ctrl+C** cancels active work. **Ctrl+C** exits while idle.
+- **Y** approves a requested action. **N**, **Enter**, or **Esc** denies or cancels it.
 - Approval requests dim the inactive interface and use an opaque, high-contrast dialog. Long prompts show a scrollbar.
 
-When either stream is not a terminal, afi uses a plain line-oriented interface. It emits no terminal control sequences or prompts to redirected stdout, and non-interactive approval requests deny by default. `--prompt-file <path>` and `--prompt-file -` always use this plain interface.
+When either stream is not a terminal, afi falls back to a plain line-oriented interface. It emits no terminal control sequences or prompts to redirected stdout, and denies non-interactive approval requests by default. `--prompt-file <path>` and `--prompt-file -` always use this plain interface.
 
 ## Sessions (save / resume)
 
-Every chat is automatically saved to `~/.afi/sessions/` (override with
-`AFI_HOME` or `AFI_SESSIONS_DIR`) - one JSON file per session holding
-the exact message array the model sees plus a little metadata (id, title,
-description, source, cwd, timestamps). Files are plain JSON and
-human-readable/greppable.
+afi saves every chat automatically to `~/.afi/sessions/` (override with `AFI_HOME` or `AFI_SESSIONS_DIR`): one JSON file per session, holding the exact message array the model sees plus metadata (id, title, description, source, cwd, timestamps). Files are plain JSON, human-readable, and greppable.
 
 - **Auto-save** happens after every model turn
-- The **title** is auto-derived from your first message; set a custom one with
-  `/save <title>`
-- A **short id** (the 6-hex suffix) is shown in listings and accepted by
-  `--resume` / `/resume`
-- **Resume** a session at startup with `afi --resume <target>` or mid-chat
-  with `/resume <target>`
+- The **title** is auto-derived from your first message. Set a custom one with `/save <title>`
+- A **short id** (the 6-hex suffix) is shown in listings and accepted by `--resume` / `/resume`
+- **Resume** a session at startup with `afi --resume <target>` or mid-chat with `/resume <target>`
 
 ## Tools
 
 | tool        | args                  | notes                           |
 | ----------- | --------------------- | ------------------------------- |
 | `read_file` | `path`                |                                 |
-| `write_file`| `path`, `content`     | overwrites; requires confirmation |
+| `write_file`| `path`, `content`     | overwrites, requires confirmation |
 | `edit_file` | `path`, `old`, `new`  | `old` must match exactly once   |
 | `list_dir`  | `path`                |                                 |
 | `run_bash`  | `command`             | requires confirmation           |

@@ -158,13 +158,12 @@ fn a_large_executable_hashes_in_one_pass() {
     // every chunk would disagree with the one-shot digest below.
     let contents = vec![b'x'; 3 * 1024 * 1024];
     let path = file_with(&dir, "afi", &contents);
-    let expected = {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&contents);
-        format!("{:x}", hasher.finalize())
-    };
-    assert_eq!(file_digest(&path).expect("digest must compute"), expected);
+    // An independent oracle rather than sha2 hashing the same bytes again, so this
+    // still catches a chunking bug if the hashing crate itself is the thing at fault.
+    assert_eq!(
+        file_digest(&path).expect("digest must compute"),
+        "3bea8a9a07c1e8dcaa4c1b816815c35a29b4fb585ba6ecc70ea44840a794cfb3"
+    );
 }
 
 #[test]

@@ -32,6 +32,21 @@ if [ ! -x "$binary" ]; then
     exit 1
 fi
 
+# Refuse a binary older than the sources. Without this the script cheerfully
+# packages whatever happens to be sitting in target/, so a build that failed
+# earlier in the same command yields a package labelled with the new version and
+# holding the previous version's code -- and every downstream check passes,
+# because the package itself is perfectly well formed.
+stale=$(
+    find "$repo_root/src" "$repo_root/Cargo.toml" "$repo_root/Cargo.lock" \
+        -newer "$binary" -print 2>/dev/null | head -1
+)
+if [ -n "$stale" ]; then
+    printf '%s is older than %s\n' "$binary" "$stale" >&2
+    printf 'rebuild before packaging, or the .deb will carry stale code\n' >&2
+    exit 1
+fi
+
 if ! command -v cargo-deb >/dev/null 2>&1; then
     printf 'cargo-deb is not on PATH. Run "mise install" to provision it.\n' >&2
     exit 1

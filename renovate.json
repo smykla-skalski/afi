@@ -1,6 +1,70 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "automergeStrategy": "squash",
   "extends": [
-    "config:recommended"
-  ]
+    "config:best-practices",
+    ":semanticCommits",
+    ":gitSignOff",
+    ":dependencyDashboard",
+    ":label(dependencies)",
+    ":rebaseStalePrs",
+    ":enableVulnerabilityAlertsWithAdditionalLabel(kind/security)",
+    ":automergeMinor",
+    ":automergeDigest",
+    ":automergeLinters",
+    ":automergeTesters",
+    ":prConcurrentLimit20",
+    "helpers:pinGitHubActionDigests",
+    "security:openssf-scorecard",
+    "group:linters"
+  ],
+  "gitIgnoredAuthors": ["205507218+smyklot[bot]@users.noreply.github.com"],
+  "ignorePaths": [
+    "**/tmp/**",
+    ".github/workflows/smyklot-pr-commands.yml",
+    ".github/workflows/smyklot-poll.yml"
+  ],
+  "osvVulnerabilityAlerts": true,
+  "packageRules": [
+    {
+      "addLabels": ["area/ci"],
+      "commitMessageTopic": "{{depName}} action",
+      "description": "GitHub Actions dependencies",
+      "matchManagers": ["github-actions"],
+      "semanticCommitType": "ci"
+    },
+    {
+      "description": "Group Go tool dependencies",
+      "groupName": "Go tooling",
+      "matchDepTypes": ["require"],
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["/^golang.org/x/tools/"]
+    },
+    {
+      "description": [
+        " Group dependency bumps from selected GitHub sources into a single PR across managers",
+        " (e.g., mise and gomod) to avoid separate PRs per manager"
+      ],
+      "groupName": "{{{replace 'https://github\\.com/[a-z-]+/' '' sourceUrl}}}",
+      "matchSourceUrls": [
+        "https://github.com/{onsi/ginkgo,golangci/golangci-lint}"
+      ]
+    },
+    {
+      "description": "Group Go version updates from gomod and mise into a single PR",
+      "groupName": "go version",
+      "matchDepNames": ["go"],
+      "matchManagers": ["gomod", "mise"],
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "Smyklot action managed by sync-smyklot workflow",
+      "enabled": false,
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["smykla-skalski/smyklot"]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "automerge": true
+  }
 }

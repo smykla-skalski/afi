@@ -197,6 +197,15 @@ fn the_identity_token_never_reaches_the_summary() {
         "the summary leaked the identity token: {stdout}"
     );
     assert!(!stdout.contains("assertion"), "{stdout}");
+    // stderr too, though nothing here is meant to print it. The token reaches
+    // this process from `ANTHROPIC_IDENTITY_TOKEN`, and the exchange failure
+    // path prints a server's response body verbatim - a CI job's log is no
+    // better a place for a bearer credential than its artifacts are.
+    let stderr = String::from_utf8(output.stderr).expect("stderr must be utf-8");
+    assert!(
+        !stderr.contains(IDENTITY_TOKEN),
+        "the identity token reached the job log: {stderr}"
+    );
 }
 
 #[test]

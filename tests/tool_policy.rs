@@ -119,11 +119,44 @@ fn a_blank_value_is_not_a_lockout() {
 
 #[test]
 fn the_model_config_agrees_with_the_runtime() {
-    // Two parses of the same env. They must not be able to disagree, or the
-    // banner would advertise a policy the dispatcher does not enforce.
-    let rt = common::build(&["afi", "--allowed-tools", "read_file,list_dir"], &[]);
-    let config = ModelConfig::from_env(&rt.env);
-    assert_eq!(config.tool_policy, rt.tool_policy);
+    // The guard that failed. `Runtime::tool_policy` is what the banner and the
+    // summary report; `ModelConfig::tool_policy` is what the dispatcher enforces.
+    // Disagreement means afi advertises a restriction it does not apply, and that
+    // is exactly what shipped: this covered `--allowed-tools` alone, so
+    // `--read-only` reached the report and never the enforcement.
+    //
+    // Every input that can narrow a run belongs in this table.
+    type Case<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
+    let cases: [Case; 6] = [
+        (&["--allowed-tools", "read_file,list_dir"], &[]),
+        (&["--disallowed-tools", "run_bash"], &[]),
+        (&["--read-only"], &[]),
+        (&["--read-only", "--allowed-tools", "run_bash"], &[]),
+        (&[], &[("AFI_READ_ONLY", "1")]),
+        (
+            &[],
+            &[
+                ("AFI_DISALLOWED_TOOLS", "edit_file"),
+                ("AFI_READ_ONLY", "on"),
+            ],
+        ),
+    ];
+    for (flags, env) in cases {
+        let mut args = vec!["afi"];
+        args.extend_from_slice(flags);
+        let rt = common::build(&args, env);
+        assert_eq!(
+            ModelConfig::from_env(&rt.env).tool_policy,
+            rt.tool_policy,
+            "the enforced policy must match the reported one: {args:?} {env:?}"
+        );
+        // Without this, a case that resolved to no policy at all would agree on
+        // both sides and prove nothing.
+        assert!(
+            !rt.tool_policy.is_unrestricted(),
+            "{args:?} {env:?} must restrict something"
+        );
+    }
 }
 
 // --- the banner ----------------------------------------------------------------
@@ -246,10 +279,9 @@ fn the_json_summary_records_what_the_run_could_call() {
 #[test]
 fn the_read_only_flag_permits_only_the_readers() {
     let rt = common::build(&["afi", "--read-only"], &[]);
-    assert_eq!(
-        rt.tool_policy.permitted(),
-        ["read_file", "list_dir", "wait_background"]
-    );
+    // `wait_background` is absent because it unlinks the log it read. It is also
+    // unreachable in such a run: `run_bash` is denied, so nothing can background.
+    assert_eq!(rt.tool_policy.permitted(), ["read_file", "list_dir"]);
     assert!(rt.tool_policy.is_read_only());
 }
 

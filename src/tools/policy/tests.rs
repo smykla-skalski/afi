@@ -182,8 +182,17 @@ fn a_non_array_schema_value_passes_through_untouched() {
 #[test]
 fn read_only_denies_every_mutating_tool() {
     let policy = ToolPolicy::default().read_only();
-    assert_permits_exactly(&policy, &["read_file", "list_dir", "wait_background"]);
+    assert_permits_exactly(&policy, &["read_file", "list_dir"]);
     assert!(policy.is_read_only());
+}
+
+/// `wait_background` deletes the log it read, so the posture denies it even
+/// though the approval gate never asks about it. Two lists, two questions - and
+/// a test, because folding them back into one is the obvious tidy-up.
+#[test]
+fn read_only_denies_the_wait_the_approval_gate_ignores() {
+    assert!(!ToolPolicy::default().read_only().permits("wait_background"));
+    assert!(!is_mutating("wait_background"));
 }
 
 /// The property the posture exists for. An allow list cannot widen it, so a
@@ -210,27 +219,30 @@ fn read_only_is_idempotent() {
 fn read_only_is_not_unrestricted_and_describes_its_set() {
     let policy = ToolPolicy::default().read_only();
     assert!(!policy.is_unrestricted());
-    assert_eq!(policy.describe(), "read_file,list_dir,wait_background");
+    assert_eq!(policy.describe(), "read_file,list_dir");
 }
 
 /// `is_read_only` reports the effect, not how it was asked for.
 #[test]
-fn a_deny_list_naming_all_three_reads_as_read_only() {
-    let spelled = ToolPolicy::parse(None, Some("write_file,edit_file,run_bash"));
+fn a_deny_list_naming_the_same_tools_reads_as_read_only() {
+    let spelled = ToolPolicy::parse(None, Some("write_file,edit_file,run_bash,wait_background"));
     assert!(spelled.is_read_only());
-    assert!(!ToolPolicy::parse(None, Some("write_file,edit_file")).is_read_only());
+    // One short of the set is not the posture, however close it looks.
+    assert!(!ToolPolicy::parse(None, Some("write_file,edit_file,run_bash")).is_read_only());
     assert!(!ToolPolicy::default().is_read_only());
 }
 
-/// Every mutating tool has to be a real tool, or the posture would deny a name
-/// nothing dispatches and quietly permit the tool it was meant to stop.
+/// Every name either list holds has to be a real tool, or the posture would deny
+/// a name nothing dispatches and quietly permit the tool it was meant to stop.
 #[test]
-fn the_mutating_list_names_only_registered_tools() {
-    for name in MUTATING_TOOLS {
+fn the_policy_lists_name_only_registered_tools() {
+    for name in read_only_denied() {
         assert!(
             known_tool_names().contains(&name),
             "{name} is not a registered tool"
         );
+    }
+    for name in MUTATING_TOOLS {
         assert!(is_mutating(name));
     }
     assert!(!is_mutating("read_file"));
@@ -244,5 +256,5 @@ fn read_only_filters_the_advertised_schemas() {
     let policy = ToolPolicy::default().read_only();
     let filtered = policy.filter_tools(&TOOLS);
     let names = advertised(&filtered);
-    assert_eq!(names, ["read_file", "list_dir", "wait_background"]);
+    assert_eq!(names, ["read_file", "list_dir"]);
 }

@@ -185,9 +185,10 @@ impl ModelConfig {
             },
             autocompress_percent: env_u32(env, "AFI_AUTOCOMPRESS_PERCENT", 85).min(100),
             read_file_lines: env_int(env, "AFI_READ_FILE_LINES", 400),
-            tool_policy: ToolPolicy::parse(
+            tool_policy: ToolPolicy::from_env(
                 env.get("AFI_ALLOWED_TOOLS").map(String::as_str),
                 env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
+                env.get("AFI_READ_ONLY").map(String::as_str),
             ),
         }
     }

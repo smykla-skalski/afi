@@ -24,14 +24,31 @@ use serde_json::Value;
 
 use super::known_tool_names;
 
-/// The tools that can change something outside afi: the two writers, and the
-/// shell, which can do anything at all.
+/// The tools the approval gate confirms before dispatch: the two writers, and
+/// the shell, which can do anything at all.
 ///
-/// One list, two readers. The dispatch approval gate asks whether a call needs
-/// confirming, and [`ToolPolicy::read_only`] denies exactly this set. A
-/// second hard-coded copy in either place would eventually disagree with this
-/// one, and the way it would disagree is by leaving a mutating tool ungated.
+/// One list, so the gate and [`read_only_denied`] cannot drift. A second
+/// hard-coded copy in either place would eventually disagree with this one, and
+/// the way it would disagree is by leaving a mutating tool ungated.
 pub const MUTATING_TOOLS: [&str; 3] = ["write_file", "edit_file", "run_bash"];
+
+/// Denied by the read-only posture on top of [`MUTATING_TOOLS`], and by nothing
+/// else.
+///
+/// `wait_background` unlinks the log once the command has exited, so a posture
+/// promising that nothing changes has to deny it - but the approval gate must
+/// still not ask about it, because it only waits on a command whose own approval
+/// was already settled. Two questions, two lists.
+///
+/// Nothing useful is lost. Read-only denies `run_bash`, so a read-only run
+/// cannot start a background command, and the only logs left to wait on belong
+/// to some other run.
+const READ_ONLY_ONLY: [&str; 1] = ["wait_background"];
+
+/// Every tool the read-only posture denies.
+pub fn read_only_denied() -> impl Iterator<Item = &'static str> {
+    MUTATING_TOOLS.iter().chain(READ_ONLY_ONLY.iter()).copied()
+}
 
 /// Whether `name` can change anything outside afi.
 ///
@@ -66,8 +83,14 @@ impl ToolPolicy {
     ///
     /// A blank value counts as unset, matching how `Source::new` treats a blank
     /// credential - `AFI_ALLOWED_TOOLS=""` must not mean "no tools at all".
+    ///
+    /// Private, so [`Self::from_env`] is the only way to build a policy from
+    /// outside. A caller reaching for the two lists alone silently drops the
+    /// read-only posture, which is exactly the bug that shipped: the enforcing
+    /// policy called this, the reported one called `from_env`, and `--read-only`
+    /// went from a restriction to a banner line.
     #[must_use]
-    pub fn parse(allowed: Option<&str>, denied: Option<&str>) -> Self {
+    fn parse(allowed: Option<&str>, denied: Option<&str>) -> Self {
         let mut unknown = Vec::new();
         let allowed = split_names(allowed, &mut unknown);
         let denied = split_names(denied, &mut unknown).unwrap_or_default();
@@ -96,7 +119,7 @@ impl ToolPolicy {
         }
     }
 
-    /// Deny every mutating tool, whatever the allow list says.
+    /// Deny everything that can change anything, whatever the allow list says.
     ///
     /// Expressed as a denial rather than an allow list of the readers, because
     /// deny wins: `--read-only --allowed-tools run_bash` still blocks
@@ -110,17 +133,16 @@ impl ToolPolicy {
     /// unattended - that pairing only ever granted writes nobody wanted.
     #[must_use]
     pub fn read_only(mut self) -> Self {
-        self.denied
-            .extend(MUTATING_TOOLS.iter().map(|name| (*name).to_string()));
+        self.denied.extend(read_only_denied().map(str::to_string));
         self
     }
 
-    /// Whether this policy denies every mutating tool, for the banner and the
-    /// summary. True whether it came from `--read-only` or from a deny list that
-    /// happens to name all three.
+    /// Whether this policy denies everything that can change anything, for the
+    /// banner and the summary. True whether it came from `--read-only` or from a
+    /// deny list that happens to name the same tools.
     #[must_use]
     pub fn is_read_only(&self) -> bool {
-        MUTATING_TOOLS.iter().all(|name| !self.permits(name))
+        read_only_denied().all(|name| !self.permits(name))
     }
 
     /// Whether `name` may be dispatched.

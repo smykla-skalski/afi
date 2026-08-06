@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::config::{Runtime, Source};
 use crate::model::usage_totals;
-use crate::summary::{self, RunSummary, final_answer};
+use crate::summary::{self, RunError, RunSummary, final_answer};
 use crate::term::{MessageKind, UserInterface};
 
 /// Report the finished run wherever the caller asked for it. Returns whether the
@@ -23,7 +23,7 @@ use crate::term::{MessageKind, UserInterface};
 pub(crate) fn report_run(
     rt: &Runtime,
     messages: &[Value],
-    error: Option<&str>,
+    error: Option<&RunError>,
     elapsed: Duration,
     ui: &mut dyn UserInterface,
 ) -> bool {
@@ -50,7 +50,7 @@ pub(crate) fn report_run(
 fn build<'a>(
     rt: &'a Runtime,
     messages: &'a [Value],
-    error: Option<&'a str>,
+    error: Option<&'a RunError>,
     elapsed: Duration,
 ) -> RunSummary<'a> {
     // One read of the accumulator, folded for the counts and priced for the
@@ -58,7 +58,8 @@ fn build<'a>(
     let by_model = usage_totals::snapshot_by_model();
     RunSummary {
         ok: error.is_none(),
-        error,
+        error: error.map(|error| error.message.as_str()),
+        error_kind: error.map(|error| error.kind),
         source: rt.active.as_deref(),
         model: rt.model.as_deref(),
         answer: final_answer(messages),

@@ -133,6 +133,7 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
 {
   "ok": true,
   "error": null,
+  "error_kind": null,
   "source": "anthropic",
   "model": "claude-sonnet-5",
   "answer": "…the model's final text…",
@@ -168,9 +169,9 @@ Anthropic prices a 5-minute cache write differently from a 1-hour one and report
 
 `cost_usd` appears only when you supply rates - see [Cost](#cost) below.
 
-A failed run sets `ok` to false, fills in `error`, and exits 1.
+A failed run sets `ok` to false, fills in `error` and `error_kind`, and exits 1.
 
-Both non-interactive entry points report it: `--prompt-file`, and piped stdin with no prompt file. A piped session summarizes the whole session, so `answer` is its last assistant text and `usage` covers every request it made, `/compress` included; any turn failing outright makes the run fail, `/recover` included. An interactive TTY session prints nothing extra and always exits 0 — stdout there is the rendered interface, and a human is already reading it.
+Both non-interactive entry points report it: `--prompt-file`, and piped stdin with no prompt file. A piped session summarizes the whole session, so `answer` is its last assistant text and `usage` covers every request it made, `/compress` included; any turn failing outright makes the run fail, `/recover` included, and so do a turn with no active source to send it to and an input the session could not read. An interactive TTY session prints nothing extra and always exits 0 — stdout there is the rendered interface, and a human is already reading it.
 
 **Human output moves to stderr** while `--summary json` is set, so stdout holds nothing but the JSON and pipes straight into a parser. Errors go to stderr either way.
 
@@ -194,6 +195,42 @@ The file is written to a sibling temp file, flushed, and renamed into place, so 
 The flag is stricter than the variable about being given nothing. `--summary-file` with no value, with a blank value, or with something that looks like another flag exits 2 the way a broken [tool policy](#tool-policy) does. Both `afi --summary-file $OUT` and `afi --summary-file "$OUT"` with `OUT` unset are refused - the quoted form arrives as an empty argument rather than as no argument, and it is the form a CI script is written in. Either would otherwise exit 0 having written nothing to the path the next step is about to read, or leave a file from an earlier run standing as this run's result. A blank `AFI_SUMMARY_FILE` names no file and is not an error, since that is what an exported-but-unset shell variable looks like.
 
 The same entry points report it as `--summary json` does, and an interactive TTY session writes no file.
+## Failure kinds
+
+`error` is the sentence the run printed to stderr, so the log and the JSON never disagree: `HTTP 429: {"type":"error"...}`, or `can't reach http://localhost:8080/v1 - is the server up?`. `error_kind` is what a workflow branches on, and it comes from a closed set:
+
+| kind | what happened | retry? |
+| --- | --- | --- |
+| `auth` | a credential was missing, unusable, or refused (401, 403) | no |
+| `policy` | the tool policy could not be honoured, so the run never started | no |
+| `input` | the invocation was wrong - no prompt to read, no source configured, or a summary file that cannot be written | no |
+| `provider_http` | the provider answered with a failing status, or never answered | yes |
+| `provider_stream` | the response opened and then broke, or was not a stream at all | yes |
+| `timeout` | a request outlived its deadline (including 408 and 504) | yes |
+| `no_answer` | the model was reached and billed but never produced an answer | no |
+| `internal` | a bug in afi | no |
+
+Retry policy is why the field exists. A rate limit and a rejected credential arrive the same way, as a status and a body; telling them apart here costs nothing, while telling them apart from `error` means matching substrings of a sentence that changes wording, and failing silently when it does.
+
+A rate limit is `provider_http` rather than a kind of its own, since what a caller does about a 429 is what it does about capacity generally. `internal` is not worth retrying either, and it is the only kind that puts the bug on this side.
+
+**`no_answer` is the one failure where the request worked.** The model streamed, the tokens were billed, and nothing usable came out: it looped in its own reasoning until the rescue gave up, the forced final answered with a tool call or an empty string, or its tool arguments stayed unparseable. afi has already spent its own retries by then - the nudges, the recovery sampling, and the forced final are all upstream of this - so another identical attempt is a fresh roll of the dice rather than a fix. It reported `ok: true` before, and `answer` on one of these holds whatever the run last managed to say, which can be an earlier turn's text: `ok` is the gate for posting an answer, not `answer` being non-empty.
+
+**A federated identity exchange refused by its own rule is `auth`, not `provider_http`,** even though it arrives as an HTTP status - most often a 400 or 401 saying the OIDC claims did not satisfy the [federation rule](#anthropic), typically an unprotected ref. Retrying that spends the schedule to be refused in the same words. A 429 or a 5xx from the same endpoint stays retryable: that one is the endpoint having a bad minute rather than a verdict on the credential.
+
+`ok: false` always comes with both fields, so a consumer never has to fall back to reading the sentence. A session that failed more than once reports the first kind, since an auth failure repeats on every later turn and the first thing that went wrong is the reason the run did.
+
+```bash
+afi -f review.txt --summary-file summary.json
+case "$(jq -r .error_kind summary.json)" in
+  null)                                    post "$(jq -r .answer summary.json)" ;;
+  timeout|provider_http|provider_stream)   retry ;;
+  no_answer)                               retry_once_then_report ;;
+  *)                                       report "$(jq -r .error summary.json)" ;;
+esac
+```
+
+Exit codes are unchanged: 1 for a failed run, 2 for a refusal to start. A refusal reports itself wherever the summary was asked for, on stdout and in the file, with no `source`, no `model`, and an empty `tools` list - nothing ran, and naming the wide set a mistyped policy resolved to is exactly what refusing avoids. A [tool policy](#tool-policy) that cannot be honoured is `policy`; a [summary file](#writing-the-summary-to-a-file) that cannot be written is `input`, and that one is reported on stdout alone, since writing it is what failed.
 
 ## Cost
 

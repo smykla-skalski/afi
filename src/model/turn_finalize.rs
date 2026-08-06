@@ -1,6 +1,10 @@
 //! Post-stream finalization for a model turn: print the stats footer, then run
 //! the reasoning-stall / forced-final / tool-dispatch / empty-turn phases in
-//! order and return the first terminal TURN_* status.
+//! order and return the first terminal outcome.
+//!
+//! A phase that gives up returns a failure rather than `TURN_DONE`. Several of
+//! them used to report a turn as finished after printing an error and pushing no
+//! answer, which left a run that produced nothing exiting 0 with `ok: true`.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -21,15 +25,16 @@ use crate::model::turn_stats::{TurnStats, handle_reasoning_stall, print_stats_fo
 use crate::model::turn_stream::Accumulated;
 use crate::model::usage_totals;
 use crate::model::{
-    TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FAILED, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL,
+    TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL, TurnOutcome,
 };
+use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, StreamKind, UserInterface};
 use crate::tools::protocol::parse_text_calls;
 use tokio_util::sync::CancellationToken;
 
 /// Post-stream: print stats, then run the reasoning-stall / forced-final /
 /// tool-dispatch / empty-turn phases in order, returning the first terminal
-/// TURN_* status.
+/// outcome.
 pub(crate) fn finalize_turn(
     messages: &mut Vec<Value>,
     tr: &TurnRequest<'_>,
@@ -37,7 +42,7 @@ pub(crate) fn finalize_turn(
     t0: Instant,
     cancel: &CancellationToken,
     ui: &mut dyn UserInterface,
-) -> String {
+) -> TurnOutcome {
     let Accumulated {
         content_parts,
         tool_calls,
@@ -96,20 +101,21 @@ pub(crate) fn finalize_turn(
             ui,
         );
     }
-    if let Some(status) = forced_final_result(messages, tr, &tool_calls, &text, &finish_reasons, ui)
+    if let Some(outcome) =
+        forced_final_result(messages, tr, &tool_calls, &text, &finish_reasons, ui)
     {
-        return status;
+        return outcome;
     }
     let structured = StructuredTurn {
         tool_calls: &tool_calls,
         text: &text,
         thinking_blocks: &thinking_blocks,
     };
-    if let Some(status) = run_structured_tools(messages, tr, &structured, cancel, ui) {
-        return status;
+    if let Some(outcome) = run_structured_tools(messages, tr, &structured, cancel, ui) {
+        return outcome;
     }
-    if let Some(status) = run_text_tools(messages, tr, &text, cancel, ui) {
-        return status;
+    if let Some(outcome) = run_text_tools(messages, tr, &text, cancel, ui) {
+        return outcome;
     }
     handle_empty_or_final(messages, tr, &text, ui)
 }
@@ -122,7 +128,7 @@ fn forced_final_result(
     text: &str,
     finish_reasons: &[String],
     ui: &mut dyn UserInterface,
-) -> Option<String> {
+) -> Option<TurnOutcome> {
     if tr.forced_final && !tool_calls.is_empty() {
         return Some(emit_forced_final(messages, tool_calls, ui));
     }
@@ -135,17 +141,22 @@ fn forced_final_result(
             "FORCED FINAL HIT TOKEN LIMIT - saved partial".to_string(),
         );
         messages.push(json!({"role": "assistant", "content": format!("{}\n\n[Truncated by token limit before completion.]", text.trim_end())}));
-        return Some(TURN_DONE.to_string());
+        // A partial answer is still an answer, and it is labelled as partial in
+        // the transcript, so this one stays a finished turn.
+        return Some(TurnOutcome::new(TURN_DONE));
     }
     None
 }
 
-/// Extract the `final_answer` tool call (or report the miss). Always DONE.
+/// Extract the `final_answer` tool call, or report the miss as a failed turn.
+///
+/// Both misses used to report DONE, so a forced final that answered with nothing -
+/// or with another tool call - looked like a completed run.
 fn emit_forced_final(
     messages: &mut Vec<Value>,
     tool_calls: &HashMap<u32, ToolCallAccum>,
     ui: &mut dyn UserInterface,
-) -> String {
+) -> TurnOutcome {
     let ordered = order_tool_calls(tool_calls);
     for c in &ordered {
         if c.name.as_deref() != Some("final_answer") {
@@ -158,23 +169,32 @@ fn emit_forced_final(
             .unwrap_or("")
             .trim();
         if answer.is_empty() {
-            ui.message(MessageKind::Error, "FORCED FINAL ANSWER EMPTY".to_string());
-        } else {
-            ui.stream(StreamKind::Assistant, answer.to_string());
-            ui.finish_stream();
-            messages.push(json!({"role": "assistant", "content": answer}));
+            return no_answer("FORCED FINAL ANSWER EMPTY".to_string(), ui);
         }
-        return TURN_DONE.to_string();
+        ui.stream(StreamKind::Assistant, answer.to_string());
+        ui.finish_stream();
+        messages.push(json!({"role": "assistant", "content": answer}));
+        return TurnOutcome::new(TURN_DONE);
     }
     let names: Vec<&str> = ordered
         .iter()
         .map(|c| c.name.as_deref().unwrap_or("tool"))
         .collect();
-    ui.message(
-        MessageKind::Error,
+    no_answer(
         format!("FORCED FINAL FAILED - model emitted {}", names.join(", ")),
-    );
-    TURN_DONE.to_string()
+        ui,
+    )
+}
+
+/// Report a turn that ended with no answer to show.
+///
+/// The sentence goes to the ui and to the run summary at once, so the log and the
+/// JSON name the same thing. `answer` in the summary is whatever the run last
+/// managed to say, which on one of these is an earlier turn's text - `ok: false` is
+/// what keeps a workflow from posting it.
+fn no_answer(message: String, ui: &mut dyn UserInterface) -> TurnOutcome {
+    ui.message(MessageKind::Error, message.clone());
+    TurnOutcome::failed(RunError::new(message, ErrorKind::NoAnswer))
 }
 
 /// The parts of a streamed turn that a structured tool dispatch needs.
@@ -217,18 +237,19 @@ fn malformed_tool_retry(
     idx: usize,
     err: &str,
     ui: &mut dyn UserInterface,
-) -> String {
+) -> TurnOutcome {
     let name = ordered[idx].name.as_deref().unwrap_or("tool");
     let retry_limit = tr.config.malformed_stream_retry_limit;
     if tr.malformed_stream_cut_count >= retry_limit {
-        ui.message(
-            MessageKind::Error,
+        // Out of recoveries with nothing dispatched and nothing pushed: the turn
+        // produced no answer, whatever the model meant to call.
+        return no_answer(
             format!(
                 "malformed tool call after {} recoveries",
                 tr.malformed_stream_cut_count
             ),
+            ui,
         );
-        return TURN_DONE.to_string();
     }
     ui.message(
         MessageKind::Warning,
@@ -241,7 +262,7 @@ fn malformed_tool_retry(
         messages,
         "Your previous tool call had malformed JSON arguments. Retry with valid arguments.",
     );
-    TURN_STREAM_CUT.to_string()
+    TurnOutcome::new(TURN_STREAM_CUT)
 }
 
 /// Dispatch structured (`tool_calls`) calls, if any. `None` when there are none.
@@ -251,7 +272,7 @@ fn run_structured_tools(
     turn: &StructuredTurn<'_>,
     cancel: &CancellationToken,
     ui: &mut dyn UserInterface,
-) -> Option<String> {
+) -> Option<TurnOutcome> {
     if turn.tool_calls.is_empty() {
         return None;
     }
@@ -296,9 +317,9 @@ fn run_structured_tools(
                 format!("tool execution cancelled: {action}"),
             );
             messages.push(json!({"role": "user", "content": "[User pressed Esc to cancel tool execution. Acknowledge briefly and wait.]"}));
-            Some(TURN_ESC.to_string())
+            Some(TurnOutcome::new(TURN_ESC))
         }
-        ToolRunOutcome::Ran => Some(TURN_TOOL.to_string()),
+        ToolRunOutcome::Ran => Some(TurnOutcome::new(TURN_TOOL)),
     }
 }
 
@@ -309,7 +330,7 @@ fn run_text_tools(
     text: &str,
     cancel: &CancellationToken,
     ui: &mut dyn UserInterface,
-) -> Option<String> {
+) -> Option<TurnOutcome> {
     let calls = parse_text_calls(text);
     if calls.is_empty() {
         return None;
@@ -331,9 +352,9 @@ fn run_text_tools(
                 MessageKind::Warning,
                 format!("tool execution cancelled: {action}"),
             );
-            Some(TURN_ESC.to_string())
+            Some(TurnOutcome::new(TURN_ESC))
         }
-        ToolRunOutcome::Ran => Some(TURN_TOOL.to_string()),
+        ToolRunOutcome::Ran => Some(TurnOutcome::new(TURN_TOOL)),
     }
 }
 
@@ -343,10 +364,10 @@ fn handle_empty_or_final(
     tr: &TurnRequest<'_>,
     text: &str,
     ui: &mut dyn UserInterface,
-) -> String {
+) -> TurnOutcome {
     if !text.trim().is_empty() {
         messages.push(json!({"role": "assistant", "content": text}));
-        return TURN_DONE.to_string();
+        return TurnOutcome::new(TURN_DONE);
     }
     if !tr.forced_final
         && tr.config.empty_turn_retry_limit > 0
@@ -367,7 +388,7 @@ fn handle_empty_or_final(
             ),
         );
         nudge_current_user_turn(messages, EMPTY_TURN_NUDGE);
-        return TURN_EMPTY.to_string();
+        return TurnOutcome::new(TURN_EMPTY);
     }
     if !tr.forced_final && tr.config.empty_turn_retry_limit > 0 {
         ui.message(
@@ -375,20 +396,24 @@ fn handle_empty_or_final(
             "EMPTY TURN - forcing final".to_string(),
         );
         nudge_current_user_turn(messages, FORCED_FINAL_NUDGE);
-        return TURN_FORCE_FINAL.to_string();
+        return TurnOutcome::new(TURN_FORCE_FINAL);
     }
     if tr.forced_final {
-        // The last turn of the run produced no text and no tool call, so there
-        // is no answer to save. Reporting DONE is what let a one-shot exit 0
-        // with an empty `answer`, which reads downstream as "the model had
-        // nothing to say" rather than "afi never got anything". The usual cause
-        // is a `max_tokens` spent entirely on reasoning.
-        ui.message(
-            MessageKind::Error,
+        // The forced final is the last thing the run had to try, so there is no
+        // answer to save. Named separately from the case below because the cause
+        // is usually a `max_tokens` spent entirely on reasoning, which is
+        // something the caller can act on.
+        return no_answer(
             "FORCED FINAL RETURNED NO ANSWER - raise AFI_MAX_TOKENS, or lower the effort"
                 .to_string(),
+            ui,
         );
-        return TURN_FAILED.to_string();
     }
-    TURN_DONE.to_string()
+    // No text, no tool call, and no nudge left to spend: empty-turn retries are
+    // exhausted or switched off. Silent until now, which is how a run with
+    // nothing to show reported success.
+    no_answer(
+        "NO ANSWER - the turn produced no text and no tool call".to_string(),
+        ui,
+    )
 }

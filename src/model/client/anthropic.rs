@@ -25,7 +25,10 @@ use tokio_util::io::StreamReader;
 use std::io;
 
 use super::sse::decoded_stream;
-use super::{ChatCompletionStream, ClientError, ReqwestClient, StreamRequest, limited_error_body};
+use super::{
+    ChatCompletionStream, ClientError, ReqwestClient, StreamRequest, limited_error_body,
+    transport_error,
+};
 use crate::config::Source;
 use crate::model::stream::{NormalizedUsage, PromptTokensDetails, Usage, normalize_usage};
 use crate::model::usage_totals;
@@ -225,7 +228,7 @@ pub(super) async fn stream(
         .await?
         .send()
         .await
-        .map_err(|e| ClientError::Connection(e.to_string()))?;
+        .map_err(|e| transport_error(e.to_string(), &e))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
         return Err(ClientError::Http {
@@ -269,12 +272,12 @@ pub(super) async fn complete(
         .timeout(Duration::from_secs(timeout))
         .send()
         .await
-        .map_err(|e| ClientError::Connection(e.to_string()))?;
+        .map_err(|e| transport_error(e.to_string(), &e))?;
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|e| ClientError::Connection(e.to_string()))?;
+        .map_err(|e| transport_error(e.to_string(), &e))?;
     if !status.is_success() {
         return Err(ClientError::Http {
             status: status.as_u16(),

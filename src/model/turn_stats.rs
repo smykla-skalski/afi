@@ -8,9 +8,16 @@ use serde_json::Value;
 use crate::metrics::abbr;
 use crate::model::recovery::{FORCED_FINAL_NUDGE, nudge_current_user_turn};
 use crate::model::turn_dispatch::ToolCallAccum;
-use crate::model::{ModelConfig, TURN_DONE, TURN_FORCE_FINAL};
+use crate::model::{ModelConfig, TURN_FORCE_FINAL, TurnOutcome};
+use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
 
+/// The stall handler: nudge, force a final, or give up.
+///
+/// Giving up is a failed turn rather than a finished one. The model spent tokens
+/// in its scratchpad and emitted no answer, and reporting that as DONE left a run
+/// with nothing to say exiting 0 - or worse, reporting an earlier turn's text as
+/// its answer.
 pub(crate) fn handle_reasoning_stall(
     messages: &mut Vec<Value>,
     config: &ModelConfig,
@@ -19,24 +26,22 @@ pub(crate) fn handle_reasoning_stall(
     _reasoning_parts: &[String],
     forced_final: bool,
     ui: &mut dyn UserInterface,
-) -> String {
+) -> TurnOutcome {
     if forced_final {
-        ui.message(
-            MessageKind::Error,
+        return gave_up(
             format!(
                 "FORCED FINAL FAILED - {} reasoning chars",
                 abbr(chars as u64)
             ),
+            ui,
         );
-        return TURN_DONE.to_string();
     }
     let retry_limit = config.reasoning_only_retry_limit;
     if cut_count >= retry_limit {
-        ui.message(
-            MessageKind::Error,
+        return gave_up(
             format!("REASONING-ONLY RESCUE FAILED - gave up after {cut_count} stalls"),
+            ui,
         );
-        return TURN_DONE.to_string();
     }
     let is_last = cut_count == retry_limit - 1;
     if is_last {
@@ -50,7 +55,7 @@ pub(crate) fn handle_reasoning_stall(
             ),
         );
         nudge_current_user_turn(messages, FORCED_FINAL_NUDGE);
-        return TURN_FORCE_FINAL.to_string();
+        return TurnOutcome::new(TURN_FORCE_FINAL);
     }
     ui.message(
         MessageKind::Warning,
@@ -62,7 +67,14 @@ pub(crate) fn handle_reasoning_stall(
         ),
     );
     nudge_current_user_turn(messages, "Now act - emit a tool call now.");
-    TURN_FORCE_FINAL.to_string()
+    TurnOutcome::new(TURN_FORCE_FINAL)
+}
+
+/// Report a turn afi has stopped trying to rescue. The sentence goes to the ui and
+/// to the run summary at once, so a log line and the JSON name the same thing.
+fn gave_up(message: String, ui: &mut dyn UserInterface) -> TurnOutcome {
+    ui.message(MessageKind::Error, message.clone());
+    TurnOutcome::failed(RunError::new(message, ErrorKind::NoAnswer))
 }
 
 pub(crate) struct TurnStats<'a> {
@@ -108,3 +120,6 @@ pub(crate) fn print_stats_footer(stats: &TurnStats<'_>, ui: &mut dyn UserInterfa
         ui.message(MessageKind::Stats, format!("└ {:4.1}s wall", stats.elapsed));
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -35,6 +35,34 @@ fn run_afi(home: &TempDir, args: &[&str], input: &str) -> Output {
     child.wait_with_output().expect("afi must exit")
 }
 
+/// The same run with `AFI_ACTIVE` naming a source nobody defined - the shape a
+/// workflow takes when it sets the variable and forgets the `AFI_SOURCE_*` block.
+/// Nothing is active, so a turn has nowhere to go.
+fn run_afi_without_a_source(home: &TempDir, args: &[&str], input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_afi"))
+        .args(args)
+        .env_clear()
+        .env("AFI_HOME", home.path())
+        .env("HOME", home.path())
+        .env("AFI_ACTIVE", "never-configured")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("afi must start");
+    let write = child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes());
+    match write {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("input must write: {error}"),
+    }
+    child.wait_with_output().expect("afi must exit")
+}
+
 #[test]
 fn piped_repl_has_no_prompt_or_terminal_escapes() {
     let home = TempDir::new().unwrap();
@@ -88,7 +116,18 @@ fn the_json_summary_reports_a_failed_run_as_not_ok() {
     let summary: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("summary must be valid json");
     assert_eq!(summary["ok"], false);
-    assert!(!summary["error"].is_null(), "a failure must name a reason");
+    // The specific sentence, not a restatement that something went wrong: the
+    // reason used to live only on stderr, so a workflow reporting the JSON had
+    // nothing to report.
+    assert!(
+        summary["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("can't reach"),
+        "the reason must name the failure: {summary}"
+    );
+    // Nothing answered on port 9, which is the provider's end of the connection.
+    assert_eq!(summary["error_kind"], "provider_http");
     assert_eq!(summary["model"], "test-model");
     // No turn ever reported usage, so this stays null rather than a row of zeros.
     assert_eq!(summary["usage"], serde_json::Value::Null);
@@ -128,6 +167,70 @@ fn a_failing_recover_command_fails_the_run() {
     let summary: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("summary must be valid json");
     assert_eq!(summary["ok"], false, "a failed /recover must fail the run");
+    // The kind survives the slash-command path too, not only a plain prompt.
+    assert_eq!(summary["error_kind"], "provider_http");
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn a_turn_with_no_source_to_send_it_to_fails_the_run() {
+    // The turn never went anywhere. This used to print the error and exit 0 with
+    // ok:true, which told a workflow the review passed.
+    let home = TempDir::new().unwrap();
+    let output = run_afi_without_a_source(&home, &["--summary", "json"], "hello\n/quit\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("summary must be valid json");
+    assert_eq!(summary["ok"], false);
+    assert_eq!(summary["source"], serde_json::Value::Null);
+    // The invocation is what was wrong, and no request was made to blame.
+    assert_eq!(summary["error_kind"], "input");
+    assert!(
+        summary["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no active source"),
+        "the reason must name what is missing: {summary}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn an_input_the_session_cannot_read_fails_the_run() {
+    // A non-UTF-8 byte on stdin. Nothing was asked, so nothing was answered - and
+    // this used to end the loop quietly with ok:true and exit 0.
+    let home = TempDir::new().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_afi"))
+        .args(["--summary", "json"])
+        .env_clear()
+        .env("AFI_HOME", home.path())
+        .env("HOME", home.path())
+        .env("AFI_BASE_URL", "http://127.0.0.1:9/v1")
+        .env("AFI_MODEL", "test-model")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("afi must start");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(b"\xff\xfe\n")
+        .expect("the bytes must write");
+    let output = child.wait_with_output().expect("afi must exit");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("summary must be valid json");
+    assert_eq!(summary["ok"], false);
+    assert_eq!(summary["error_kind"], "input");
+    assert!(
+        summary["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("input error"),
+        "the reason must name the failure: {summary}"
+    );
     assert_eq!(output.status.code(), Some(1));
 }
 

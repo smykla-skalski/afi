@@ -12,8 +12,8 @@ use crate::config::Source;
 use crate::model::client::ChatClient;
 use crate::model::turn::{TurnRequest, model_turn};
 use crate::model::{
-    ModelConfig, TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FAILED, TURN_FORCE_FINAL, TURN_STREAM_CUT,
-    TURN_TOOL,
+    ModelConfig, TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL,
+    TurnOutcome,
 };
 use crate::risk::RiskClassifier;
 use crate::term::{MessageKind, UserInterface};
@@ -93,13 +93,14 @@ fn transition(status: &str, c: &mut TurnCounters) {
 
 /// The model turn loop: retries based on TURN_* status until DONE/ESC/FAILED.
 ///
-/// Returns the terminal status so a caller can tell a completed run from a failed
-/// one - a one-shot run turns that into its exit code.
+/// Returns the terminal outcome so a caller can tell a completed run from a failed
+/// one - a one-shot run turns that into its exit code, and the run summary reports
+/// the failure kind it carries.
 pub async fn run_model_turn_loop(
     messages: &mut Vec<Value>,
     lr: LoopRequest<'_>,
     ui: &mut dyn UserInterface,
-) -> String {
+) -> TurnOutcome {
     let max_turns: u32 = lr
         .env
         .get("AFI_MAX_MODEL_TURNS")
@@ -115,16 +116,16 @@ pub async fn run_model_turn_loop(
     };
 
     while steps < max_turns {
-        let status = model_turn(messages, build_request(&lr, &c, c.force_final), ui).await;
+        let outcome = model_turn(messages, build_request(&lr, &c, c.force_final), ui).await;
         c.force_final = false;
         c.recovery_sampling = false;
         // TURN_FAILED is terminal too. Retrying it would hammer a server that
         // just refused us, up to max_turns times.
-        if status == TURN_DONE || status == TURN_ESC || status == TURN_FAILED {
-            return status;
+        if outcome.status == TURN_DONE || outcome.status == TURN_ESC || outcome.is_failure() {
+            return outcome;
         }
         steps += 1;
-        transition(&status, &mut c);
+        transition(&outcome.status, &mut c);
     }
 
     if steps >= max_turns && !c.force_final {
@@ -134,5 +135,5 @@ pub async fn run_model_turn_loop(
         );
         return model_turn(messages, build_request(&lr, &c, true), ui).await;
     }
-    TURN_DONE.to_string()
+    TurnOutcome::new(TURN_DONE)
 }

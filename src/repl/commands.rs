@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
+use super::failure::RunFailure;
 use super::{TurnParams, header, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
 use crate::config::{Runtime, Source};
@@ -12,9 +13,10 @@ use crate::memory::{list_memories, remember_memories};
 use crate::model::client::{ChatClient, ReqwestClient};
 use crate::model::compress::COMPRESS_KEEP;
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
-use crate::model::{ModelConfig, TURN_FAILED};
+use crate::model::{ModelConfig, TurnOutcome};
 use crate::prompt::SYSTEM;
 use crate::sessions::{self, new_session_id, resolve_session};
+use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
 use MessageKind::{Error, Info, Warning};
 
@@ -48,10 +50,10 @@ pub(crate) async fn handle_slash_command(
     session_id: &mut String,
     env: &Env,
     ui: Ui<'_>,
-    // Set when a command runs a model turn that fails outright. `/recover` is one,
-    // so without this a session whose only failure came from `/recover` reported
-    // success and exited 0.
-    failed: &mut bool,
+    // Fed by any command that runs a model turn. `/recover` is one, so without
+    // this a session whose only failure came from `/recover` reported success and
+    // exited 0.
+    failure: &mut RunFailure,
 ) -> CommandResult {
     let input = input.trim();
     if !input.starts_with('/') {
@@ -73,7 +75,7 @@ pub(crate) async fn handle_slash_command(
         "/sessions" => cmd_sessions(session_id, env, ui),
         "/delete" => cmd_delete(session_id, arg, env, ui),
         "/memory" => cmd_memory(arg, env, ui),
-        "/recover" => *failed |= cmd_recover(rt, messages, arg, env, ui).await,
+        "/recover" => failure.record(&cmd_recover(rt, messages, arg, env, ui).await),
         "/autocompress" => cmd_autocompress(arg, env, ui),
         "/provider" => cmd_provider(rt, arg, ui),
         "/help" => print_help(ui),
@@ -340,14 +342,14 @@ fn print_memory_usage(ui: Ui<'_>) {
     say(ui, Info, MEMORY_USAGE);
 }
 
-/// Returns whether the recovery turn failed outright.
+/// Returns how the recovery turn ended.
 async fn cmd_recover(
     rt: &Runtime,
     messages: &mut Vec<Value>,
     arg: &str,
     env: &Env,
     ui: Ui<'_>,
-) -> bool {
+) -> TurnOutcome {
     let note = if arg.is_empty() {
         String::new()
     } else {
@@ -356,11 +358,12 @@ async fn cmd_recover(
     let nudge = format!("{MANUAL_RECOVERY_NUDGE}{note}");
     messages.push(json!({"role": "user", "content": format!("[Runtime note: {nudge}]")}));
     let (Some(source), Some(model)) = (rt.active_source(), rt.model.as_ref()) else {
-        say(ui, Error, "No active source");
-        return true;
+        let error = "no active source - use /source to select one";
+        say(ui, Error, error);
+        return TurnOutcome::failed(RunError::new(error, ErrorKind::Input));
     };
     let config = ModelConfig::from_env(env);
-    let status = run_turn_loop(
+    run_turn_loop(
         messages,
         &TurnParams {
             config: &config,
@@ -373,8 +376,7 @@ async fn cmd_recover(
         },
         ui,
     )
-    .await;
-    status == TURN_FAILED
+    .await
 }
 
 fn cmd_autocompress(arg: &str, env: &Env, ui: Ui<'_>) {

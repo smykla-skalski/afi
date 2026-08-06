@@ -71,8 +71,11 @@ where
             let step = match state.lines.next().await {
                 Some(Ok(line)) if line.is_empty() => decode_pending(&mut state),
                 Some(Ok(line)) => handle_line(&mut state, &line),
+                // The response opened, so this is a body that broke off rather
+                // than a server that was never there - and a caller retries the
+                // two on different terms.
                 Some(Err(LinesCodecError::Io(error))) => {
-                    DecodeStep::Error(ClientError::Connection(error.to_string()))
+                    DecodeStep::Error(ClientError::Stream(error.to_string()))
                 }
                 Some(Err(LinesCodecError::MaxLineLengthExceeded)) => DecodeStep::Error(
                     ClientError::Parse(format!("SSE line exceeds {MAX_SSE_LINE_BYTES} bytes")),

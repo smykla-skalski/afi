@@ -3,6 +3,7 @@
 
 mod commands;
 mod core;
+mod failure;
 mod report;
 mod tui;
 
@@ -15,6 +16,7 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::approval::Level;
 use crate::config::Runtime;
+use crate::summary::{ErrorKind, RunError};
 use crate::term::plain::PlainUi;
 
 use core::{ReplCore, restore_prompt_resume, run_one_shot_async};
@@ -180,7 +182,13 @@ async fn run_plain(rt: Runtime) -> (Runtime, bool) {
             }
             Err(error) => {
                 use crate::term::{MessageKind, UserInterface};
-                ui.message(MessageKind::Error, format!("input error: {error}"));
+                // The input never arrived, so nothing was asked and nothing was
+                // answered. This used to end the loop quietly and report ok:true,
+                // which told CI that a run reading a truncated or non-UTF-8 stream
+                // had passed.
+                let message = format!("input error: {error}");
+                ui.message(MessageKind::Error, message.clone());
+                core.record_error(RunError::new(message, ErrorKind::Input));
                 core.shutdown(&mut ui);
                 break;
             }

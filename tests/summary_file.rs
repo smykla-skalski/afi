@@ -277,3 +277,101 @@ fn a_value_that_is_another_flag_is_refused_rather_than_swallowed() {
     assert_eq!(output.status.code(), Some(2), "the run must not start");
     assert!(stderr_of(&output).contains("--summary-file needs a value"));
 }
+
+// --- the failure kind on each channel ------------------------------------------
+
+#[test]
+fn the_file_carries_the_failure_kind_too() {
+    // Both halves of a failure report have to reach the channel the caller chose.
+    // A workflow reading the file rather than the pipe branches on the same field.
+    let home = TempDir::new().unwrap();
+    let path = home.path().join("run.json");
+    let output = run_afi(
+        &home,
+        &[
+            "--prompt-file",
+            "-",
+            "--summary-file",
+            path.to_str().unwrap(),
+        ],
+        &[],
+        "hello\n",
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let summary = read_summary(&path);
+    assert_eq!(summary["ok"], false);
+    // Nothing answered on port 9, which is the provider's end of the connection.
+    assert_eq!(summary["error_kind"], "provider_http");
+    assert!(
+        summary["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("can't reach"),
+        "the file must name the failure: {summary}"
+    );
+}
+
+#[test]
+fn a_refused_policy_reaches_the_file_rather_than_leaving_the_last_run_standing() {
+    // The file is the only machine copy for a caller that left stdout to the human
+    // view. Writing nothing here would leave a previous run's object in place, so a
+    // workflow reading the path would act on a result this run never produced.
+    let home = TempDir::new().unwrap();
+    let path = home.path().join("run.json");
+    fs::write(&path, "{\"ok\":true,\"answer\":\"from an earlier run\"}\n").unwrap();
+    let output = run_afi(
+        &home,
+        &[
+            "--prompt-file",
+            "-",
+            "--summary-file",
+            path.to_str().unwrap(),
+            "--disallowed-tools",
+            "run_bsah",
+        ],
+        &[],
+        "hello\n",
+    );
+
+    assert_eq!(output.status.code(), Some(2), "the run must not start");
+    let summary = read_summary(&path);
+    assert_eq!(summary["ok"], false);
+    assert_eq!(summary["error_kind"], "policy");
+    assert!(
+        summary["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("run_bsah"),
+        "the reason must name the typo: {summary}"
+    );
+    assert_eq!(summary["answer"], "", "the earlier run must not survive");
+}
+
+#[test]
+fn a_path_the_run_refused_over_is_reported_on_stdout_alone() {
+    // The refusal is that the file cannot be written, so writing it is not the
+    // fallback. `input` rather than `policy`: the invocation named the path.
+    let home = TempDir::new().unwrap();
+    let path = home.path().join("no-such-dir/run.json");
+    let output = run_afi(
+        &home,
+        &[
+            "--prompt-file",
+            "-",
+            "--summary",
+            "json",
+            "--summary-file",
+            path.to_str().unwrap(),
+        ],
+        &[],
+        "hello\n",
+    );
+
+    assert_eq!(output.status.code(), Some(2), "the run must not start");
+    let stdout = stdout_of(&output);
+    let summary: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("stdout must parse whole: {error}, got {stdout:?}"));
+    assert_eq!(summary["error_kind"], "input");
+    assert!(!path.exists(), "the unwritable path must stay unwritten");
+}

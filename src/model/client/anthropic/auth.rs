@@ -14,12 +14,12 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::{Client, Url};
+use reqwest::{Client, StatusCode, Url};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::config::{Federation, IdentitySource, NOOP_KEY, Protocol, Source};
-use crate::model::client::ClientError;
+use crate::model::client::{ClientError, transport_error};
 
 /// Pinned API version. Anthropic requires this on every request.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -31,6 +31,9 @@ const FEDERATION_BETA: &str = "oauth-2025-04-20,oidc-federation-2026-04-01";
 const OIDC_AUDIENCE: &str = "https://api.anthropic.com";
 /// Re-mint this long before expiry so a request never races the deadline.
 const EXPIRY_SKEW: Duration = Duration::from_mins(1);
+/// How much of a refusal body to quote, matching what the REPL prints for an
+/// HTTP error: enough to name the cause, not enough to bury it.
+const BODY_PREVIEW_CHARS: usize = 200;
 
 /// Build the auth headers for an Anthropic request.
 ///
@@ -53,7 +56,7 @@ pub(super) fn auth_headers(
             // No `x-api-key`: see the module docs.
         }
         Protocol::OpenAiCompat => {
-            return Err(ClientError::Config(
+            return Err(ClientError::Internal(
                 "auth_headers called for a non-Anthropic source".to_string(),
             ));
         }
@@ -64,7 +67,7 @@ pub(super) fn auth_headers(
 /// Reject the placeholder and blanks before they reach the wire.
 fn usable(credential: &str, label: &str) -> Result<String, ClientError> {
     if credential.is_empty() || credential == NOOP_KEY {
-        return Err(ClientError::Config(format!(
+        return Err(ClientError::Auth(format!(
             "no Anthropic {label} configured. Set ANTHROPIC_API_KEY, \
              ANTHROPIC_AUTH_TOKEN, or the ANTHROPIC_FEDERATION_* variables."
         )));
@@ -75,14 +78,15 @@ fn usable(credential: &str, label: &str) -> Result<String, ClientError> {
 fn into_header_map(pairs: Vec<(&str, String)>) -> Result<HeaderMap, ClientError> {
     let mut map = HeaderMap::new();
     for (name, value) in pairs {
-        // Both failures are local input problems, not wire-parse failures: a
-        // credential copied with a trailing newline lands here. `Config` keeps
-        // the REPL from prefixing it as a parse error.
+        // Neither failure is a wire-parse problem, so neither is reported as one.
+        // The names are this module's own literals, so a rejected one is a bug;
+        // the values are credentials, and one copied with a trailing newline
+        // lands here.
         let header = HeaderName::try_from(name)
-            .map_err(|e| ClientError::Config(format!("bad header name {name}: {e}")))?;
+            .map_err(|e| ClientError::Internal(format!("bad header name {name}: {e}")))?;
         // The error deliberately omits the value: it may be a credential.
         let header_value = HeaderValue::try_from(value)
-            .map_err(|_| ClientError::Config(format!("invalid characters in {name} value")))?;
+            .map_err(|_| ClientError::Auth(format!("invalid characters in {name} value")))?;
         map.insert(header, header_value);
     }
     Ok(map)
@@ -116,7 +120,7 @@ impl TokenCache {
             Protocol::AnthropicFederated(federation) => {
                 self.federated(http, source, federation).await
             }
-            _ => Err(ClientError::Config(
+            _ => Err(ClientError::Internal(
                 "bearer token requested for a source that does not use one".to_string(),
             )),
         }
@@ -135,7 +139,7 @@ impl TokenCache {
         // `~/.env` or `AFI_ENV_FILE` is honoured - reading the process env here
         // would silently miss it.
         let identity = federation.identity.as_ref().ok_or_else(|| {
-            ClientError::Config(
+            ClientError::Auth(
                 "no OIDC identity token available for the federated Anthropic source. \
                  Set ANTHROPIC_IDENTITY_TOKEN or ANTHROPIC_IDENTITY_TOKEN_FILE, or run \
                  inside GitHub Actions with `permissions: id-token: write`."
@@ -175,7 +179,7 @@ async fn fetch_identity_token(
     let token = read_identity_token(http, source).await?;
     let token = token.trim();
     if token.is_empty() {
-        return Err(ClientError::Config(format!(
+        return Err(ClientError::Auth(format!(
             "the OIDC identity token from {} is empty",
             identity_label(source)
         )));
@@ -203,7 +207,7 @@ async fn read_identity_token(
     match source {
         IdentitySource::Literal(token) => Ok(token.clone()),
         IdentitySource::File(path) => fs::read_to_string(path).map_err(|e| {
-            ClientError::Config(format!(
+            ClientError::Auth(format!(
                 "cannot read ANTHROPIC_IDENTITY_TOKEN_FILE {}: {e}",
                 path.display()
             ))
@@ -223,7 +227,7 @@ async fn github_identity_token(
     // audience is appended rather than replacing the query string.
     let mut endpoint = Url::parse(url)
         // Supplied by the Actions runtime, so a malformed one is environmental.
-        .map_err(|e| ClientError::Config(format!("bad ACTIONS_ID_TOKEN_REQUEST_URL: {e}")))?;
+        .map_err(|e| ClientError::Auth(format!("bad ACTIONS_ID_TOKEN_REQUEST_URL: {e}")))?;
     endpoint
         .query_pairs_mut()
         .append_pair("audience", OIDC_AUDIENCE);
@@ -233,18 +237,20 @@ async fn github_identity_token(
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| ClientError::Connection(format!("OIDC token request failed: {e}")))?;
+        .map_err(|e| transport_error(format!("OIDC token request failed: {e}"), &e))?;
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|e| ClientError::Connection(e.to_string()))?;
+        .map_err(|e| transport_error(e.to_string(), &e))?;
     if !status.is_success() {
-        // The body here is an Actions error, not a credential.
-        return Err(ClientError::Http {
-            status: status.as_u16(),
-            body,
-        });
+        // The body here is an Actions error, not a credential. A 403 is the
+        // workflow lacking `permissions: id-token: write`.
+        return Err(refused_credential(
+            "the GitHub Actions OIDC endpoint refused the token request",
+            status,
+            &body,
+        ));
     }
     json_string_field(&body, "value")
         .ok_or_else(|| ClientError::Parse("OIDC response had no `value` field".to_string()))
@@ -276,21 +282,39 @@ async fn exchange(
         .json(&body)
         .send()
         .await
-        .map_err(|e| ClientError::Connection(format!("token exchange failed: {e}")))?;
+        .map_err(|e| transport_error(format!("token exchange failed: {e}"), &e))?;
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|e| ClientError::Connection(e.to_string()))?;
+        .map_err(|e| transport_error(e.to_string(), &e))?;
     if !status.is_success() {
-        // A 401 here almost always means the OIDC claims did not satisfy the
-        // federation rule - most often an unprotected ref.
-        return Err(ClientError::Http {
-            status: status.as_u16(),
-            body: text,
-        });
+        return Err(refused_credential(
+            "the Anthropic token exchange refused the identity token",
+            status,
+            &text,
+        ));
     }
     parse_minted(&text)
+}
+
+/// A failing status from an endpoint that hands out credentials.
+///
+/// A 4xx here is the credential itself being turned down - a 401 from the exchange
+/// almost always means the OIDC claims did not satisfy the federation rule, most
+/// often an unprotected ref - so it reports as an auth failure rather than as the
+/// transport error it arrives as. Retrying one spends the schedule to be refused
+/// in the same words. A 429 or a 5xx is the endpoint having a bad day and keeps
+/// its status, because that one is worth another attempt.
+fn refused_credential(what: &str, status: StatusCode, body: &str) -> ClientError {
+    if status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS {
+        let preview: String = body.chars().take(BODY_PREVIEW_CHARS).collect();
+        return ClientError::Auth(format!("{what} (HTTP {}): {preview}", status.as_u16()));
+    }
+    ClientError::Http {
+        status: status.as_u16(),
+        body: body.to_string(),
+    }
 }
 
 fn parse_minted(body: &str) -> Result<CachedToken, ClientError> {

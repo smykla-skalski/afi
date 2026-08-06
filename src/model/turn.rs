@@ -22,9 +22,10 @@ use crate::model::turn_finalize::finalize_turn;
 use crate::model::turn_stats::handle_reasoning_stall;
 use crate::model::turn_stream::{StreamAccumulator, StreamResult};
 use crate::model::{
-    FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, ModelConfig, TURN_ESC, TURN_FAILED,
+    FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, ModelConfig, TURN_ESC, TurnOutcome,
 };
 use crate::risk::RiskClassifier;
+use crate::summary::RunError;
 use crate::term::{MessageKind, UserInterface};
 use crate::tools;
 use tokio_util::sync::CancellationToken;
@@ -49,12 +50,13 @@ pub struct TurnRequest<'a> {
     pub recovery_sampling: bool,
 }
 
-/// Run one streamed model turn. Returns a TURN_* status string.
+/// Run one streamed model turn. Returns its TURN_* status, and the failure kind
+/// when that status is `TURN_FAILED`.
 pub async fn model_turn(
     messages: &mut Vec<Value>,
     tr: TurnRequest<'_>,
     ui: &mut dyn UserInterface,
-) -> String {
+) -> TurnOutcome {
     let t0 = Instant::now();
     let (tools_val, tool_choice, max_tokens) = request_params(&tr);
     let extra_body = merged_extra_body(&tr);
@@ -69,7 +71,7 @@ pub async fn model_turn(
     let cancel = ui.start_activity("thinking");
     let stream_result = match fetch_stream(&tr, messages, &params, &cancel, ui).await {
         Ok(result) => result,
-        Err(status) => return status,
+        Err(outcome) => return outcome,
     };
 
     let acc = match stream_result {
@@ -136,7 +138,7 @@ fn merged_extra_body(tr: &TurnRequest<'_>) -> Option<Value> {
 }
 
 /// Stream the completion, mapping transport errors and Esc-interrupt to a
-/// terminal TURN_* status (returned as `Err`).
+/// terminal outcome (returned as `Err`).
 struct FetchParams<'a> {
     tools: &'a Value,
     tool_choice: Option<&'a Value>,
@@ -151,7 +153,7 @@ async fn fetch_stream(
     params: &FetchParams<'_>,
     cancel: &CancellationToken,
     ui: &mut dyn UserInterface,
-) -> Result<StreamResult, String> {
+) -> Result<StreamResult, TurnOutcome> {
     let stream_req = StreamRequest {
         source: tr.source,
         model: tr.model,
@@ -172,7 +174,7 @@ async fn fetch_stream(
         Ok(stream) => stream,
         Err(StreamOpenError::Cancelled) => {
             ui.stop_activity();
-            return Err(interrupt_generation(messages, None, ui));
+            return Err(interrupt_generation(messages, None, ui).into());
         }
         Err(StreamOpenError::Client(error)) => {
             ui.stop_activity();
@@ -186,7 +188,7 @@ async fn fetch_stream(
             item = stream.next() => item,
             () = cancel.cancelled() => {
                 ui.stop_activity();
-                return Err(interrupt_generation(messages, Some(accumulator), ui));
+                return Err(interrupt_generation(messages, Some(accumulator), ui).into());
             }
         };
         let Some(item) = item else {
@@ -246,7 +248,15 @@ enum StreamOpenError {
     Client(ClientError),
 }
 
-fn report_client_error(error: ClientError, source: &Source, ui: &mut dyn UserInterface) -> String {
+fn report_client_error(
+    error: ClientError,
+    source: &Source,
+    ui: &mut dyn UserInterface,
+) -> TurnOutcome {
+    // Read before the match consumes the error. The sentence below goes to both
+    // places at once: stderr for whoever reads the log, and the run summary, so a
+    // failed CI job does not have to correlate the two.
+    let kind = error.kind();
     let message = match error {
         ClientError::Connection(message) => {
             format!(
@@ -254,19 +264,25 @@ fn report_client_error(error: ClientError, source: &Source, ui: &mut dyn UserInt
                 source.base_url
             )
         }
+        ClientError::Timeout(message) => {
+            format!("the request to {} timed out\n{message}", source.base_url)
+        }
         ClientError::Http { status, body } => {
             let body_short: String = body.chars().take(200).collect();
             format!("HTTP {status}: {body_short}")
         }
+        ClientError::Stream(message) => {
+            format!("the stream from {} broke off\n{message}", source.base_url)
+        }
         ClientError::Parse(message) => format!("parse error: {message}"),
-        // Already a complete, actionable sentence - no prefix, and no claim
-        // about the server, which was never contacted.
-        ClientError::Config(message) => message,
+        // Already complete, actionable sentences - no prefix, and nothing added
+        // about the server, which neither one is a verdict on.
+        ClientError::Auth(message) | ClientError::Internal(message) => message,
     };
-    ui.message(MessageKind::Error, message);
+    ui.message(MessageKind::Error, message.clone());
     // Not TURN_DONE: the run failed, and reporting it as done is what made a
     // one-shot exit 0 after printing an HTTP error.
-    TURN_FAILED.to_string()
+    TurnOutcome::failed(RunError::new(message, kind))
 }
 
 fn interrupt_generation(

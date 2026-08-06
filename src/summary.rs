@@ -6,6 +6,10 @@
 //! so it can be reported. Both are printed as one JSON object on stdout after
 //! the run, leaving the workflow to decide what to do with it.
 //!
+//! A failed run needs a third thing: which kind of failure it was, so the
+//! workflow can tell a retry worth making from a dead end without reading the
+//! log - see [`ErrorKind`].
+//!
 //! Cost is reported only when the caller supplied rates in `AFI_PRICES`. No
 //! provider here returns a cost figure, so a price table compiled into afi would
 //! be the only source of one, and a table nobody notices going stale reports a
@@ -143,14 +147,92 @@ fn reason(path: &Path, error: &io::Error) -> String {
     format!("can't write the run summary to {}: {error}", path.display())
 }
 
+/// Why a run failed, as a closed set a caller can branch on.
+///
+/// Retry policy is the reason this exists. A timeout, a rate limit, or a cut
+/// stream is worth another attempt; a rejected credential never is, and retrying
+/// that one burns the schedule to arrive at the same answer. Telling the two
+/// apart from `error` alone means substring-matching a sentence that changes
+/// wording, and failing silently when it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// A credential was missing, unusable, or refused. A federated identity
+    /// exchange turned down by its own rule lands here too, even though it
+    /// arrives as an HTTP status: retrying it cannot change the answer.
+    Auth,
+    /// The run refused to start because its tool policy could not be honoured.
+    Policy,
+    /// The invocation itself was wrong - no prompt to read, or no source
+    /// configured to send it to.
+    Input,
+    /// The provider answered with a failing status, or never answered at all. A
+    /// rate limit is here rather than in its own kind, since what a caller does
+    /// about one is what it does about capacity generally.
+    ProviderHttp,
+    /// The response opened and then broke: a stream cut mid-answer, or bytes afi
+    /// could not decode as one.
+    ProviderStream,
+    /// A request outlived its deadline.
+    Timeout,
+    /// The model was reached, and billed for, but never produced an answer: it
+    /// looped in its own reasoning, or the forced final came back empty. afi has
+    /// already spent its own retries by the time this is reported.
+    NoAnswer,
+    /// A bug in afi. Nothing a caller can do about it but report it.
+    Internal,
+}
+
+impl ErrorKind {
+    /// The wire value. Stable: callers branch on these strings.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auth => "auth",
+            Self::Policy => "policy",
+            Self::Input => "input",
+            Self::ProviderHttp => "provider_http",
+            Self::ProviderStream => "provider_stream",
+            Self::Timeout => "timeout",
+            Self::NoAnswer => "no_answer",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+/// What a failed run reports: the sentence whoever reads the log needs, and the
+/// closed-set kind a caller branches on.
+///
+/// The two travel together because they describe one failure. Reporting a kind
+/// without the sentence would leave a workflow able to decide but unable to say
+/// why, and the sentence without the kind is where this started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunError {
+    pub message: String,
+    pub kind: ErrorKind,
+}
+
+impl RunError {
+    #[must_use]
+    pub fn new(message: impl Into<String>, kind: ErrorKind) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+        }
+    }
+}
+
 /// Everything the summary reports on.
 #[derive(Debug, Clone)]
 pub struct RunSummary<'a> {
     /// False when the run failed, so a consumer never reads a partial answer as
     /// a finished one.
     pub ok: bool,
-    /// Present only on failure.
+    /// Present only on failure, and the same sentence the run printed to stderr,
+    /// so a log line and the JSON never disagree about what happened.
     pub error: Option<&'a str>,
+    /// Which kind of failure it was. Set whenever `error` is, so a caller that
+    /// branches on the kind never has to fall back to reading the sentence.
+    pub error_kind: Option<ErrorKind>,
     pub source: Option<&'a str>,
     pub model: Option<&'a str>,
     /// The last assistant text of the run - the answer a review flow posts.
@@ -172,7 +254,35 @@ pub struct RunSummary<'a> {
     pub effort: Option<&'a str>,
 }
 
-impl RunSummary<'_> {
+impl<'a> RunSummary<'a> {
+    /// The summary for a run that refused to start.
+    ///
+    /// Nothing ran, so there is nothing to report but the reason: no answer, no
+    /// usage, and an empty `tools` list rather than the wide set an unhonourable
+    /// policy resolved to - publishing that set is exactly what refusing avoids.
+    ///
+    /// The kind comes from the caller because the two refusals differ: a policy
+    /// that cannot be honoured is `Policy`, and a summary file that cannot be
+    /// written is `Input`.
+    #[must_use]
+    pub fn refused(error: &'a str, kind: ErrorKind) -> Self {
+        Self {
+            ok: false,
+            error: Some(error),
+            error_kind: Some(kind),
+            source: None,
+            model: None,
+            answer: "",
+            usage: UsageTotals::default(),
+            cost_usd: None,
+            elapsed_secs: 0.0,
+            tools: Vec::new(),
+            // No request was ever sent, so no effort was carried. Reporting the
+            // resolved level here would describe a run that did not happen.
+            effort: None,
+        }
+    }
+
     /// Render as JSON.
     ///
     /// `usage` is null rather than a zeroed object when no request reported any,
@@ -183,6 +293,7 @@ impl RunSummary<'_> {
         json!({
             "ok": self.ok,
             "error": self.error,
+            "error_kind": self.error_kind.map(ErrorKind::as_str),
             "source": self.source,
             "model": self.model,
             "answer": self.answer,

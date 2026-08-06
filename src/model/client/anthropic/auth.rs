@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 
 use crate::config::{Federation, IdentitySource, NOOP_KEY, Protocol, Source};
 use crate::model::client::{BODY_PREVIEW_CHARS, ClientError, transport_error, transport_error_at};
+use crate::summary::RunAuth;
 
 /// Pinned API version. Anthropic requires this on every request.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -31,6 +32,42 @@ const FEDERATION_BETA: &str = "oauth-2025-04-20,oidc-federation-2026-04-01";
 const OIDC_AUDIENCE: &str = "https://api.anthropic.com";
 /// Re-mint this long before expiry so a request never races the deadline.
 const EXPIRY_SKEW: Duration = Duration::from_mins(1);
+
+/// A static key, whichever header carries it.
+const MODE_API_KEY: &str = "api_key";
+/// A bearer token minted elsewhere and handed to afi.
+const MODE_OAUTH: &str = "oauth";
+/// A bearer token afi minted itself, through [`exchange`].
+const MODE_FEDERATED: &str = "federated";
+
+/// Describe the credential a request on this protocol uses, for the run summary.
+///
+/// Built here rather than in `summary.rs` because the identifiers it reports are
+/// exactly the non-secret ones [`exchange`] puts in the grant: an id that stops
+/// being part of the exchange stops being part of the report. The assertion and
+/// the minted token are not among them and never may be - see [`RunAuth`].
+///
+/// The ids are what the exchange *sent*, not what the response was scoped to.
+/// Anthropic returns a token and nothing to attribute it with, so a rule that
+/// resolves a single workspace server-side leaves `workspace_id` absent here.
+///
+/// `OpenAiCompat` reports `api_key` too: its credential is a static key out of
+/// the environment just as `AnthropicApiKey`'s is, and only the header differs.
+pub(crate) fn run_auth(protocol: &Protocol) -> RunAuth<'_> {
+    match protocol {
+        Protocol::AnthropicFederated(federation) => RunAuth {
+            mode: MODE_FEDERATED,
+            organization_id: Some(&federation.organization_id),
+            service_account_id: Some(&federation.service_account_id),
+            // Left out of the grant when the rule covers one workspace, and left
+            // out of the report for the same reason.
+            workspace_id: federation.workspace_id.as_deref(),
+            federation_rule_id: Some(&federation.rule_id),
+        },
+        Protocol::AnthropicOAuth => RunAuth::mode_only(MODE_OAUTH),
+        Protocol::AnthropicApiKey | Protocol::OpenAiCompat => RunAuth::mode_only(MODE_API_KEY),
+    }
+}
 
 /// Build the auth headers for an Anthropic request.
 ///

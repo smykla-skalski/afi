@@ -26,7 +26,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Number, Value, json};
+use serde_json::{Map, Number, Value, json};
 
 use crate::atomic;
 use crate::model::usage_totals::{RefusedToolCalls, UsageTotals};
@@ -221,6 +221,45 @@ impl RunError {
     }
 }
 
+/// Which credential a run authenticated with, in identifiers safe to publish.
+///
+/// Reported for the reason `tools` is: an audit should read a run's posture out
+/// of its own output instead of trusting that the workflow passed the flags it
+/// claims. Credential mode is the other half of that posture. It matters most
+/// once `cost_usd` is on - the next question after what a run cost is whose
+/// budget paid, and a job that quietly fell back to a personal key otherwise
+/// produces a summary indistinguishable from one that used the intended service
+/// account.
+///
+/// Identifiers only. The minted access token and the OIDC assertion must never
+/// land here: a summary gets uploaded as a build artifact, and artifacts carry
+/// no masking, so a value redacted in a log is plain text there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunAuth<'a> {
+    /// `api_key`, `oauth`, or `federated`.
+    pub mode: &'static str,
+    pub organization_id: Option<&'a str>,
+    pub service_account_id: Option<&'a str>,
+    /// Only present when the federation rule spans workspaces.
+    pub workspace_id: Option<&'a str>,
+    pub federation_rule_id: Option<&'a str>,
+}
+
+impl RunAuth<'_> {
+    /// A mode with nothing behind it to name. A static key identifies no
+    /// organization, service account, or workspace of its own.
+    #[must_use]
+    pub fn mode_only(mode: &'static str) -> Self {
+        Self {
+            mode,
+            organization_id: None,
+            service_account_id: None,
+            workspace_id: None,
+            federation_rule_id: None,
+        }
+    }
+}
+
 /// Everything the summary reports on.
 #[derive(Debug, Clone)]
 pub struct RunSummary<'a> {
@@ -263,6 +302,9 @@ pub struct RunSummary<'a> {
     /// refusals". A tool that ran and failed is not counted - that is an error, and
     /// folding the two together would lose the signal.
     pub refused_tool_calls: RefusedToolCalls,
+    /// The credential the run billed. `None` only when the run had no source at
+    /// all, which is the same run that reports a null `source`.
+    pub auth: Option<RunAuth<'a>>,
 }
 
 impl<'a> RunSummary<'a> {
@@ -297,6 +339,9 @@ impl<'a> RunSummary<'a> {
             // run that never started stays distinguishable from one that ran and was
             // refused nothing.
             refused_tool_calls: RefusedToolCalls::default(),
+            // No credential to name, for the reason `source` is none: the run was
+            // refused before it resolved one.
+            auth: None,
         }
     }
 
@@ -319,7 +364,32 @@ impl<'a> RunSummary<'a> {
             "elapsed_secs": round_millis(self.elapsed_secs),
             "tools": self.tools,
             "effort": self.effort,
+            "auth": self.auth_json(),
         })
+    }
+
+    /// The `auth` block: the mode, then whichever identifiers that mode has.
+    ///
+    /// An identifier the credential does not carry is left out rather than
+    /// emitted blank, so `auth.workspace_id` is either a workspace or nothing -
+    /// an empty string would read as one afi failed to capture.
+    fn auth_json(&self) -> Value {
+        let Some(auth) = self.auth else {
+            return Value::Null;
+        };
+        let mut fields = Map::new();
+        fields.insert("mode".to_string(), Value::from(auth.mode));
+        for (key, id) in [
+            ("organization_id", auth.organization_id),
+            ("service_account_id", auth.service_account_id),
+            ("workspace_id", auth.workspace_id),
+            ("federation_rule_id", auth.federation_rule_id),
+        ] {
+            if let Some(id) = id {
+                fields.insert(key.to_string(), Value::from(id));
+            }
+        }
+        Value::Object(fields)
     }
 
     fn usage_json(&self) -> Value {

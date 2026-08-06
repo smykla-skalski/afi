@@ -1,14 +1,18 @@
 use super::*;
 use crate::summary::ErrorKind;
 
-fn federated_protocol() -> Protocol {
-    Protocol::AnthropicFederated(Box::new(Federation {
+fn federation() -> Federation {
+    Federation {
         rule_id: "fdrl_1".to_string(),
         organization_id: "org".to_string(),
         service_account_id: "svac".to_string(),
         workspace_id: None,
         identity: None,
-    }))
+    }
+}
+
+fn federated_protocol() -> Protocol {
+    Protocol::AnthropicFederated(Box::new(federation()))
 }
 
 // --- headers ------------------------------------------------------------------
@@ -204,6 +208,77 @@ fn a_response_without_an_access_token_is_an_error() {
     assert!(err.to_string().contains("no access_token"), "{err}");
     assert!(parse_minted("not json").is_err());
     assert!(parse_minted(r#"{"access_token":""}"#).is_err());
+}
+
+// --- what the run summary reports ---------------------------------------------
+
+#[test]
+fn a_federated_run_reports_the_ids_the_grant_sent() {
+    let protocol = federated_protocol();
+    let auth = run_auth(&protocol);
+    assert_eq!(auth.mode, MODE_FEDERATED);
+    assert_eq!(auth.federation_rule_id, Some("fdrl_1"));
+    assert_eq!(auth.organization_id, Some("org"));
+    assert_eq!(auth.service_account_id, Some("svac"));
+    // The fixture rule covers one workspace, so the exchange sends no
+    // `workspace_id` and there is none to report.
+    assert_eq!(auth.workspace_id, None);
+}
+
+#[test]
+fn a_workspace_scoped_rule_reports_the_workspace_it_billed() {
+    let mut federation = federation();
+    federation.workspace_id = Some("wrkspc_ci".to_string());
+    let protocol = Protocol::AnthropicFederated(Box::new(federation));
+    assert_eq!(run_auth(&protocol).workspace_id, Some("wrkspc_ci"));
+}
+
+#[test]
+fn each_mode_is_named_by_how_the_credential_was_obtained() {
+    // `OpenAiCompat` is an api key too: a static value out of the environment,
+    // differing from `AnthropicApiKey` only in which header carries it.
+    assert_eq!(run_auth(&Protocol::AnthropicApiKey).mode, MODE_API_KEY);
+    assert_eq!(run_auth(&Protocol::OpenAiCompat).mode, MODE_API_KEY);
+    assert_eq!(run_auth(&Protocol::AnthropicOAuth).mode, MODE_OAUTH);
+}
+
+#[test]
+fn a_static_credential_has_no_ids_to_report() {
+    for protocol in [
+        Protocol::AnthropicApiKey,
+        Protocol::AnthropicOAuth,
+        Protocol::OpenAiCompat,
+    ] {
+        let auth = run_auth(&protocol);
+        let ids = [
+            auth.organization_id,
+            auth.service_account_id,
+            auth.workspace_id,
+            auth.federation_rule_id,
+        ];
+        assert!(ids.iter().all(Option::is_none), "{protocol:?}: {ids:?}");
+    }
+}
+
+#[test]
+fn the_identity_token_is_not_among_the_ids_reported() {
+    // The summary is uploaded as an unmasked build artifact. The identity token
+    // is a bearer credential in its own right, and it sits one field away from
+    // the ids that are safe to publish.
+    let protocol = Protocol::AnthropicFederated(Box::new(Federation {
+        identity: Some(IdentitySource::Literal("eyJ.assertion".to_string())),
+        ..federation()
+    }));
+    let auth = run_auth(&protocol);
+    let reported = [
+        auth.organization_id,
+        auth.service_account_id,
+        auth.workspace_id,
+        auth.federation_rule_id,
+    ];
+    for id in reported.into_iter().flatten() {
+        assert!(!id.contains("assertion"), "leaked the identity token: {id}");
+    }
 }
 
 #[test]

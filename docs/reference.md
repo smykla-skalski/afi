@@ -152,7 +152,14 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
   },
   "elapsed_secs": 12.17,
   "tools": ["read_file", "write_file", "edit_file", "list_dir", "run_bash", "wait_background"],
-  "effort": "xhigh"
+  "effort": "xhigh",
+  "auth": {
+    "mode": "federated",
+    "organization_id": "org_...",
+    "service_account_id": "svac_...",
+    "workspace_id": "wrkspc_...",
+    "federation_rule_id": "fdrl_..."
+  }
 }
 ```
 
@@ -173,6 +180,10 @@ A tool that ran and failed is an error, not a refusal, and is not counted - a mi
 The policy count also covers calls thrown away before dispatch could rule on them: a batch whose arguments will not parse, and a forced-final turn answered with a tool - alongside the answer or instead of it. Both discard the whole batch, so a blocked call in one used to leave no trace but a line on stderr, which is exactly what a caller reading the JSON cannot see. The policy reads names, not arguments, so its answer is known even for the call whose arguments were the problem.
 
 **These are attempts, not distinct intentions.** Every blocked call in a discarded batch counts, including one whose own arguments parsed, and a retried batch counts again - so a persistently truncated stream carrying two blocked calls reports six with the default two recoveries, for what a human would call one thing the model wanted. Read the count as "how many times was this run told no", and alert on whether it is zero rather than on how large it is. `AFI_MALFORMED_STREAM_RETRIES` bounds the multiplier.
+
+`auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, and `federated` for one afi minted itself. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
+
+The identifiers are the non-secret ones the [federation](#anthropic) exchange sends, and only those. A rule covering one workspace passes no `ANTHROPIC_WORKSPACE_ID`, so no `workspace_id` comes back here, and a static-key run has nothing to identify at all - both name the mode and stop rather than emitting empty strings. Neither the access token nor the OIDC identity token is ever in the block: this JSON usually ends up as a build artifact, and an artifact carries no masking, so a value redacted in a log would be plain text there.
 
 The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run - unless the run was refused a call, which afi observed itself and reports either way, with `requests` still `0` to mark the silence.
 
@@ -302,6 +313,8 @@ steps:
       ANTHROPIC_ORGANIZATION_ID: ...
       ANTHROPIC_SERVICE_ACCOUNT_ID: svac_...
 ```
+
+The [run summary](#run-summary) reports the rule, organization, service account, and workspace the exchange used, so which budget a job billed is readable from the job's own output.
 
 A read-only job needs nothing else: there is no terminal to answer a prompt, and `--read-only` leaves nothing that would raise one. A job that has to write does need `--yolo` or `AFI_APPROVAL=yolo`, or every write and bash call is denied rather than hanging - pair it with a [tool policy](#tool-policy) so "do not ask me" does not also mean unrestricted.
 

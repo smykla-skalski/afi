@@ -45,12 +45,12 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
   "model": "claude-sonnet-5",
   "answer": "…the model's final text…",
   "usage": {
-    "input_tokens": 4126,
+    "input_tokens": 1847,
     "output_tokens": 484,
     "cache_read_tokens": 6837,
     "cache_write_tokens": 2279,
     "reasoning_tokens": 0,
-    "total_tokens": 13726,
+    "total_tokens": 11447,
     "requests": 3
   },
   "elapsed_secs": 12.17
@@ -62,6 +62,8 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run.
 
 `cache_write_tokens` is separate from `cache_read_tokens` and from `input_tokens` because the three are priced differently - Anthropic bills a write above base input and a read far below it, so a cost calculation needs its own rate for each. Only the Anthropic path reports writes; an OpenAI-compatible source reports `0`, as does llama.cpp, whose `timings.cache_n` counts a reused prefix and is therefore a read.
+
+Reporting writes separately re-attributes tokens rather than adding them. The 2279 above used to sit inside `input_tokens`, which is why it comes out of that count and leaves `total_tokens` where it was.
 
 Anthropic prices a 5-minute cache write differently from a 1-hour one and reports them separately. `afi` only ever requests the default TTL, so the single figure here covers every write it can make.
 

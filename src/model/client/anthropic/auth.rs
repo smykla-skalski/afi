@@ -75,11 +75,14 @@ fn usable(credential: &str, label: &str) -> Result<String, ClientError> {
 fn into_header_map(pairs: Vec<(&str, String)>) -> Result<HeaderMap, ClientError> {
     let mut map = HeaderMap::new();
     for (name, value) in pairs {
+        // Both failures are local input problems, not wire-parse failures: a
+        // credential copied with a trailing newline lands here. `Config` keeps
+        // the REPL from prefixing it as a parse error.
         let header = HeaderName::try_from(name)
-            .map_err(|e| ClientError::Parse(format!("bad header name {name}: {e}")))?;
+            .map_err(|e| ClientError::Config(format!("bad header name {name}: {e}")))?;
         // The error deliberately omits the value: it may be a credential.
         let header_value = HeaderValue::try_from(value)
-            .map_err(|_| ClientError::Parse(format!("invalid characters in {name} value")))?;
+            .map_err(|_| ClientError::Config(format!("invalid characters in {name} value")))?;
         map.insert(header, header_value);
     }
     Ok(map)
@@ -113,7 +116,7 @@ impl TokenCache {
             Protocol::AnthropicFederated(federation) => {
                 self.federated(http, source, federation).await
             }
-            _ => Err(ClientError::Parse(
+            _ => Err(ClientError::Config(
                 "bearer token requested for a source that does not use one".to_string(),
             )),
         }
@@ -159,22 +162,52 @@ impl TokenCache {
     }
 }
 
-/// Fetch the raw OIDC identity token. Never logged: it is a bearer credential
-/// in its own right.
+/// Fetch the OIDC identity token, rejecting a blank one.
+///
+/// A blank token is a local misconfiguration - an empty or whitespace-only token
+/// file, or an Actions response carrying an empty `value`. Left alone it would
+/// reach the exchange as an empty `assertion`, and the 400 that comes back names
+/// the grant rather than the empty file, hiding the real cause.
 async fn fetch_identity_token(
+    http: &Client,
+    source: &IdentitySource,
+) -> Result<String, ClientError> {
+    let token = read_identity_token(http, source).await?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(ClientError::Config(format!(
+            "the OIDC identity token from {} is empty",
+            identity_label(source)
+        )));
+    }
+    Ok(token.to_string())
+}
+
+/// Names the configured identity source for an error message. Never includes the
+/// token itself: it is a bearer credential in its own right.
+fn identity_label(source: &IdentitySource) -> String {
+    match source {
+        IdentitySource::Literal(_) => "ANTHROPIC_IDENTITY_TOKEN".to_string(),
+        IdentitySource::File(path) => {
+            format!("ANTHROPIC_IDENTITY_TOKEN_FILE {}", path.display())
+        }
+        IdentitySource::GithubActions { .. } => "the GitHub Actions OIDC endpoint".to_string(),
+    }
+}
+
+/// Read the raw token. Never logged.
+async fn read_identity_token(
     http: &Client,
     source: &IdentitySource,
 ) -> Result<String, ClientError> {
     match source {
         IdentitySource::Literal(token) => Ok(token.clone()),
-        IdentitySource::File(path) => fs::read_to_string(path)
-            .map(|s| s.trim().to_string())
-            .map_err(|e| {
-                ClientError::Config(format!(
-                    "cannot read ANTHROPIC_IDENTITY_TOKEN_FILE {}: {e}",
-                    path.display()
-                ))
-            }),
+        IdentitySource::File(path) => fs::read_to_string(path).map_err(|e| {
+            ClientError::Config(format!(
+                "cannot read ANTHROPIC_IDENTITY_TOKEN_FILE {}: {e}",
+                path.display()
+            ))
+        }),
         IdentitySource::GithubActions { url, request_token } => {
             github_identity_token(http, url, request_token).await
         }
@@ -189,7 +222,8 @@ async fn github_identity_token(
     // The Actions runtime url already carries an `api-version` query, so the
     // audience is appended rather than replacing the query string.
     let mut endpoint = Url::parse(url)
-        .map_err(|e| ClientError::Parse(format!("bad ACTIONS_ID_TOKEN_REQUEST_URL: {e}")))?;
+        // Supplied by the Actions runtime, so a malformed one is environmental.
+        .map_err(|e| ClientError::Config(format!("bad ACTIONS_ID_TOKEN_REQUEST_URL: {e}")))?;
     endpoint
         .query_pairs_mut()
         .append_pair("audience", OIDC_AUDIENCE);

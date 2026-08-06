@@ -1,11 +1,11 @@
 //! Atomic write / load / listing primitives for session files.
 
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 use serde_json::{Map, Number, Value};
 
+use crate::atomic;
 use crate::util::now_secs_f64;
 use std::cmp::Ordering;
 use std::io;
@@ -103,15 +103,14 @@ fn build_session_data(
 }
 
 /// Write `data` to `path` atomically: temp file, fsync, then rename.
+///
+/// The temp file used to be `<path>.json.tmp`, a name anyone could work out in
+/// advance. `crate::atomic` draws an unpredictable one and refuses a name
+/// already taken instead of following it, so a symlink planted there cannot
+/// redirect the write.
 fn write_atomic(path: &Path, data: &Value) -> io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
     let serialized = serde_json::to_string(data)?;
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(serialized.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)
+    atomic::write(path, serialized.as_bytes())
 }
 
 /// Align the file mtime with `updated_at` so newest-first listing stays cheap.

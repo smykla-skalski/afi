@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use super::runtime::ParsedArgs;
+use super::args::ParsedArgs;
 
 /// Materialize the tool-policy flags into the env map, so a flag wins over its
 /// variable the way every other setting does.

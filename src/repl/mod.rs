@@ -3,6 +3,7 @@
 
 mod commands;
 mod core;
+mod report;
 mod tui;
 
 pub use commands::CommandResult;
@@ -185,7 +186,7 @@ async fn run_plain(rt: Runtime) -> (Runtime, bool) {
             }
         }
     }
-    core.print_summary(started.elapsed());
-    let ok = !core.failed();
+    let reported = core.report(started.elapsed(), &mut ui);
+    let ok = reported && !core.failed();
     (core.into_runtime(), ok)
 }

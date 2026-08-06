@@ -36,16 +36,21 @@ fn main() {
 
     let mut rt = afi::Runtime::build(&args, env_map, env_file.as_deref());
 
-    // A tool policy that cannot be honoured must not degrade into a wider grant
-    // than was asked for: `--disallowed-tools run_bsah` matches no tool, and a
-    // bare `--disallowed-tools` sets none at all. Both would leave `run_bash`
-    // available while the command line says otherwise, so refuse to start.
+    // Anything the run was told to do that it cannot: a tool policy that would
+    // degrade into a wider grant than was asked for (`--disallowed-tools
+    // run_bsah` matches no tool, a bare `--disallowed-tools` sets none at all,
+    // and either leaves `run_bash` available while the command line says
+    // otherwise), or a summary file it could not write.
     let refusals = rt.refusals();
     if !refusals.is_empty() {
         for refusal in &refusals {
             eprintln!("  \u{2717} {refusal}");
         }
-        eprintln!("    known tools: {}", known_tool_names().join(", "));
+        // The registry is the answer to a mistyped tool name and to nothing
+        // else, so it is spelled out only for that refusal.
+        if rt.tool_policy.unknown_names_message().is_some() {
+            eprintln!("    known tools: {}", known_tool_names().join(", "));
+        }
         process::exit(2);
     }
 

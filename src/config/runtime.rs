@@ -1,15 +1,17 @@
-//! `Runtime` session state, CLI arg parsing, and source discovery.
+//! `Runtime` session state and source discovery. Argument parsing lives in
+//! `args`.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
 use crate::envfile;
 use crate::pricing::Pricing;
-use crate::summary::SummaryFormat;
+use crate::summary::{SummaryFormat, summary_path, writable};
 use crate::tools::policy::ToolPolicy;
 
+use super::args::{ParsedArgs, parse_args};
 use super::builtins::add_builtin_sources;
 use super::tools::apply_tool_flags;
 use super::{Protocol, Source, build_http_headers, parse_extra_body};
@@ -34,6 +36,9 @@ pub struct Runtime {
     pub env: HashMap<String, String>,
     /// How to report the run once it finishes. Off unless asked for.
     pub summary: SummaryFormat,
+    /// Where to also write that report. Independent of `summary`: a path does
+    /// not turn the stdout copy on, and stdout does not stand in for a path.
+    pub summary_file: Option<PathBuf>,
     /// Which tools this run may call. Held rather than re-derived because the
     /// header renders it on every frame; `ModelConfig::from_env` reads the same
     /// env vars, so the two cannot disagree.
@@ -42,112 +47,6 @@ pub struct Runtime {
     pub flag_errors: Vec<String>,
     /// Token rates for the summary's cost, `None` when unset or unusable.
     pub pricing: Option<Pricing>,
-}
-
-/// Parsed CLI args - the subset that affects initial state. The `sessions`
-/// subcommand and in-REPL slash commands are handled separately.
-#[derive(Debug, Default, Clone)]
-pub struct ParsedArgs {
-    pub source: Option<String>,
-    pub yolo: bool,
-    pub read_only: bool,
-    pub approval: Option<String>,
-    pub resume: Option<Option<String>>,
-    pub session: Option<String>,
-    pub prompt_file: Option<String>,
-    pub sessions_query: Option<Vec<String>>,
-    pub summary: Option<String>,
-    pub allowed_tools: Option<String>,
-    pub disallowed_tools: Option<String>,
-    /// Flags that were given wrongly. Only the tool-policy flags record here,
-    /// because they are the only ones whose silent fallback widens what a run
-    /// may do.
-    pub flag_errors: Vec<String>,
-}
-
-/// Parse argv into the subset that affects runtime construction.
-///
-/// Hand-rolled for now so tests can pass `["afi", "--source", "zai"]`
-/// directly without a clap dependency at test time. Phase 8 may swap this for
-/// a clap-based parser; the surface should stay byte-identical.
-#[must_use]
-pub fn parse_args(args: &[String]) -> ParsedArgs {
-    let mut out = ParsedArgs::default();
-    let mut saw_sessions = false;
-    let mut query: Vec<String> = Vec::new();
-    let mut i = 1; // skip argv[0]
-    while i < args.len() {
-        let a = args[i].as_str();
-        if i == 1 && a == "sessions" {
-            saw_sessions = true;
-        } else if saw_sessions {
-            query.push(a.to_string());
-        } else if apply_flag(&mut out, a, args.get(i + 1).map(String::as_str)) {
-            i += 1;
-        }
-        i += 1;
-    }
-    if saw_sessions {
-        out.sessions_query = Some(query);
-    }
-    out
-}
-
-/// Apply one flag to `out`. Returns `true` when it consumed the following
-/// argument as its value.
-fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
-    match flag {
-        "--yolo" => out.yolo = true,
-        "--read-only" => out.read_only = true,
-        "--approval" => return set_opt(&mut out.approval, value),
-        "--source" => return set_opt(&mut out.source, value),
-        "--session" => return set_opt(&mut out.session, value),
-        "--prompt-file" | "-f" => return set_opt(&mut out.prompt_file, value),
-        "--summary" => return set_opt(&mut out.summary, value),
-        "--allowed-tools" | "--disallowed-tools" => return set_tool_flag(out, flag, value),
-        "--resume" | "-r" => {
-            // bare --resume, or --resume <target> where target doesn't start
-            // with '-' (so `--resume --yolo` doesn't swallow --yolo).
-            if let Some(v) = value.filter(|v| !v.starts_with('-')) {
-                out.resume = Some(Some(v.to_string()));
-                return true;
-            }
-            out.resume = Some(None);
-        }
-        _ => {}
-    }
-    false
-}
-
-/// Set one of the two tool-policy flags. Returns whether a value was consumed.
-///
-/// Unlike every other flag here, a missing value cannot be shrugged off. Falling
-/// back to "no policy" would make `afi --disallowed-tools $DENY` with `DENY`
-/// unset grant every tool while the command line says otherwise - the one
-/// failure a deny list must not have. The same goes for a value that looks like
-/// another flag, which is what `--disallowed-tools --yolo` produces. Both are
-/// recorded so the run refuses to start.
-fn set_tool_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
-    let Some(v) = value.filter(|v| !v.starts_with('-')) else {
-        out.flag_errors.push(format!("{flag} needs a value"));
-        // Not consumed, so `--disallowed-tools --yolo` still applies `--yolo`.
-        return false;
-    };
-    if flag == "--allowed-tools" {
-        out.allowed_tools = Some(v.to_string());
-    } else {
-        out.disallowed_tools = Some(v.to_string());
-    }
-    true
-}
-
-/// Set `slot` to `value` when present; returns whether a value was consumed.
-fn set_opt(slot: &mut Option<String>, value: Option<&str>) -> bool {
-    if let Some(v) = value {
-        *slot = Some(v.to_string());
-        return true;
-    }
-    false
 }
 
 impl Runtime {
@@ -189,6 +88,12 @@ impl Runtime {
                     .summary
                     .as_deref()
                     .or_else(|| env.get("AFI_SUMMARY").map(String::as_str)),
+            ),
+            summary_file: summary_path(
+                parsed
+                    .summary_file
+                    .as_deref()
+                    .or_else(|| env.get("AFI_SUMMARY_FILE").map(String::as_str)),
             ),
             tool_policy: ToolPolicy::from_env(
                 env.get("AFI_ALLOWED_TOOLS").map(String::as_str),
@@ -267,12 +172,17 @@ impl Runtime {
 
     /// Why this run must not start, if it must not.
     ///
-    /// Both cases are tool-policy problems whose quiet fallback is a wider grant
-    /// than the command line asked for, so neither may be a warning.
+    /// The tool-policy cases have a quiet fallback that is a wider grant than
+    /// the command line asked for, so neither may be a warning. The summary-file
+    /// case is checked here, by touching the path, rather than left to the write
+    /// at the end of the run: a caller that asked for a file is not watching
+    /// stdout for the JSON, and a run that has already been paid for is a poor
+    /// moment to learn the directory does not exist.
     #[must_use]
     pub fn refusals(&self) -> Vec<String> {
         let mut out = self.flag_errors.clone();
         out.extend(self.tool_policy.unknown_names_message());
+        out.extend(self.summary_file.as_deref().and_then(|p| writable(p).err()));
         out
     }
 }

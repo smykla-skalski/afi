@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod approval;
+pub mod atomic;
 pub mod cli;
 pub mod config;
 pub mod envfile;

@@ -99,8 +99,6 @@ pub enum ClientError {
     Config(String),
 }
 
-/// The `OpenAI`-only probe endpoints have no Anthropic equivalent. None of them
-/// has a production caller today, so a clear error beats a half implementation.
 /// Fold a non-streaming response's usage into the run totals.
 ///
 /// The streaming path records through `finalize_turn`, which this never reaches,
@@ -124,6 +122,8 @@ struct CompletionUsage {
     usage: Option<Usage>,
 }
 
+/// The `OpenAI`-only probe endpoints have no Anthropic equivalent. None of them
+/// has a production caller today, so a clear error beats a half implementation.
 fn unsupported(source: &Source, what: &str) -> ClientError {
     ClientError::Config(format!(
         "{what} is not available on the Anthropic protocol (source {})",

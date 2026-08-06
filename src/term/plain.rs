@@ -31,6 +31,33 @@ enum HumanStream {
     Stderr,
 }
 
+/// An owned lock on whichever stream human output goes to.
+///
+/// Concrete rather than `Box<dyn Write>`: `write_stream` runs once per streamed
+/// delta, so a trait object would mean a heap allocation and a virtual call on
+/// every chunk of every answer. Both locks are `'static`, so neither borrows the
+/// handle that produced it.
+enum HumanWriter {
+    Stdout(io::StdoutLock<'static>),
+    Stderr(io::StderrLock<'static>),
+}
+
+impl Write for HumanWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Stdout(out) => out.write(buf),
+            Self::Stderr(out) => out.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Stdout(out) => out.flush(),
+            Self::Stderr(out) => out.flush(),
+        }
+    }
+}
+
 impl PlainUi {
     #[must_use]
     pub fn new() -> Self {
@@ -55,10 +82,10 @@ impl PlainUi {
     }
 
     /// The stream human output belongs on, and whether it may carry ANSI.
-    fn human(&self) -> (Box<dyn Write>, bool) {
+    fn human(&self) -> (HumanWriter, bool) {
         match self.human_stream {
-            HumanStream::Stderr => (Box::new(io::stderr().lock()), self.stderr_styled),
-            HumanStream::Stdout => (Box::new(io::stdout().lock()), self.stdout_styled),
+            HumanStream::Stderr => (HumanWriter::Stderr(io::stderr().lock()), self.stderr_styled),
+            HumanStream::Stdout => (HumanWriter::Stdout(io::stdout().lock()), self.stdout_styled),
         }
     }
 

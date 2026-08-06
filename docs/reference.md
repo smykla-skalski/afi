@@ -21,14 +21,57 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `AFI_BASE_URL` / `AFI_MODEL` / `AFI_API_KEY` | legacy single-source config                                          |
 | `AFI_SOURCES` / `AFI_SOURCE_*`               | named multi-source endpoints                                         |
 | `AFI_ACTIVE`                                 | name of the source to start on                                       |
-| `TOGETHER_API_KEY`                           | auto-registers a built-in `together` source                          |
-| `OPENROUTER_API_KEY`                         | auto-registers a built-in `openrouter` source                        |
+| `AFI_TOGETHER_API_KEY`                       | auto-registers a built-in `together` source                          |
+| `AFI_OPENROUTER_API_KEY`                     | auto-registers a built-in `openrouter` source                        |
+| `ANTHROPIC_API_KEY`                          | auto-registers a built-in `anthropic` source ([details](#anthropic)) |
 | `AFI_BACKEND`                                | set to `vllm` to disable llama.cpp-only recovery knobs               |
 | `AFI_HOME` / `AFI_SESSIONS_DIR`              | where session JSON files are stored                                  |
 | `AFI_AUTOCOMPRESS_PERCENT`                   | auto-compress threshold (default 85, 0=off)                          |
 | `AFI_MAX_TOKENS`                             | token cap for normal streaming requests (default 16000)              |
 | `AFI_READ_FILE_LINES`                        | default lines returned by `read_file` (default 400)                  |
 | `AFI_TOOL_RESULT_CHARS`                      | per-tool-result char cap (default 20000)                             |
+
+## Anthropic
+
+Every other source speaks OpenAI-compatible `/chat/completions`. Anthropic speaks its own Messages API (`POST /v1/messages`): real `tool_use` blocks, adaptive thinking, and a cached system prompt. Sessions, `/compress`, and transcripts are unchanged.
+
+Set one credential and an `anthropic` source registers itself, defaulting to `https://api.anthropic.com` and `claude-sonnet-5`.
+
+| env var                                                                                       | auth mode                          |
+| --------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `AFI_ANTHROPIC_API_KEY` or `ANTHROPIC_API_KEY`                                                | `x-api-key`                        |
+| `AFI_ANTHROPIC_OAUTH_TOKEN` or `ANTHROPIC_AUTH_TOKEN`                                         | pre-minted `Authorization: Bearer` |
+| `ANTHROPIC_FEDERATION_RULE_ID` + `ANTHROPIC_ORGANIZATION_ID` + `ANTHROPIC_SERVICE_ACCOUNT_ID` | workload identity federation       |
+
+An API key wins over a bearer token, and a bearer token over federation, matching the official SDKs. The un-prefixed `ANTHROPIC_*` names are read too, so a shell already configured for the Anthropic SDKs or the `ant` CLI works as it stands. Override the endpoint and model with `AFI_ANTHROPIC_BASE_URL` and `AFI_ANTHROPIC_MODEL`, or per switch with `/source anthropic claude-opus-5`.
+
+Those overrides deliberately sit outside the `AFI_SOURCE_*` namespace, which is reserved for sources you define yourself. A bare `AFI_SOURCE_ANTHROPIC_BASE_URL` is enough for afi to auto-discover a source named `anthropic`, and it would come up on the OpenAI-compatible protocol with no credential. Defining a full `AFI_SOURCE_ANTHROPIC_*` block still works, but then set `AFI_SOURCE_ANTHROPIC_PROTOCOL` too.
+
+**Federation.** afi exchanges an OIDC identity token for an access token at `/v1/oauth/token`, then re-mints it near expiry. Add `ANTHROPIC_WORKSPACE_ID` when the rule spans workspaces. The identity token comes from `ANTHROPIC_IDENTITY_TOKEN`, else `ANTHROPIC_IDENTITY_TOKEN_FILE`, else GitHub Actions' OIDC endpoint, so a workflow granting `id-token: write` mints nothing itself:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+steps:
+  - uses: actions/checkout@v7
+  - run: afi --yolo -f prompt.txt
+    env:
+      AFI_ACTIVE: anthropic
+      ANTHROPIC_FEDERATION_RULE_ID: fdrl_...
+      ANTHROPIC_ORGANIZATION_ID: ...
+      ANTHROPIC_SERVICE_ACCOUNT_ID: svac_...
+```
+
+CI needs `--yolo` or `AFI_APPROVAL=yolo`, or every write and bash call stops for approval.
+
+**Sampling parameters stay off the wire.** Anthropic rejects `temperature`, `top_p`, and `top_k`, and `min_p` and the DRY knobs belong to llama.cpp, so recovery falls back to its prompt-level nudges. `AFI_ANTHROPIC_EXTRA_BODY` accepts `output_config`, `metadata`, `stop_sequences`, and `service_tier`, and drops the rest.
+
+**Thinking is off, and cannot be turned on yet.** When a thinking block accompanies a tool call, the API requires the assistant turn to be echoed back verbatim on the request carrying the tool result, thinking block and signature included. afi keeps history in OpenAI shape and rebuilds that turn on every request, so it cannot round-trip one. Since afi calls tools on nearly every turn, leaving thinking on would fail most of them. `thinking` is therefore sent as `disabled` and is not in the `EXTRA_BODY` allowlist.
+
+Two consequences. `claude-fable-5` rejects an explicit `disabled`, so it is unusable here for now. And sending `disabled` is what keeps `claude-haiku-4-5` working, since it rejects adaptive thinking outright.
+
+**Other endpoints.** `AFI_SOURCE_<NAME>_PROTOCOL` takes `anthropic` or `anthropic-oauth`. It defaults to `openai`, so existing sources keep working.
 
 ## Subcommands
 

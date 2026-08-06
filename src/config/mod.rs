@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use regex::Regex;
 use serde_json::{Map, Value};
 
+mod builtins;
+mod protocol;
 mod runtime;
+pub use protocol::{Federation, IdentitySource, NOOP_KEY, Protocol};
 pub use runtime::{ParsedArgs, Runtime, discover_sources, parse_args};
 
 // --- HTTP headers for aggregators like OpenRouter ---------------------------
@@ -88,6 +91,7 @@ pub struct Source {
     pub http_headers: Option<HashMap<String, String>>,
     pub extra_body: Option<Value>,
     pub context_window: Option<u64>,
+    pub protocol: Protocol,
 }
 
 impl Source {
@@ -102,7 +106,7 @@ impl Source {
     ) -> Self {
         let api_key = match api_key {
             Some(s) if !s.is_empty() => s,
-            _ => "sk-noop".to_string(),
+            _ => NOOP_KEY.to_string(),
         };
         Source {
             name: name.to_string(),
@@ -112,17 +116,23 @@ impl Source {
             http_headers,
             extra_body,
             context_window: None,
+            protocol: Protocol::default(),
         }
     }
 
-    /// The `extra_body` kwarg to merge into every chat request, or `None` when
-    /// none is configured. Non-consumers ignore unknown body keys, so this is
-    /// a no-op for backends that don't understand it (llama.cpp, Together, ...).
+    /// Set the wire protocol. Kept separate from `Source::new` so the
+    /// six-argument constructor and its call sites stay untouched.
     #[must_use]
-    pub fn extra_request_kwargs(&self) -> Option<Value> {
-        self.extra_body
-            .as_ref()
-            .map(|b| serde_json::json!({"extra_body": b.clone()}))
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
+    }
+
+    /// True when this source speaks Anthropic's Messages API rather than
+    /// `OpenAI`-compatible chat completions.
+    #[must_use]
+    pub fn is_anthropic(&self) -> bool {
+        self.protocol.is_anthropic()
     }
 
     /// True if this source points at a host on the local machine or LAN

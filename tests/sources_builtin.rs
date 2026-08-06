@@ -1,6 +1,6 @@
 //! Port of `tests/test_sources.py` (built-in providers half). Covers the
 //! `together` / `openrouter` auto-registration, explicit overrides, provider
-//! ordering, and `extra_request_kwargs` plumbing.
+//! ordering, and `extra_body` plumbing.
 
 mod common;
 
@@ -242,9 +242,15 @@ fn test_17_provider_order_helpers() {
     assert!(src.extra_body.is_none());
 }
 
-// Test 18: extra_request_kwargs plumbing
+// Test 18: extra_body plumbing.
+//
+// The body keys are carried unwrapped. An earlier `extra_request_kwargs()`
+// helper wrapped them as `{"extra_body": {...}}` - the shape the Python OpenAI
+// SDK unwrapped as a kwarg - but the Rust client builds the request body by
+// hand, so nothing ever unwrapped it. Its one caller (`/compress`) therefore
+// silently dropped provider routing on every source.
 #[test]
-fn test_18_extra_request_kwargs_plumbing() {
+fn test_18_extra_body_plumbing() {
     let mut rt = common::build(
         &["afi"],
         &[
@@ -252,26 +258,19 @@ fn test_18_extra_request_kwargs_plumbing() {
             ("AFI_OPENROUTER_API_KEY", "k"),
         ],
     );
+    let routing = json!({"provider": {"order": ["parasail/fp8"], "allow_fallbacks": false}});
+
     let src = rt.sources.get("openrouter").unwrap().clone();
-    let kw = src.extra_request_kwargs();
-    assert_eq!(
-        kw,
-        Some(
-            json!({"extra_body": {"provider": {"order": ["parasail/fp8"], "allow_fallbacks": false}}})
-        )
-    );
+    assert_eq!(src.extra_body, Some(routing.clone()));
+
     // Clearing routing yields None.
     let src_mut = rt.sources.get_mut("openrouter").unwrap();
     src_mut.set_provider_order(&[], None);
-    assert!(src_mut.extra_request_kwargs().is_none());
-    // Re-pin and confirm the active source's kwarg matches.
+    assert!(src_mut.extra_body.is_none());
+
+    // Re-pin and confirm the active source carries it.
     src_mut.set_provider_order(&["parasail/fp8".to_string()], None);
     rt.switch_source("openrouter", None);
     let active = rt.active_source().unwrap();
-    assert_eq!(
-        active.extra_request_kwargs(),
-        Some(
-            json!({"extra_body": {"provider": {"order": ["parasail/fp8"], "allow_fallbacks": false}}})
-        )
-    );
+    assert_eq!(active.extra_body, Some(routing));
 }

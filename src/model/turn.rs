@@ -234,6 +234,9 @@ fn report_client_error(error: ClientError, source: &Source, ui: &mut dyn UserInt
             format!("HTTP {status}: {body_short}")
         }
         ClientError::Parse(message) => format!("parse error: {message}"),
+        // Already a complete, actionable sentence - no prefix, and no claim
+        // about the server, which was never contacted.
+        ClientError::Config(message) => message,
     };
     ui.message(MessageKind::Error, message);
     TURN_DONE.to_string()

@@ -1,4 +1,9 @@
-//! Bounded state machine for OpenAI-compatible server-sent events.
+//! Bounded state machine for server-sent events.
+//!
+//! The framing layer (`data:` line assembly, size bounds, multi-field joins) is
+//! protocol-neutral; the JSON shape of each event is delegated to an
+//! [`SseDecoder`]. `OpenAI`-compatible endpoints and Anthropic's Messages API
+//! share this machine and differ only in that decoder.
 
 use futures::StreamExt;
 use futures::stream::unfold;
@@ -13,8 +18,31 @@ const MAX_SSE_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 8 * 1024 * 1024;
 const ERROR_PREVIEW_CHARS: usize = 200;
 
+/// Turns one joined SSE event payload into a [`SseLine`].
+///
+/// # Invariant
+///
+/// Implementations **must parse before mutating any internal state, and must
+/// not mutate on [`SseDecodeError::Json`]**. [`handle_line`] speculatively
+/// decodes a payload before buffering it, so any single field of a fragmented
+/// event is handed to the decoder once and expected to fail parsing. A stateful
+/// decoder that mutated eagerly would double-count that fragment.
+pub(crate) trait SseDecoder: Send {
+    fn decode(&mut self, data: &str) -> Result<SseLine, SseDecodeError>;
+}
+
+/// Decoder for `OpenAI`-compatible `chat/completions` streams. Stateless.
+pub(crate) struct OpenAiDecoder;
+
+impl SseDecoder for OpenAiDecoder {
+    fn decode(&mut self, data: &str) -> Result<SseLine, SseDecodeError> {
+        decode_sse_data(data)
+    }
+}
+
 struct DecodeState<R> {
     lines: FramedRead<R, LinesCodec>,
+    decoder: Box<dyn SseDecoder>,
     pending: String,
     saw_data: bool,
     saw_finish: bool,
@@ -22,12 +50,13 @@ struct DecodeState<R> {
     failed: bool,
 }
 
-pub(super) fn decoded_stream<R>(reader: R) -> ChatCompletionStream
+pub(super) fn decoded_stream<R>(reader: R, decoder: Box<dyn SseDecoder>) -> ChatCompletionStream
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
     let state = DecodeState {
         lines: FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_SSE_LINE_BYTES)),
+        decoder,
         pending: String::new(),
         saw_data: false,
         saw_finish: false,
@@ -84,7 +113,7 @@ fn handle_line<R>(state: &mut DecodeState<R>, line: &str) -> DecodeStep {
     };
     state.saw_data = true;
     if state.pending.is_empty() {
-        match decode_sse_data(value) {
+        match state.decoder.decode(value) {
             Ok(SseLine::Chunk(chunk)) => return DecodeStep::Chunk(chunk),
             Ok(SseLine::Done) => return DecodeStep::Done,
             Ok(SseLine::Ignore) => return DecodeStep::Wait,
@@ -121,7 +150,7 @@ fn decode_pending<R>(state: &mut DecodeState<R>) -> DecodeStep {
         return DecodeStep::Wait;
     }
     let data = mem::take(&mut state.pending);
-    match decode_sse_data(&data) {
+    match state.decoder.decode(&data) {
         Ok(SseLine::Chunk(chunk)) => DecodeStep::Chunk(chunk),
         Ok(SseLine::Done) => DecodeStep::Done,
         Ok(SseLine::Ignore) => DecodeStep::Wait,

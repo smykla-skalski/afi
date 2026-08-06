@@ -33,11 +33,12 @@ Run validation in the session worktree. Do not run unrelated gates. Unit tests b
 
 ## Project map
 
-`afi` is a small coding agent for self-hosted and remote models. It talks to OpenAI-compatible endpoints, including llama.cpp, vLLM, SGLang, Z.ai, OpenAI, and OpenRouter, and renders its interface with raw terminal escapes.
+`afi` is a small coding agent for self-hosted and remote models. It speaks two wire protocols: OpenAI-compatible `/chat/completions` for llama.cpp, vLLM, SGLang, Z.ai, OpenAI, and OpenRouter, and Anthropic's native Messages API. It renders its interface with raw terminal escapes.
 
-- **Config:** source discovery and switching, provider routing, environment-file loading, and approval state.
+- **Config:** source discovery and switching, per-source protocol and auth mode, provider routing, environment-file loading, and approval state.
 - **REPL:** main loop, slash commands, banner, one-shot mode, and automatic session saves.
 - **Model:** asynchronous HTTP client, SSE parsing, context-window probing, recovery samplers, context compression, and the tool-dispatch turn loop.
+- **Anthropic protocol:** message and tool translation at the client boundary, a stateful SSE decoder normalizing events into the shared chunk type, and the workload-identity-federation token exchange.
 - **Tools:** file operations, directory listing, detached Bash execution through `setsid`, background waits, protocol parsing, and tool-result sanitization.
 - **Sessions:** atomic writes, modification-time ordering, short-ID resolution, and schema versioning.
 - **Risk:** command classification, approval gates, Esc-to-chat control flow, and project-root detection.

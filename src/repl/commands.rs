@@ -188,7 +188,6 @@ async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, ui: Ui<'_>) {
 /// Ask the model for a one-shot summary of the conversation so far.
 async fn request_compression(source: &Source, model: &str) -> Result<Option<String>, String> {
     let client = ReqwestClient::new();
-    let extra_body = source.extra_request_kwargs();
     let prompt = "Summarize the following conversation history for context retention.";
     let text = client
         .chat_completions(
@@ -196,7 +195,9 @@ async fn request_compression(source: &Source, model: &str) -> Result<Option<Stri
             model,
             &[json!({"role": "user", "content": prompt})],
             30,
-            extra_body.as_ref(),
+            // The source's own body keys, unwrapped. `chat_completions` merges
+            // them at the top level of the request, same as the streaming path.
+            source.extra_body.as_ref(),
         )
         .await
         .map_err(|error| error.to_string())?;

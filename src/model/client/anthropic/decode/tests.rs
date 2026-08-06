@@ -7,7 +7,7 @@ use crate::tools::known_tool_names;
 /// Decode one event payload, expecting a chunk.
 fn chunk(decoder: &mut AnthropicDecoder, data: &str) -> StreamChunk {
     match decoder.decode(data) {
-        Ok(SseLine::Chunk(c)) => c,
+        Ok(SseLine::Chunk(c)) => *c,
         other => panic!("expected a chunk, got {other:?}"),
     }
 }
@@ -29,7 +29,7 @@ fn text_delta_becomes_content() {
 }
 
 #[test]
-fn thinking_delta_becomes_reasoning_content() {
+fn thinking_delta_feeds_both_the_display_and_replay_copies() {
     let mut d = AnthropicDecoder::new();
     let c = chunk(
         &mut d,
@@ -37,15 +37,38 @@ fn thinking_delta_becomes_reasoning_content() {
     );
     assert_eq!(c.reasoning_content.as_deref(), Some("pondering"));
     assert!(c.content.is_none());
+    assert_eq!(c.thinking.len(), 1);
+    assert_eq!(c.thinking[0].index, 0);
+    assert_eq!(c.thinking[0].thinking.as_deref(), Some("pondering"));
+    assert!(c.thinking[0].signature.is_none());
 }
 
 #[test]
-fn signature_delta_is_ignored() {
+fn signature_delta_is_replay_only() {
+    // Not displayable, but the API verifies it when the block is echoed back.
     let mut d = AnthropicDecoder::new();
-    assert!(is_ignored(
+    let c = chunk(
         &mut d,
-        r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}"#
-    ));
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}"#,
+    );
+    assert!(c.reasoning_content.is_none());
+    assert!(c.content.is_none());
+    assert_eq!(c.thinking.len(), 1);
+    assert_eq!(c.thinking[0].index, 0);
+    assert_eq!(c.thinking[0].signature.as_deref(), Some("abc"));
+}
+
+#[test]
+fn redacted_thinking_block_start_carries_its_payload() {
+    let mut d = AnthropicDecoder::new();
+    let c = chunk(
+        &mut d,
+        r#"{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"encrypted"}}"#,
+    );
+    assert!(c.reasoning_content.is_none());
+    assert_eq!(c.thinking.len(), 1);
+    assert_eq!(c.thinking[0].index, 1);
+    assert_eq!(c.thinking[0].redacted.as_deref(), Some("encrypted"));
 }
 
 #[test]

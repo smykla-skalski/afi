@@ -1,3 +1,4 @@
+use super::sse::{OpenAiDecoder, decoded_stream};
 use super::*;
 use futures::StreamExt;
 use tokio::io::{AsyncRead, AsyncWriteExt, duplex};

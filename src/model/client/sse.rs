@@ -114,7 +114,7 @@ fn handle_line<R>(state: &mut DecodeState<R>, line: &str) -> DecodeStep {
     state.saw_data = true;
     if state.pending.is_empty() {
         match state.decoder.decode(value) {
-            Ok(SseLine::Chunk(chunk)) => return DecodeStep::Chunk(chunk),
+            Ok(SseLine::Chunk(chunk)) => return DecodeStep::Chunk(*chunk),
             Ok(SseLine::Done) => return DecodeStep::Done,
             Ok(SseLine::Ignore) => return DecodeStep::Wait,
             Err(SseDecodeError::Provider(error)) => return provider_error(&error),
@@ -151,7 +151,7 @@ fn decode_pending<R>(state: &mut DecodeState<R>) -> DecodeStep {
     }
     let data = mem::take(&mut state.pending);
     match state.decoder.decode(&data) {
-        Ok(SseLine::Chunk(chunk)) => DecodeStep::Chunk(chunk),
+        Ok(SseLine::Chunk(chunk)) => DecodeStep::Chunk(*chunk),
         Ok(SseLine::Done) => DecodeStep::Done,
         Ok(SseLine::Ignore) => DecodeStep::Wait,
         Err(SseDecodeError::Provider(error)) => provider_error(&error),

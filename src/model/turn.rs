@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use crate::approval::ApprovalState;
 use crate::config::Source;
 use crate::log::log_event;
-use crate::model::client::{ChatClient, ChatCompletionStream, ClientError, StreamRequest};
+use crate::model::client::{
+    ChatClient, ChatCompletionStream, ClientError, StreamRequest, thinking_disabled,
+};
 use crate::model::recovery::recovery_sampling_opts;
 use crate::model::turn_finalize::finalize_turn;
 use crate::model::turn_stats::handle_reasoning_stall;
@@ -177,7 +179,7 @@ async fn fetch_stream(
             return Err(report_client_error(error, tr.source, ui));
         }
     };
-    let mut accumulator = StreamAccumulator::new();
+    let mut accumulator = StreamAccumulator::new(reasoning_only_limit(tr, params.extra_body));
     let mut chunks = 0usize;
     loop {
         let item = tokio::select! {
@@ -201,7 +203,7 @@ async fn fetch_stream(
             }
         };
         chunks += 1;
-        if let Some(result) = accumulator.push(&chunk, tr.config, params.started, ui) {
+        if let Some(result) = accumulator.push(&chunk, params.started, ui) {
             ui.stop_activity();
             log_event("resp", &json!({"chunks": chunks, "cut": true}));
             return Ok(result);
@@ -210,6 +212,20 @@ async fn fetch_stream(
     ui.stop_activity();
     log_event("resp", &json!({"chunks": chunks}));
     Ok(accumulator.finish(ui))
+}
+
+/// The reasoning-only cutoff for this turn, or `0` to leave the cut off.
+///
+/// The cut exists for local reasoning models that loop in their scratchpad
+/// forever. Anthropic's thinking is server-side and already bounded by
+/// `max_tokens`, so cutting one of those turns short would fire on a healthy
+/// turn that was about to emit its tool call - and the nudge that follows lands
+/// on a model that never stalled.
+fn reasoning_only_limit(tr: &TurnRequest<'_>, extra_body: Option<&Value>) -> usize {
+    if tr.source.is_anthropic() && !thinking_disabled(extra_body) {
+        return 0;
+    }
+    tr.config.reasoning_only_char_limit
 }
 
 async fn open_stream(

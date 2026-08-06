@@ -13,6 +13,7 @@ use crate::tools::policy::ToolPolicy;
 
 use super::args::{ParsedArgs, parse_args};
 use super::builtins::add_builtin_sources;
+use super::effort::{self, Effort};
 use super::tools::apply_tool_flags;
 use super::{Protocol, Source, build_http_headers, parse_extra_body};
 
@@ -43,7 +44,10 @@ pub struct Runtime {
     /// header renders it on every frame; `ModelConfig::from_env` reads the same
     /// env vars, so the two cannot disagree.
     pub tool_policy: ToolPolicy,
-    /// Tool-policy flags given wrongly on the command line. See `refusals`.
+    /// How hard this run asks the model to think, translated into each source's
+    /// own wire format. `None` leaves every source at its endpoint's default.
+    pub effort: Option<Effort>,
+    /// Flags given wrongly on the command line. See `refusals`.
     pub flag_errors: Vec<String>,
     /// Token rates for the summary's cost, `None` when unset or unusable.
     pub pricing: Option<Pricing>,
@@ -72,6 +76,15 @@ impl Runtime {
         let parsed = parse_args(args);
         let approval = resolve_approval(&env, &parsed);
         apply_tool_flags(&mut env, &parsed);
+        let mut flag_errors = parsed.flag_errors;
+        let effort = effort::resolve(
+            parsed.effort.as_deref(),
+            env.get("AFI_EFFORT").map(String::as_str),
+        )
+        .unwrap_or_else(|refusal| {
+            flag_errors.push(refusal);
+            None
+        });
 
         let mut rt = Runtime {
             sources,
@@ -100,7 +113,8 @@ impl Runtime {
                 env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
                 env.get("AFI_READ_ONLY").map(String::as_str),
             ),
-            flag_errors: parsed.flag_errors,
+            effort,
+            flag_errors,
             // At startup, so a typo is heard about before the run, not after.
             pricing: Pricing::from_env(&env),
             env,
@@ -113,6 +127,9 @@ impl Runtime {
         if let Some(name) = start {
             rt.switch_source(&name, None);
         }
+        // After the starting source is known, so the one warning it can raise
+        // names the source the run will actually use.
+        effort::apply_to_sources(&mut rt);
 
         rt
     }
@@ -172,12 +189,14 @@ impl Runtime {
 
     /// Why this run must not start, if it must not.
     ///
-    /// The tool-policy cases have a quiet fallback that is a wider grant than
-    /// the command line asked for, so neither may be a warning. The summary-file
-    /// case is checked here, by touching the path, rather than left to the write
-    /// at the end of the run: a caller that asked for a file is not watching
-    /// stdout for the JSON, and a run that has already been paid for is a poor
-    /// moment to learn the directory does not exist.
+    /// Every case is a setting whose quiet fallback leaves a finished run that
+    /// differs from the one the command line asked for, with nothing downstream
+    /// to notice: a wider tool grant than was asked for, or an effort nobody
+    /// chose. The summary-file case is checked here, by touching the path,
+    /// rather than left to the write at the end of the run: a caller that asked
+    /// for a file is not watching stdout for the JSON, and a run that has
+    /// already been paid for is a poor moment to learn the directory does not
+    /// exist.
     #[must_use]
     pub fn refusals(&self) -> Vec<String> {
         let mut out = self.flag_errors.clone();

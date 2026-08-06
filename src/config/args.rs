@@ -20,6 +20,7 @@ pub struct ParsedArgs {
     pub summary_file: Option<String>,
     pub allowed_tools: Option<String>,
     pub disallowed_tools: Option<String>,
+    pub effort: Option<String>,
     /// Flags that were given wrongly. Only the flags whose silent fallback
     /// loses something the caller asked for record here - see `set_required`.
     pub flag_errors: Vec<String>,
@@ -66,6 +67,7 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
         "--summary" => return set_opt(&mut out.summary, value),
         "--summary-file" => return set_summary_file(out, value),
         "--allowed-tools" | "--disallowed-tools" => return set_tool_flag(out, flag, value),
+        "--effort" => return set_effort(out, value),
         "--resume" | "-r" => {
             // bare --resume, or --resume <target> where target doesn't start
             // with '-' (so `--resume --yolo` doesn't swallow --yolo).
@@ -84,10 +86,11 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
 ///
 /// Unlike `set_opt`, a missing value cannot be shrugged off for these flags.
 /// `afi --disallowed-tools $DENY` with `DENY` unset would grant every tool while
-/// the command line says otherwise, and `afi --summary-file $OUT` with `OUT`
-/// unset would exit 0 having written nothing to the path a workflow is about to
-/// read. Both are silent failures in the direction nobody wants, so the run
-/// refuses to start instead. A value that looks like another flag - what
+/// the command line says otherwise, `afi --summary-file $OUT` with `OUT` unset
+/// would exit 0 having written nothing to the path a workflow is about to read,
+/// and a dropped `--effort $LEVEL` would run at an effort nobody asked for. All
+/// three are silent failures in the direction nobody wants, so the run refuses
+/// to start instead. A value that looks like another flag - what
 /// `--summary-file --yolo` produces - is the same mistake and is refused too,
 /// and is left unconsumed so the following flag still applies.
 fn set_required(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> Option<String> {
@@ -124,6 +127,18 @@ fn set_summary_file(out: &mut ParsedArgs, value: Option<&str>) -> bool {
         return true;
     }
     out.summary_file = Some(path);
+    true
+}
+
+/// Set `--effort`. Returns whether a value was consumed.
+///
+/// The level itself is validated later, against the sources it has to reach -
+/// see `config::effort`. All this decides is that one was given.
+fn set_effort(out: &mut ParsedArgs, value: Option<&str>) -> bool {
+    let Some(level) = set_required(out, "--effort", value) else {
+        return false;
+    };
+    out.effort = Some(level);
     true
 }
 

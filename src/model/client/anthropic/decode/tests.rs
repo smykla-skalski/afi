@@ -382,6 +382,7 @@ fn the_run_summary_reports_those_writes_separately() {
         cost_usd: None,
         elapsed_secs: 1.0,
         tools: known_tool_names().to_vec(),
+        effort: None,
     }
     .to_json();
     assert_eq!(json["usage"]["cache_write_tokens"], 2279);

@@ -54,12 +54,36 @@ pub(super) enum Thinking {
 ///
 /// Anything else is passed through rather than second-guessed; the API rejects
 /// a malformed value with a clearer message than afi could write.
+///
+/// The default gives way to omission above effort `high`, where `disabled` is
+/// no longer accepted - see [`disabled_would_be_rejected`].
 pub(super) fn resolve(extra_body: Option<&Value>) -> Option<Value> {
     match extra_body.and_then(|body| body.get("thinking")) {
+        None if disabled_would_be_rejected(extra_body) => None,
         None => Some(json!({"type": DISABLED})),
         Some(Value::Null) => None,
         Some(value) => Some(value.clone()),
     }
+}
+
+/// True at the effort levels where Claude Opus 5 rejects an explicit
+/// `disabled`.
+///
+/// `disabled` is afi's default because it is the value the widest set of models
+/// accepts, which stops being true above `high`: asking for that much effort and
+/// then turning thinking off is a contradiction the API refuses. Omitting the
+/// key leaves the model at its own default, which is the closest thing to
+/// "afi did not ask" - and an `--effort max` run failing every turn over a
+/// default the caller never set would be afi's bug, not theirs. Anything
+/// explicit in `EXTRA_BODY` still wins, including an explicit `disabled`.
+fn disabled_would_be_rejected(extra_body: Option<&Value>) -> bool {
+    matches!(
+        extra_body
+            .and_then(|body| body.get("output_config"))
+            .and_then(|config| config.get("effort"))
+            .and_then(Value::as_str),
+        Some("xhigh" | "max")
+    )
 }
 
 /// The replay mode implied by a resolved `thinking` value.

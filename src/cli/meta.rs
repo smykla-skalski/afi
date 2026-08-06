@@ -24,6 +24,7 @@ flags:
   -f, --prompt-file <path>       one-shot mode; '-' reads the prompt from stdin
   --summary json                 print a machine-readable run summary on stdout
   --summary-file <path>          also write that summary to a path
+  --effort <level>               low | medium | high | xhigh | max
   --read-only                    deny every tool that can change anything
   --allowed-tools <a,b>          only these tools may be called
   --disallowed-tools <a,b>       these tools may not be called

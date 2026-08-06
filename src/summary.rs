@@ -165,6 +165,11 @@ pub struct RunSummary<'a> {
     /// can confirm the restriction from the output alone, without trusting that
     /// the workflow passed the flag it claims to.
     pub tools: Vec<&'static str>,
+    /// The reasoning effort the requests carried, for the same reason as
+    /// `tools`. `None` when nothing set one, or when the source's endpoint has
+    /// no effort control afi knows - in both cases the run used the endpoint's
+    /// own default, which is what a null here means.
+    pub effort: Option<&'a str>,
 }
 
 impl RunSummary<'_> {
@@ -184,6 +189,7 @@ impl RunSummary<'_> {
             "usage": self.usage_json(),
             "elapsed_secs": round_millis(self.elapsed_secs),
             "tools": self.tools,
+            "effort": self.effort,
         })
     }
 

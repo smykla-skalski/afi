@@ -26,6 +26,33 @@ fn null_omits_the_key_entirely() {
 }
 
 #[test]
+fn effort_above_high_omits_the_default_rather_than_sending_disabled() {
+    // Opus 5 rejects an explicit `disabled` at these levels, so the default
+    // would fail every turn of an `--effort max` run.
+    for level in ["xhigh", "max"] {
+        let extra = json!({"output_config": {"effort": level}});
+        assert_eq!(resolve(Some(&extra)), None, "effort {level}");
+    }
+    for level in ["low", "medium", "high"] {
+        let extra = json!({"output_config": {"effort": level}});
+        assert_eq!(
+            resolve(Some(&extra)),
+            Some(json!({"type": "disabled"})),
+            "effort {level}"
+        );
+    }
+}
+
+#[test]
+fn an_explicit_thinking_still_wins_at_every_effort() {
+    let extra = json!({
+        "thinking": {"type": "disabled"},
+        "output_config": {"effort": "max"},
+    });
+    assert_eq!(resolve(Some(&extra)), Some(json!({"type": "disabled"})));
+}
+
+#[test]
 fn an_object_is_passed_through_verbatim() {
     let extra = json!({"thinking": {"type": "adaptive", "display": "summarized"}});
     assert_eq!(

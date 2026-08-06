@@ -9,6 +9,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io;
+use std::io::Read as _;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -131,7 +132,16 @@ fn describe_exe(exe: Option<&Path>) -> (String, String) {
 fn file_digest(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
+    // Read into the hasher by hand rather than with `io::copy`: digest 0.11 dropped
+    // the `io::Write` impl its hashers used to carry.
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
     let mut hex = String::with_capacity(64);
     for byte in hasher.finalize() {
         // Infallible: a String write cannot fail.

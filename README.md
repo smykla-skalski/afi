@@ -114,7 +114,11 @@ afi saves every chat automatically to `~/.afi/sessions/` (override with `AFI_HOM
 
 Inspired by [`minion.py`](https://github.com/Sentdex/minion), Sentdex's single-file Python coding agent.
 
-Hosting for the apt repository is provided free of charge by [Cloudsmith](https://cloudsmith.com) under their open-source plan.
+## Package hosting
+
+[![OSS hosting by Cloudsmith](https://img.shields.io/badge/OSS%20hosting%20by-cloudsmith-blue?logo=cloudsmith&style=flat-square)](https://cloudsmith.com)
+
+Package repository hosting is graciously provided by [Cloudsmith](https://cloudsmith.com). The apt repository runs on their open-source plan, free of charge.
 
 ## License
 

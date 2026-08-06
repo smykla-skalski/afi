@@ -13,6 +13,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--session <id>`                            | start a fresh run attached to a specific session id         |
 | `--prompt-file <path>` / `-f`               | non-interactive single-shot mode (reads from file or stdin) |
 | `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary)) |
+| `--read-only`                               | deny every tool that can change anything ([details](#tool-policy)) |
 | `--allowed-tools <a,b>`                     | only these tools may be called ([details](#tool-policy))    |
 | `--disallowed-tools <a,b>`                  | these tools may not be called ([details](#tool-policy))     |
 | `--version` / `-V`                          | print the version and build metadata ([details](#version-and-build-metadata)) |
@@ -60,17 +61,22 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_TOOL_RESULT_CHARS`                      | per-tool-result char cap (default 20000)                             |
 | `AFI_SUMMARY`                                | set to `json` for a run summary on stdout ([details](#run-summary))  |
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
+| `AFI_READ_ONLY`                              | deny every mutating tool ([details](#tool-policy))                    |
 | `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
 
 ## Tool policy
 
-`--allowed-tools` and `--disallowed-tools` (or `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS`) bound what a run can reach, independently of approval. The flag wins over the variable.
+`--read-only`, `--allowed-tools`, and `--disallowed-tools` (or `AFI_READ_ONLY`, `AFI_ALLOWED_TOOLS`, `AFI_DISALLOWED_TOOLS`) bound what a run can reach, independently of approval. A flag wins over its variable, except `--read-only`, which only ever turns the posture on.
 
 ```
-afi --yolo --allowed-tools read_file,list_dir -f review-prompt.txt
+afi --read-only -f review-prompt.txt
 ```
 
-Approval alone cannot express "read but do not write". Unattended there is nobody to answer a prompt, so anything above the threshold is denied and the run flails; the usual fix is `--yolo`, which grants `write_file`, `edit_file`, and `run_bash` in full. That is right for a human at a prompt and wrong for a job reading an untrusted pull-request diff. The two lists are that missing middle: `--yolo` still decides whether afi *asks*, while the policy decides what exists to ask about.
+That is the whole posture for a job that reads. `--read-only` denies `write_file`, `edit_file`, and `run_bash`, which are the only tools approval ever asks about, so nothing is left to prompt for and an unattended run needs no approval bypass. **It does not need `--yolo`, and pairing the two grants nothing** - the flag would only decide whether afi asks about tools the run can no longer call.
+
+Approval alone cannot express "read but do not write": it decides whether afi *asks*, while the policy decides what exists to ask about. A run that genuinely must write still needs approval settled, and that is the one case for `--yolo`; give it a tool policy too, so "do not ask me" does not also mean "anything at all".
+
+Prefer `--read-only` to spelling out an allow list. It names no tools, so it cannot be mistyped, and it is a denial, so it cannot be widened: `--read-only --allowed-tools run_bash` still leaves `run_bash` blocked. A new mutating tool is covered the day it is added, because the posture and the approval gate read one list.
 
 An absent or blank list means every tool, so `AFI_ALLOWED_TOOLS=""` from an unset shell variable is not a lockout. A non-empty allow list is exhaustive. Deny always wins, so `--allowed-tools read_file,run_bash --disallowed-tools run_bash` leaves only `read_file`. Names accept commas or whitespace and are case-insensitive. The tools are `read_file`, `write_file`, `edit_file`, `list_dir`, `run_bash`, and `wait_background`.
 
@@ -178,7 +184,7 @@ permissions:
   id-token: write
 steps:
   - uses: actions/checkout@v7
-  - run: afi --yolo -f prompt.txt
+  - run: afi --read-only -f prompt.txt
     env:
       AFI_ACTIVE: anthropic
       ANTHROPIC_FEDERATION_RULE_ID: fdrl_...
@@ -186,7 +192,7 @@ steps:
       ANTHROPIC_SERVICE_ACCOUNT_ID: svac_...
 ```
 
-CI needs `--yolo` or `AFI_APPROVAL=yolo`, or every write and bash call is denied - there is no terminal to answer the prompt, so afi declines rather than hanging. Pair it with a [tool policy](#tool-policy) so `--yolo` does not also mean unrestricted.
+A read-only job needs nothing else: there is no terminal to answer a prompt, and `--read-only` leaves nothing that would raise one. A job that has to write does need `--yolo` or `AFI_APPROVAL=yolo`, or every write and bash call is denied rather than hanging - pair it with a [tool policy](#tool-policy) so "do not ask me" does not also mean unrestricted.
 
 **Sampling parameters stay off the wire.** Anthropic rejects `temperature`, `top_p`, and `top_k`, and `min_p` and the DRY knobs belong to llama.cpp, so recovery falls back to its prompt-level nudges. `AFI_ANTHROPIC_EXTRA_BODY` accepts `output_config`, `metadata`, `stop_sequences`, and `service_tier`, and drops the rest.
 

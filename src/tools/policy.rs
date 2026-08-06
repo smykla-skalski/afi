@@ -24,6 +24,24 @@ use serde_json::Value;
 
 use super::known_tool_names;
 
+/// The tools that can change something outside afi: the two writers, and the
+/// shell, which can do anything at all.
+///
+/// One list, two readers. The dispatch approval gate asks whether a call needs
+/// confirming, and [`ToolPolicy::read_only`] denies exactly this set. A
+/// second hard-coded copy in either place would eventually disagree with this
+/// one, and the way it would disagree is by leaving a mutating tool ungated.
+pub const MUTATING_TOOLS: [&str; 3] = ["write_file", "edit_file", "run_bash"];
+
+/// Whether `name` can change anything outside afi.
+///
+/// Unknown names answer `false`: the policy refuses to start on a name it does
+/// not recognize, so nothing unregistered reaches dispatch to be classified.
+#[must_use]
+pub fn is_mutating(name: &str) -> bool {
+    MUTATING_TOOLS.contains(&name)
+}
+
 /// `final_answer` is turn plumbing, not a capability: the forced-final path
 /// offers it alone and reads the answer back out of the call. Blocking it would
 /// break the run rather than restrict it, so no policy controls it.
@@ -60,6 +78,49 @@ impl ToolPolicy {
             denied,
             unknown,
         }
+    }
+
+    /// Build from the three environment values that carry a policy.
+    ///
+    /// The env map is the carrier because `ModelConfig::from_env` is built in
+    /// four places from a map alone, and all four have to agree on what the run
+    /// may call. Reading the read-only decision here rather than at the call site
+    /// keeps that decision in one place with the rest of the policy.
+    #[must_use]
+    pub fn from_env(allowed: Option<&str>, denied: Option<&str>, read_only: Option<&str>) -> Self {
+        let policy = Self::parse(allowed, denied);
+        if read_only_requested(read_only) {
+            policy.read_only()
+        } else {
+            policy
+        }
+    }
+
+    /// Deny every mutating tool, whatever the allow list says.
+    ///
+    /// Expressed as a denial rather than an allow list of the readers, because
+    /// deny wins: `--read-only --allowed-tools run_bash` still blocks
+    /// `run_bash`. An allow list would have to argue with the user's own, and the
+    /// posture that loses an argument is not a protection. It also spares the
+    /// caller spelling tool names, which is where `--disallowed-tools run_bsah`
+    /// came from.
+    ///
+    /// Nothing here touches approval. Every remaining tool is one the approval
+    /// gate never asks about, so a read-only run needs no `--yolo` to go
+    /// unattended - that pairing only ever granted writes nobody wanted.
+    #[must_use]
+    pub fn read_only(mut self) -> Self {
+        self.denied
+            .extend(MUTATING_TOOLS.iter().map(|name| (*name).to_string()));
+        self
+    }
+
+    /// Whether this policy denies every mutating tool, for the banner and the
+    /// summary. True whether it came from `--read-only` or from a deny list that
+    /// happens to name all three.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        MUTATING_TOOLS.iter().all(|name| !self.permits(name))
     }
 
     /// Whether `name` may be dispatched.
@@ -166,6 +227,22 @@ impl ToolPolicy {
 /// policy has no opinion on it.
 fn schema_name(entry: &Value) -> Option<&str> {
     entry.pointer("/function/name").and_then(Value::as_str)
+}
+
+/// Whether an `AFI_READ_ONLY` value asks for the read-only posture.
+///
+/// Blank counts as unset, like every other value here, so an unset shell variable
+/// expanded into the environment is not a silent lockout. Anything else present
+/// and not an explicit off counts as on: a variable someone bothered to set
+/// should not be ignored because they wrote `on` rather than `1`.
+fn read_only_requested(raw: Option<&str>) -> bool {
+    match raw.map(str::trim) {
+        None | Some("") => false,
+        Some(value) => !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+    }
 }
 
 /// Split one list into canonical names, appending anything unregistered to

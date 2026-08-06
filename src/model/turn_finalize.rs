@@ -18,6 +18,7 @@ use crate::model::turn_dispatch::{
 };
 use crate::model::turn_stats::{TurnStats, handle_reasoning_stall, print_stats_footer};
 use crate::model::turn_stream::Accumulated;
+use crate::model::usage_totals;
 use crate::model::{TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL};
 use crate::term::{MessageKind, StreamKind, UserInterface};
 use crate::tools::protocol::parse_text_calls;
@@ -69,7 +70,12 @@ pub(crate) fn finalize_turn(
         },
         ui,
     );
-    let _ = normalize_usage(usage.as_ref(), timings.as_ref(), streamed_chars);
+    // Fold this turn into the run totals. The result used to be dropped here, so
+    // the cache and reasoning split was computed and thrown away on every
+    // provider, leaving nothing for a run report to draw on.
+    if let Some(normalized) = normalize_usage(usage.as_ref(), timings.as_ref(), streamed_chars) {
+        usage_totals::record(&normalized);
+    }
 
     if reasoning_only_chars > 0
         && text.trim().is_empty()

@@ -8,6 +8,7 @@ mod tui;
 pub use commands::CommandResult;
 
 use std::io::{self, IsTerminal};
+use std::time::Instant;
 
 use tokio::runtime::Runtime as TokioRuntime;
 
@@ -96,24 +97,29 @@ fn styled_approval(rt: &Runtime) -> String {
 /// # Panics
 ///
 /// Panics when the process cannot initialize its Tokio runtime.
-pub fn run_repl(rt: &mut Runtime) {
+pub fn run_repl(rt: &mut Runtime) -> bool {
     let mut owned = rt.clone();
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
     if let Some(prompt_file) = owned.prompt_file.clone() {
         restore_prompt_resume(&mut owned);
-        let mut ui = PlainUi::new();
-        runtime.block_on(run_one_shot_async(&prompt_file, &owned, &mut ui));
+        let mut ui = plain_ui_for(&owned);
+        let ok = runtime.block_on(run_one_shot_async(&prompt_file, &owned, &mut ui));
         *rt = owned;
-        return;
+        return ok;
     }
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
         match runtime.block_on(tui::run(owned)) {
             Ok(updated) => *rt = updated,
             Err(error) => eprintln!("afi TUI error: {error}"),
         }
-    } else {
-        *rt = runtime.block_on(run_plain(owned));
+        // A human is watching a TTY session; nothing to report to a caller.
+        return true;
     }
+    // Piped stdin with no --prompt-file is still a non-interactive run, so it
+    // reports and exits like one.
+    let (updated, ok) = runtime.block_on(run_plain(owned));
+    *rt = updated;
+    ok
 }
 
 /// Public one-shot helper. Output stays plain even when caller owns a TTY.
@@ -121,14 +127,29 @@ pub fn run_repl(rt: &mut Runtime) {
 /// # Panics
 ///
 /// Panics when the process cannot initialize its Tokio runtime.
-pub fn run_one_shot(prompt_file: &str, rt: &Runtime) {
+#[must_use]
+pub fn run_one_shot(prompt_file: &str, rt: &Runtime) -> bool {
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
-    let mut ui = PlainUi::new();
-    runtime.block_on(run_one_shot_async(prompt_file, rt, &mut ui));
+    let mut ui = plain_ui_for(rt);
+    runtime.block_on(run_one_shot_async(prompt_file, rt, &mut ui))
 }
 
-async fn run_plain(rt: Runtime) -> Runtime {
-    let mut ui = PlainUi::new();
+/// A plain ui, with human output moved off stdout when the run summary claims it.
+///
+/// Otherwise the rendered answer and the JSON share stdout and the summary cannot
+/// be parsed - `afi --summary json -f p.txt | jq` fails on the prose.
+fn plain_ui_for(rt: &Runtime) -> PlainUi {
+    if rt.summary.is_json() {
+        PlainUi::diverted()
+    } else {
+        PlainUi::new()
+    }
+}
+
+/// Returns the updated runtime and whether every turn succeeded.
+async fn run_plain(rt: Runtime) -> (Runtime, bool) {
+    let started = Instant::now();
+    let mut ui = plain_ui_for(&rt);
     let mut core = ReplCore::new(rt, &mut ui);
     loop {
         match ui.read_prompt("  > ") {
@@ -150,5 +171,7 @@ async fn run_plain(rt: Runtime) -> Runtime {
             }
         }
     }
-    core.into_runtime()
+    core.print_summary(started.elapsed());
+    let ok = !core.failed();
+    (core.into_runtime(), ok)
 }

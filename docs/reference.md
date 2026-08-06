@@ -12,6 +12,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--resume [target]`                         | resume a saved session - bare = most recent                 |
 | `--session <id>`                            | start a fresh run attached to a specific session id         |
 | `--prompt-file <path>` / `-f`               | non-interactive single-shot mode (reads from file or stdin) |
+| `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary)) |
 
 ## Environment variables
 
@@ -30,6 +31,44 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `AFI_MAX_TOKENS`                             | token cap for normal streaming requests (default 16000)              |
 | `AFI_READ_FILE_LINES`                        | default lines returned by `read_file` (default 400)                  |
 | `AFI_TOOL_RESULT_CHARS`                      | per-tool-result char cap (default 20000)                             |
+| `AFI_SUMMARY`                                | set to `json` for a run summary on stdout ([details](#run-summary))  |
+
+## Run summary
+
+`--summary json` (or `AFI_SUMMARY=json`) prints one JSON object on stdout after a non-interactive run, for CI that needs the result rather than the rendered transcript:
+
+```json
+{
+  "ok": true,
+  "error": null,
+  "source": "anthropic",
+  "model": "claude-sonnet-5",
+  "answer": "…the model's final text…",
+  "usage": {
+    "input_tokens": 4126,
+    "output_tokens": 484,
+    "cache_read_tokens": 6837,
+    "reasoning_tokens": 0,
+    "total_tokens": 11447,
+    "requests": 3
+  },
+  "elapsed_secs": 12.17
+}
+```
+
+`answer` is the last assistant message with text, so a review flow can post it directly. Turns that only called tools are skipped.
+
+The four token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run.
+
+**No cost field.** Anthropic returns no cost, so any figure here would come from a price table that goes stale without anyone noticing. Multiply the token counts by rates you control.
+
+**One gap.** Anthropic prices cache *writes* above cache reads, but `cache_creation_input_tokens` is folded into `input_tokens` rather than broken out, so a cost calculation treats a write as a plain input token and under-counts it.
+
+A failed run sets `ok` to false, fills in `error`, and exits 1.
+
+Both non-interactive entry points report it: `--prompt-file`, and piped stdin with no prompt file. A piped session summarizes the whole session, so `answer` is its last assistant text and `usage` covers every request it made, `/compress` included; any turn failing outright makes the run fail, `/recover` included. An interactive TTY session prints nothing extra and always exits 0 — stdout there is the rendered interface, and a human is already reading it.
+
+**Human output moves to stderr** while `--summary json` is set, so stdout holds nothing but the JSON and pipes straight into a parser. Errors go to stderr either way.
 
 ## Anthropic
 

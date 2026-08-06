@@ -17,6 +17,45 @@ pub struct PlainUi {
     prompt_visible: bool,
     stdout_styled: bool,
     stderr_styled: bool,
+    human_stream: HumanStream,
+}
+
+/// Which stream human-facing output goes on.
+///
+/// When a machine-readable summary owns stdout, human output moves to stderr so
+/// stdout parses as JSON on its own. Without that the rendered answer and the
+/// summary share the stream and `| jq` fails on the prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HumanStream {
+    Stdout,
+    Stderr,
+}
+
+/// An owned lock on whichever stream human output goes to.
+///
+/// Concrete rather than `Box<dyn Write>`: `write_stream` runs once per streamed
+/// delta, so a trait object would mean a heap allocation and a virtual call on
+/// every chunk of every answer. Both locks are `'static`, so neither borrows the
+/// handle that produced it.
+enum HumanWriter {
+    Stdout(io::StdoutLock<'static>),
+    Stderr(io::StderrLock<'static>),
+}
+
+impl Write for HumanWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Stdout(out) => out.write(buf),
+            Self::Stderr(out) => out.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Stdout(out) => out.flush(),
+            Self::Stderr(out) => out.flush(),
+        }
+    }
 }
 
 impl PlainUi {
@@ -29,6 +68,24 @@ impl PlainUi {
             prompt_visible: io::stdin().is_terminal() && io::stdout().is_terminal(),
             stdout_styled: io::stdout().is_terminal(),
             stderr_styled: io::stderr().is_terminal(),
+            human_stream: HumanStream::Stdout,
+        }
+    }
+
+    /// Move all human output to stderr, leaving stdout for the run summary.
+    #[must_use]
+    pub fn diverted() -> Self {
+        Self {
+            human_stream: HumanStream::Stderr,
+            ..Self::new()
+        }
+    }
+
+    /// The stream human output belongs on, and whether it may carry ANSI.
+    fn human(&self) -> (HumanWriter, bool) {
+        match self.human_stream {
+            HumanStream::Stderr => (HumanWriter::Stderr(io::stderr().lock()), self.stderr_styled),
+            HumanStream::Stdout => (HumanWriter::Stdout(io::stdout().lock()), self.stdout_styled),
         }
     }
 
@@ -42,9 +99,9 @@ impl PlainUi {
             return Err(error);
         }
         let stdin = io::stdin();
-        let mut stdout = io::stdout().lock();
+        let (mut out, _) = self.human();
         let prompt = if self.prompt_visible { prompt } else { "" };
-        read_prompt_from(&mut stdin.lock(), &mut stdout, prompt)
+        read_prompt_from(&mut stdin.lock(), &mut out, prompt)
     }
 
     fn write_message(&mut self, kind: MessageKind, text: &str) -> io::Result<()> {
@@ -56,10 +113,10 @@ impl PlainUi {
             MessageKind::Tool => ("\x1b[36m", false),
         };
         if stderr {
-            write_line(&mut io::stderr().lock(), text, color, self.stderr_styled)
-        } else {
-            write_line(&mut io::stdout().lock(), text, color, self.stdout_styled)
+            return write_line(&mut io::stderr().lock(), text, color, self.stderr_styled);
         }
+        let (mut out, styled) = self.human();
+        write_line(&mut out, text, color, styled)
     }
 
     fn write_stream(&mut self, kind: StreamKind, delta: &str) -> io::Result<()> {
@@ -70,12 +127,8 @@ impl PlainUi {
             self.close_stream()?;
             if kind == StreamKind::Reasoning {
                 let heading = "-- reasoning --";
-                write_line(
-                    &mut io::stdout().lock(),
-                    heading,
-                    "\x1b[2m",
-                    self.stdout_styled,
-                )?;
+                let (mut out, styled) = self.human();
+                write_line(&mut out, heading, "\x1b[2m", styled)?;
             }
             self.stream = Some(kind);
         }
@@ -83,8 +136,8 @@ impl PlainUi {
             StreamKind::Assistant => "\x1b[32m",
             StreamKind::Reasoning => "\x1b[2m",
         };
-        let mut out = io::stdout().lock();
-        if self.stdout_styled {
+        let (mut out, styled) = self.human();
+        if styled {
             write!(out, "{color}{delta}\x1b[0m")
         } else {
             write!(out, "{delta}")
@@ -94,7 +147,8 @@ impl PlainUi {
 
     fn close_stream(&mut self) -> io::Result<()> {
         if self.stream.take().is_some() {
-            writeln!(io::stdout().lock())?;
+            let (mut out, _) = self.human();
+            writeln!(out)?;
         }
         Ok(())
     }

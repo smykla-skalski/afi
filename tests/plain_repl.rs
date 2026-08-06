@@ -44,7 +44,6 @@ fn piped_repl_has_no_prompt_or_terminal_escapes() {
 fn stdin_prompt_file_stays_plain_and_session_free() {
     let home = TempDir::new().unwrap();
     let output = run_afi(&home, &["--prompt-file", "-"], "hello\n");
-    assert!(output.status.success());
     assert!(!output.stdout.contains(&b'\x1b'));
     assert!(!output.stderr.contains(&b'\x1b'));
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -53,6 +52,111 @@ fn stdin_prompt_file_stays_plain_and_session_free() {
         "unexpected stderr: {stderr:?}"
     );
     assert!(!home.path().join("sessions").exists());
+}
+
+#[test]
+fn a_one_shot_run_against_an_unreachable_server_exits_nonzero() {
+    // The base url points at a closed port, so this run cannot succeed. It used
+    // to exit 0 regardless, which let CI read a failed review as a passing one.
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &["--prompt-file", "-"], "hello\n");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a failed run must exit 1: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn the_json_summary_reports_a_failed_run_as_not_ok() {
+    let home = TempDir::new().unwrap();
+    let output = run_afi(
+        &home,
+        &["--prompt-file", "-", "--summary", "json"],
+        "hello\n",
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("summary must be valid json");
+    assert_eq!(summary["ok"], false);
+    assert!(!summary["error"].is_null(), "a failure must name a reason");
+    assert_eq!(summary["model"], "test-model");
+    // No turn ever reported usage, so this stays null rather than a row of zeros.
+    assert_eq!(summary["usage"], serde_json::Value::Null);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn stdout_is_nothing_but_the_summary_so_it_pipes_to_a_parser() {
+    // The whole point of the flag. The rendered answer and the stats footer used
+    // to share stdout with the JSON, so `afi --summary json -f p.txt | jq` died
+    // with a parse error on the prose.
+    let home = TempDir::new().unwrap();
+    let output = run_afi(
+        &home,
+        &["--prompt-file", "-", "--summary", "json"],
+        "hello\n",
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .unwrap_or_else(|error| panic!("stdout must parse whole: {error}, got {stdout:?}"));
+    // The human-facing error moved to stderr rather than disappearing.
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("can't reach"),
+        "the error must still be reported: {stderr:?}"
+    );
+}
+
+#[test]
+fn a_failing_recover_command_fails_the_run() {
+    // /recover runs a model turn through a different path than a plain prompt.
+    // It used to discard the turn status, so a session whose only failure came
+    // from /recover reported ok:true and exited 0.
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &["--summary", "json"], "/recover\n/quit\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("summary must be valid json");
+    assert_eq!(summary["ok"], false, "a failed /recover must fail the run");
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn no_summary_is_printed_unless_asked_for() {
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &["--prompt-file", "-"], "hello\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.lines().any(|l| l.starts_with('{')),
+        "unexpected summary on stdout: {stdout:?}"
+    );
+}
+
+#[test]
+fn a_piped_session_without_a_prompt_file_also_reports_and_fails() {
+    // Piped stdin with no --prompt-file is the other non-interactive entry
+    // point. It used to print no summary and exit 0 no matter what happened,
+    // so a workflow using it could not tell a broken run from a good one.
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &["--summary", "json"], "hello\n/quit\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("summary must be valid json");
+    assert_eq!(summary["ok"], false);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn a_piped_session_prints_no_summary_by_default() {
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &[], "hello\n/quit\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.lines().any(|l| l.starts_with('{')),
+        "unexpected summary on stdout: {stdout:?}"
+    );
 }
 
 #[test]

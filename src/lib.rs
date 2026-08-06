@@ -21,6 +21,7 @@ pub mod prompt;
 pub mod repl;
 pub mod risk;
 pub mod sessions;
+pub mod summary;
 pub mod term;
 pub mod tools;
 pub mod util;

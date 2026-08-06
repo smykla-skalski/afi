@@ -5,6 +5,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -14,12 +15,14 @@ use crate::approval::ApprovalState;
 use crate::cli::session_id_from_args;
 use crate::config::{Runtime, Source};
 use crate::log::log_event;
-use crate::model::ModelConfig;
 use crate::model::client::ReqwestClient;
 use crate::model::turn::{LoopRequest, run_model_turn_loop};
+use crate::model::usage_totals;
+use crate::model::{ModelConfig, TURN_FAILED};
 use crate::prompt::SYSTEM;
 use crate::risk::{HighDefaultClassifier, detect_project_root};
 use crate::sessions::{self, new_session_id, safe_title};
+use crate::summary::{RunSummary, final_answer};
 use crate::term::{MessageKind, UserInterface};
 
 /// Inputs for one model loop shared by REPL, one-shot, and `/recover`.
@@ -34,11 +37,12 @@ pub(crate) struct TurnParams<'a> {
 }
 
 /// Run one model loop without owning terminal/runtime lifecycle.
+/// Returns the terminal TURN_* status of the run.
 pub(crate) async fn run_turn_loop(
     messages: &mut Vec<Value>,
     params: &TurnParams<'_>,
     ui: &mut dyn UserInterface,
-) {
+) -> String {
     let client = ReqwestClient::new();
     let classifier = HighDefaultClassifier;
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -60,7 +64,7 @@ pub(crate) async fn run_turn_loop(
         },
         ui,
     )
-    .await;
+    .await
 }
 
 pub(crate) struct ReplCore {
@@ -69,6 +73,9 @@ pub(crate) struct ReplCore {
     dir: PathBuf,
     session_id: String,
     messages: Vec<Value>,
+    /// Sticky: set by any turn that failed outright, so the session's exit code
+    /// reflects the whole run rather than only its last turn.
+    failed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +107,7 @@ impl ReplCore {
             dir,
             session_id,
             messages,
+            failed: false,
         }
     }
 
@@ -120,6 +128,7 @@ impl ReplCore {
             &mut self.session_id,
             &env,
             ui,
+            &mut self.failed,
         )
         .await
         {
@@ -164,7 +173,7 @@ impl ReplCore {
             );
             return;
         };
-        run_turn_loop(
+        let status = run_turn_loop(
             &mut self.messages,
             &TurnParams {
                 config: &self.config,
@@ -178,6 +187,29 @@ impl ReplCore {
             ui,
         )
         .await;
+        if status == TURN_FAILED {
+            // Remembered for the whole session, not just this turn: a piped run
+            // in CI must not exit 0 because a later turn happened to work.
+            self.failed = true;
+        }
+    }
+
+    /// Whether any turn in this session failed outright.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Print the run summary, if one was asked for.
+    pub(crate) fn print_summary(&self, elapsed: Duration) {
+        if !self.rt.summary.is_json() {
+            return;
+        }
+        print_json_summary(
+            &self.rt,
+            &self.messages,
+            self.failed.then_some("a model request failed"),
+            elapsed,
+        );
     }
 
     fn auto_save(&mut self, input: &str) {
@@ -254,33 +286,48 @@ pub(crate) fn restore_prompt_resume(rt: &mut Runtime) {
     }
 }
 
+/// Run a single prompt and report whether it succeeded.
+///
+/// The bool is the process exit status: a one-shot run that printed an HTTP error
+/// used to exit 0, so CI treated a failed run as a passing one.
 pub(crate) async fn run_one_shot_async(
     prompt_file: &str,
     rt: &Runtime,
     ui: &mut dyn UserInterface,
-) {
-    let prompt = match read_prompt_file(prompt_file) {
-        Ok(prompt) => prompt,
-        Err(error) => {
-            ui.message(MessageKind::Error, error);
-            return;
-        }
-    };
-    let mut messages = vec![
-        json!({"role": "system", "content": SYSTEM}),
-        json!({"role": "user", "content": prompt}),
-    ];
+) -> bool {
+    // One process is one run, but tests share a process.
+    usage_totals::reset();
+    let started = Instant::now();
+    let mut messages = Vec::new();
+    let outcome = one_shot_run(prompt_file, rt, ui, &mut messages).await;
+    if rt.summary.is_json() {
+        let error = outcome.as_ref().err().map(String::as_str);
+        print_json_summary(rt, &messages, error, started.elapsed());
+    }
+    outcome.is_ok()
+}
+
+/// The run itself. `Err` carries the reason, already reported to the ui.
+async fn one_shot_run(
+    prompt_file: &str,
+    rt: &Runtime,
+    ui: &mut dyn UserInterface,
+    messages: &mut Vec<Value>,
+) -> Result<(), String> {
+    let prompt = read_prompt_file(prompt_file).inspect_err(|error| {
+        ui.message(MessageKind::Error, error.clone());
+    })?;
+    messages.push(json!({"role": "system", "content": SYSTEM}));
+    messages.push(json!({"role": "user", "content": prompt.clone()}));
     log_event("req", &json!({"prompt": prompt, "mode": "one_shot"}));
     let (Some(source), Some(model)) = (rt.active_source(), rt.model.as_ref()) else {
-        ui.message(
-            MessageKind::Error,
-            "no active source - set AFI_BASE_URL and AFI_MODEL".to_string(),
-        );
-        return;
+        let error = "no active source - set AFI_BASE_URL and AFI_MODEL".to_string();
+        ui.message(MessageKind::Error, error.clone());
+        return Err(error);
     };
     let config = ModelConfig::from_env(&rt.env);
-    run_turn_loop(
-        &mut messages,
+    let status = run_turn_loop(
+        messages,
         &TurnParams {
             config: &config,
             source,
@@ -293,6 +340,25 @@ pub(crate) async fn run_one_shot_async(
         ui,
     )
     .await;
+    if status == TURN_FAILED {
+        // report_client_error already printed the specific failure.
+        return Err("the model request failed".to_string());
+    }
+    Ok(())
+}
+
+/// Print the machine-readable run summary on stdout.
+fn print_json_summary(rt: &Runtime, messages: &[Value], error: Option<&str>, elapsed: Duration) {
+    let run = RunSummary {
+        ok: error.is_none(),
+        error,
+        source: rt.active.as_deref(),
+        model: rt.model.as_deref(),
+        answer: final_answer(messages),
+        usage: usage_totals::snapshot(),
+        elapsed_secs: elapsed.as_secs_f64(),
+    };
+    println!("{}", run.to_json());
 }
 
 fn read_prompt_file(prompt_file: &str) -> Result<String, String> {

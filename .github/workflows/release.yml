@@ -150,20 +150,25 @@ jobs:
         if: steps.plan.outputs.released == 'true'
         run: git --no-pager diff --stat
 
-      # Signed because the ruleset requires it. The key belongs to the app, so
-      # the bump commit is attributable to the automation rather than to a person
-      # who did not write it.
+      # Through the API rather than git, because the ruleset requires signed
+      # commits and a runner has no key to sign with. GitHub signs commits it
+      # creates, so the rule is satisfied outright instead of relying on the app
+      # being exempt from it. The app's bypass then covers only the missing pull
+      # request, which is the one rule it has to.
       - name: Commit the version bump
         if: steps.plan.outputs.released == 'true' && !inputs.dry_run
         env:
-          VERSION: ${{ steps.plan.outputs.version }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          AFI_RELEASE_TAG: ${{ steps.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          git config user.name "smyklot[bot]"
-          git config user.email "smyklot[bot]@users.noreply.github.com"
-          git commit -s -m "chore(release): ${VERSION}" \
-            -- Cargo.toml Cargo.lock CHANGELOG.md
-          git push origin HEAD:main
+          oid="$(./scripts/commit-release.sh Cargo.toml Cargo.lock CHANGELOG.md)"
+          echo "Committed ${oid} to main."
+          # release-plz tags whatever is checked out, so move to the commit the
+          # API just made. Without this the tag would point at the parent and the
+          # released tarballs and packages would carry the previous version.
+          git fetch origin main --quiet
+          git reset --hard "${oid}" --quiet
 
       # release-plz creates the tag and the GitHub release, and fills the release
       # body with this version's changelog section. Publishing to crates.io is off
@@ -176,13 +181,20 @@ jobs:
         run: |
           set -euo pipefail
           args=()
-          [[ "${DRY_RUN}" == "true" ]] && args+=(--dry-run)
+          # --allow-dirty goes with --dry-run: a dry run skips the commit, so the
+          # bump is still sitting in the working tree and release-plz would
+          # otherwise refuse to look at it.
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            args+=(--dry-run --allow-dirty)
+          fi
           mise x -- release-plz release "${args[@]+"${args[@]}"}"
 
   upload:
     name: ${{ matrix.target }}
     needs: plan
-    if: needs.plan.outputs.released == 'true'
+    # A dry run creates no tag, and every step here builds from one. Without the
+    # second condition all three legs fail on an unresolvable ref.
+    if: needs.plan.outputs.released == 'true' && !inputs.dry_run
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     permissions:
       contents: write

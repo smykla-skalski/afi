@@ -73,6 +73,9 @@ pub(crate) struct ReplCore {
     dir: PathBuf,
     session_id: String,
     messages: Vec<Value>,
+    /// Sticky: set by any turn that failed outright, so the session's exit code
+    /// reflects the whole run rather than only its last turn.
+    failed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +107,7 @@ impl ReplCore {
             dir,
             session_id,
             messages,
+            failed: false,
         }
     }
 
@@ -168,7 +172,7 @@ impl ReplCore {
             );
             return;
         };
-        run_turn_loop(
+        let status = run_turn_loop(
             &mut self.messages,
             &TurnParams {
                 config: &self.config,
@@ -182,6 +186,29 @@ impl ReplCore {
             ui,
         )
         .await;
+        if status == TURN_FAILED {
+            // Remembered for the whole session, not just this turn: a piped run
+            // in CI must not exit 0 because a later turn happened to work.
+            self.failed = true;
+        }
+    }
+
+    /// Whether any turn in this session failed outright.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Print the run summary, if one was asked for.
+    pub(crate) fn print_summary(&self, elapsed: Duration) {
+        if !self.rt.summary.is_json() {
+            return;
+        }
+        print_json_summary(
+            &self.rt,
+            &self.messages,
+            self.failed.then_some("a model request failed"),
+            elapsed,
+        );
     }
 
     fn auto_save(&mut self, input: &str) {

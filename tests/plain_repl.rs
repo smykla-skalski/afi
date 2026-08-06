@@ -104,6 +104,36 @@ fn no_summary_is_printed_unless_asked_for() {
 }
 
 #[test]
+fn a_piped_session_without_a_prompt_file_also_reports_and_fails() {
+    // Piped stdin with no --prompt-file is the other non-interactive entry
+    // point. It used to print no summary and exit 0 no matter what happened,
+    // so a workflow using it could not tell a broken run from a good one.
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &["--summary", "json"], "hello\n/quit\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|l| l.starts_with('{'))
+        .unwrap_or_else(|| panic!("no json summary in stdout: {stdout:?}"));
+    let summary: serde_json::Value =
+        serde_json::from_str(line).expect("summary must be valid json");
+    assert_eq!(summary["ok"], false);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn a_piped_session_prints_no_summary_by_default() {
+    let home = TempDir::new().unwrap();
+    let output = run_afi(&home, &[], "hello\n/quit\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.lines().any(|l| l.starts_with('{')),
+        "unexpected summary on stdout: {stdout:?}"
+    );
+}
+
+#[test]
 fn piped_sessions_listing_has_no_terminal_escapes() {
     let home = TempDir::new().unwrap();
     let session_id = "20250101-120000-piped0";

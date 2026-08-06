@@ -66,6 +66,8 @@ The four token counts are disjoint and sum to `total_tokens`. They are per-run t
 
 A failed run sets `ok` to false, fills in `error`, and exits 1.
 
+Both non-interactive entry points report it: `--prompt-file`, and piped stdin with no prompt file. A piped session summarizes the whole session, so `answer` is its last assistant text and `usage` covers every turn; any turn failing outright makes the run fail. An interactive TTY session prints nothing extra and always exits 0 — stdout there is the rendered interface, and a human is already reading it.
+
 ## Anthropic
 
 Every other source speaks OpenAI-compatible `/chat/completions`. Anthropic speaks its own Messages API (`POST /v1/messages`): real `tool_use` blocks, adaptive thinking, and a cached system prompt. Sessions, `/compress`, and transcripts are unchanged.

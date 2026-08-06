@@ -8,6 +8,7 @@ mod tui;
 pub use commands::CommandResult;
 
 use std::io::{self, IsTerminal};
+use std::time::Instant;
 
 use tokio::runtime::Runtime as TokioRuntime;
 
@@ -111,11 +112,14 @@ pub fn run_repl(rt: &mut Runtime) -> bool {
             Ok(updated) => *rt = updated,
             Err(error) => eprintln!("afi TUI error: {error}"),
         }
-    } else {
-        *rt = runtime.block_on(run_plain(owned));
+        // A human is watching a TTY session; nothing to report to a caller.
+        return true;
     }
-    // An interactive session ending is not a failure.
-    true
+    // Piped stdin with no --prompt-file is still a non-interactive run, so it
+    // reports and exits like one.
+    let (updated, ok) = runtime.block_on(run_plain(owned));
+    *rt = updated;
+    ok
 }
 
 /// Public one-shot helper. Output stays plain even when caller owns a TTY.
@@ -130,7 +134,9 @@ pub fn run_one_shot(prompt_file: &str, rt: &Runtime) -> bool {
     runtime.block_on(run_one_shot_async(prompt_file, rt, &mut ui))
 }
 
-async fn run_plain(rt: Runtime) -> Runtime {
+/// Returns the updated runtime and whether every turn succeeded.
+async fn run_plain(rt: Runtime) -> (Runtime, bool) {
+    let started = Instant::now();
     let mut ui = PlainUi::new();
     let mut core = ReplCore::new(rt, &mut ui);
     loop {
@@ -153,5 +159,7 @@ async fn run_plain(rt: Runtime) -> Runtime {
             }
         }
     }
-    core.into_runtime()
+    core.print_summary(started.elapsed());
+    let ok = !core.failed();
+    (core.into_runtime(), ok)
 }

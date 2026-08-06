@@ -48,3 +48,28 @@ description = "Install the current afi binary into the standard Cargo bin direct
 # --path . installs this local package; --locked pins to Cargo.lock; --force
 # overwrites any previously installed afi safely; --bin afi selects the binary.
 run = "cargo install --path . --locked --force --bin afi"
+
+# Debian packaging lane.
+#
+# cargo-deb is pinned so a release and a local run produce the same package
+# layout. It belongs in this repository-wide table rather than scoped to the deb
+# task: a task-scoped `tools` entry is never provisioned, and mise reports it as
+# "installed but not activated" while the task dies on `cargo-deb: command not
+# found`. `mise install` picks it up from here, which is what jdx/mise-action
+# runs in CI; run it once yourself if your mise config has auto_install off.
+# It is a ~12s from-source build, cached after that, because upstream publishes
+# release binaries only as an amd64 .deb.
+[tools]
+"cargo:cargo-deb" = "3.7.0"
+
+[tasks."deb:version"]
+description = "Print the Debian package version derived from Cargo.toml"
+run = "./scripts/deb-version.sh"
+
+[tasks.deb]
+description = "Package an already-built release binary as a .deb (arg: target triple)"
+run = "./scripts/build-deb.sh"
+
+[tasks."deb:verify"]
+description = "Install a .deb in a clean container from a signed local apt repository (arg: .deb path)"
+run = "./scripts/verify-deb.sh"

@@ -44,14 +44,13 @@ The TUI caches formatted transcript entries, wrapped row counts, the visible con
 
 Piped input, redirected output, and prompt-file runs keep a separate plain interface. It writes no ANSI escapes or prompts to redirected streams, denies non-interactive approval requests, and treats EOF as shutdown instead of retrying forever.
 
-### Changed — Rust port
+### Changed — Rust implementation
 
-`afi` is now a Rust binary. The Python implementation (`minion.py`) at
-`Sentdex/minion` is superseded by a from-scratch Rust port at
-`smykla-skalski/afi`. Behavior is intended to be identical except for
-the documented breaking changes below. The CLI flags, env vars, slash
-commands, system prompt, tool schemas, recovery knobs, session auto-save,
-multi-source system, approval gating, and TUI chatbox all behave as before.
+`afi` is now a Rust binary, replacing the earlier Python one. Behavior is
+unchanged except for the breaking changes documented below. The CLI flags, env
+vars, slash commands, system prompt, tool schemas, recovery knobs, session
+auto-save, multi-source system, approval gating, and TUI chatbox all behave as
+before.
 
 **Breaking — traffic log moved to `~/.afi/logs/traffic.jsonl`.**
 The old `llamacpp.log` next to the script is gone — an installed binary has

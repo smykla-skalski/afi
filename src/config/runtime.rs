@@ -7,6 +7,7 @@ use std::path::Path;
 use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
 use crate::envfile;
 use crate::summary::SummaryFormat;
+use crate::tools::policy::ToolPolicy;
 
 use super::builtins::add_builtin_sources;
 use super::{Protocol, Source, build_http_headers, parse_extra_body};
@@ -31,6 +32,10 @@ pub struct Runtime {
     pub env: HashMap<String, String>,
     /// How to report the run once it finishes. Off unless asked for.
     pub summary: SummaryFormat,
+    /// Which tools this run may call. Held rather than re-derived because the
+    /// header renders it on every frame; `ModelConfig::from_env` reads the same
+    /// env vars, so the two cannot disagree.
+    pub tool_policy: ToolPolicy,
 }
 
 /// Parsed CLI args - the subset that affects initial state. The `sessions`
@@ -45,6 +50,8 @@ pub struct ParsedArgs {
     pub prompt_file: Option<String>,
     pub sessions_query: Option<Vec<String>>,
     pub summary: Option<String>,
+    pub allowed_tools: Option<String>,
+    pub disallowed_tools: Option<String>,
 }
 
 /// Parse argv into the subset that affects runtime construction.
@@ -85,6 +92,8 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
         "--session" => return set_opt(&mut out.session, value),
         "--prompt-file" | "-f" => return set_opt(&mut out.prompt_file, value),
         "--summary" => return set_opt(&mut out.summary, value),
+        "--allowed-tools" => return set_opt(&mut out.allowed_tools, value),
+        "--disallowed-tools" => return set_opt(&mut out.disallowed_tools, value),
         "--resume" | "-r" => {
             // bare --resume, or --resume <target> where target doesn't start
             // with '-' (so `--resume --yolo` doesn't swallow --yolo).
@@ -130,6 +139,7 @@ impl Runtime {
         let (sources, source_order) = discover_sources(&env);
         let parsed = parse_args(args);
         let approval = resolve_approval(&env, &parsed);
+        apply_tool_flags(&mut env, &parsed);
 
         let mut rt = Runtime {
             sources,
@@ -146,6 +156,10 @@ impl Runtime {
                     .summary
                     .as_deref()
                     .or_else(|| env.get("AFI_SUMMARY").map(String::as_str)),
+            ),
+            tool_policy: ToolPolicy::parse(
+                env.get("AFI_ALLOWED_TOOLS").map(String::as_str),
+                env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
             ),
             env,
         };
@@ -249,6 +263,24 @@ fn resolve_approval(env: &HashMap<String, String>, parsed: &ParsedArgs) -> Appro
         approval.approve_level = None;
     }
     approval
+}
+
+/// Materialize `--allowed-tools` / `--disallowed-tools` into the env map so the
+/// flag wins over the variable, matching every other setting.
+///
+/// The env map is where the policy lives because `ModelConfig::from_env` is
+/// built in four places from an env map alone, and all four must agree on what
+/// the run may call. A child `run_bash` process inherits this env, so a nested
+/// `afi` inherits the restriction too rather than escaping it.
+fn apply_tool_flags(env: &mut HashMap<String, String>, parsed: &ParsedArgs) {
+    for (flag, var) in [
+        (&parsed.allowed_tools, "AFI_ALLOWED_TOOLS"),
+        (&parsed.disallowed_tools, "AFI_DISALLOWED_TOOLS"),
+    ] {
+        if let Some(value) = flag {
+            env.insert(var.to_string(), value.clone());
+        }
+    }
 }
 
 /// Build the sources map + ordered list from `AFI_SOURCE_*` env vars,

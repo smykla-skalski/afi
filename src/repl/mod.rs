@@ -42,6 +42,9 @@ pub fn banner(rt: &Runtime) -> String {
         parts.push(format!("{MAGENTA}{active}{RESET}"));
     }
     parts.push(styled_approval(rt));
+    if let Some(text) = tool_policy_text(rt) {
+        parts.push(format!("{YELLOW}{text}{RESET}"));
+    }
     if let Some(src) = rt.active_source() {
         parts.push(format!("{DIM}{}{RESET}", src.base_url));
     }
@@ -58,10 +61,21 @@ pub(crate) fn header(rt: &Runtime) -> String {
         parts.push(active.clone());
     }
     parts.push(approval_text(rt));
+    if let Some(text) = tool_policy_text(rt) {
+        parts.push(text);
+    }
     if let Some(src) = rt.active_source() {
         parts.push(src.base_url.clone());
     }
     parts.join(" · ")
+}
+
+/// A `tools:` segment naming what the run may call, and only when a policy
+/// narrows it. An unrestricted run's status line is unchanged, so the segment
+/// appearing is itself the signal that something is restricted.
+fn tool_policy_text(rt: &Runtime) -> Option<String> {
+    let policy = &rt.tool_policy;
+    (!policy.is_unrestricted()).then(|| format!("tools:{}", policy.describe()))
 }
 
 fn model_name(rt: &Runtime) -> String {

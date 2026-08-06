@@ -56,6 +56,10 @@ pub struct RunSummary<'a> {
     pub answer: &'a str,
     pub usage: UsageTotals,
     pub elapsed_secs: f64,
+    /// The tools the run was permitted to call. Reported so an audit of a CI run
+    /// can confirm the restriction from the output alone, without trusting that
+    /// the workflow passed the flag it claims to.
+    pub tools: Vec<&'static str>,
 }
 
 impl RunSummary<'_> {
@@ -74,6 +78,7 @@ impl RunSummary<'_> {
             "answer": self.answer,
             "usage": self.usage_json(),
             "elapsed_secs": round_millis(self.elapsed_secs),
+            "tools": self.tools,
         })
     }
 

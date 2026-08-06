@@ -38,6 +38,8 @@ pub const TURN_FAILED: &str = "failed";
 
 use serde_json::json;
 use std::collections::HashMap;
+
+use crate::tools::policy::ToolPolicy;
 use std::sync::LazyLock;
 
 pub static FINAL_ANSWER_TOOL: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -95,6 +97,10 @@ pub struct ModelConfig {
     pub recovery_dry_allowed_length: Option<i64>,
     pub autocompress_percent: u32,
     pub read_file_lines: i64,
+    /// Which tools this run may call. Resolved from the env so every
+    /// `from_env` caller agrees; `Runtime::build` writes the CLI flags into the
+    /// env map first, which is what makes the flags win.
+    pub tool_policy: ToolPolicy,
 }
 
 impl Default for ModelConfig {
@@ -119,6 +125,7 @@ impl Default for ModelConfig {
             recovery_dry_allowed_length: Some(2),
             autocompress_percent: 85,
             read_file_lines: 400,
+            tool_policy: ToolPolicy::default(),
         }
     }
 }
@@ -178,6 +185,10 @@ impl ModelConfig {
             },
             autocompress_percent: env_u32(env, "AFI_AUTOCOMPRESS_PERCENT", 85).min(100),
             read_file_lines: env_int(env, "AFI_READ_FILE_LINES", 400),
+            tool_policy: ToolPolicy::parse(
+                env.get("AFI_ALLOWED_TOOLS").map(String::as_str),
+                env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
+            ),
         }
     }
 }

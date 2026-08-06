@@ -95,7 +95,9 @@ fn request_params(tr: &TurnRequest<'_>) -> (Value, Option<Value>, Option<u32>) {
     let tools_val = if tr.forced_final {
         json!([FINAL_ANSWER_TOOL.clone()])
     } else {
-        tools::TOOLS.clone()
+        // Blocked tools are withheld rather than refused later: a model that is
+        // never told `write_file` exists does not spend a turn trying it.
+        tr.config.tool_policy.filter_tools(&tools::TOOLS)
     };
     let tool_choice = tr.forced_final.then(|| FINAL_ANSWER_TOOL_CHOICE.clone());
     let max_tokens = if tr.forced_final {
@@ -149,7 +151,9 @@ async fn fetch_stream(
         source: tr.source,
         model: tr.model,
         messages: messages.as_slice(),
-        tools: Some(params.tools),
+        // A policy can block every tool. Omit the key rather than send an empty
+        // array, which not every endpoint accepts.
+        tools: Some(params.tools).filter(|t| t.as_array().is_none_or(|a| !a.is_empty())),
         tool_choice: params.tool_choice,
         max_tokens: params.max_tokens,
         extra_body: params.extra_body,

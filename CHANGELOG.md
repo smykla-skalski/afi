@@ -2,6 +2,18 @@
 
 All notable changes to `afi` from this point forward.
 
+### Added — tool allow and deny lists
+
+`--allowed-tools` and `--disallowed-tools`, or `AFI_ALLOWED_TOOLS` and `AFI_DISALLOWED_TOOLS`, bound what a run may call. The flag wins over the variable, an absent or blank list means every tool, a non-empty allow list is exhaustive, and deny wins over allow.
+
+Approval could not express "read but do not write". Unattended there is nobody to answer a prompt, so anything above the threshold was denied and the run flailed; the workaround was `--yolo`, which grants `write_file`, `edit_file`, and `run_bash` in full. A job whose input is an untrusted pull-request diff had no way to hold a narrower grant. `--yolo` still decides whether afi asks; the policy decides what exists to ask about.
+
+Blocked tools are withheld from the request, so the model is never told they exist. Dispatch refuses them regardless — the text protocol parses calls out of prose, so a model can name a tool it was never offered — which is what keeps a blocked call away from the filesystem and the shell. The refusal returns as a tool result naming the permitted tools, so the turn continues rather than stalling, and so the next request carries a `tool_result` for every `tool_use`. `final_answer` is never blockable, since it carries the forced-final answer rather than doing anything.
+
+A name matching no tool exits 2 without starting: a mistyped `--disallowed-tools run_bsah` would otherwise match nothing and leave `run_bash` available while the command line claimed otherwise. A restricted run shows `tools:` in the status line and reports the permitted set as `tools` in the JSON summary, so a CI log can be audited without trusting that the workflow passed the flag it claims to.
+
+This bounds which afi tools run, not what a permitted command does once started. A permitted `run_bash` can still do anything the user can.
+
 **Fixed — a failed one-shot run no longer exits 0.** `report_client_error` returned `TURN_DONE`, the same status a completed turn returns, so an unreachable server, an HTTP error, or a bad credential printed its message and then exited successfully. CI read a broken run as a passing one. Client errors now return a distinct `TURN_FAILED`, which the turn loop treats as terminal - retrying it would hammer a server that just refused us - and `main` exits 1.
 
 ### Added — machine-readable run summary

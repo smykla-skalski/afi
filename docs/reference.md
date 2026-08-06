@@ -13,6 +13,8 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--session <id>`                            | start a fresh run attached to a specific session id         |
 | `--prompt-file <path>` / `-f`               | non-interactive single-shot mode (reads from file or stdin) |
 | `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary)) |
+| `--allowed-tools <a,b>`                     | only these tools may be called ([details](#tool-policy))    |
+| `--disallowed-tools <a,b>`                  | these tools may not be called ([details](#tool-policy))     |
 
 ## Environment variables
 
@@ -32,6 +34,29 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `AFI_READ_FILE_LINES`                        | default lines returned by `read_file` (default 400)                  |
 | `AFI_TOOL_RESULT_CHARS`                      | per-tool-result char cap (default 20000)                             |
 | `AFI_SUMMARY`                                | set to `json` for a run summary on stdout ([details](#run-summary))  |
+| `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
+
+## Tool policy
+
+`--allowed-tools` and `--disallowed-tools` (or `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS`) bound what a run can reach, independently of approval. The flag wins over the variable.
+
+```
+afi --yolo --allowed-tools read_file,list_dir -f review-prompt.txt
+```
+
+Approval alone cannot express "read but do not write". Unattended there is nobody to answer a prompt, so anything above the threshold is denied and the run flails; the usual fix is `--yolo`, which grants `write_file`, `edit_file`, and `run_bash` in full. That is right for a human at a prompt and wrong for a job reading an untrusted pull-request diff. The two lists are that missing middle: `--yolo` still decides whether afi *asks*, while the policy decides what exists to ask about.
+
+An absent or blank list means every tool, so `AFI_ALLOWED_TOOLS=""` from an unset shell variable is not a lockout. A non-empty allow list is exhaustive. Deny always wins, so `--allowed-tools read_file,run_bash --disallowed-tools run_bash` leaves only `read_file`. Names accept commas or whitespace and are case-insensitive. The tools are `read_file`, `write_file`, `edit_file`, `list_dir`, `run_bash`, and `wait_background`.
+
+**A name that matches no tool exits 2 without starting.** A mistyped `--disallowed-tools run_bsah` would otherwise match nothing and leave `run_bash` available while the command line claimed otherwise.
+
+Enforced in two places. Blocked tools are left out of the request, so the model is never told they exist and does not spend a turn trying them. Dispatch then refuses them regardless, because the text protocol parses calls out of prose and a model can name a tool it was never offered - so a blocked call cannot reach the filesystem or the shell even when it arrives. The refusal goes back as a tool result naming the permitted tools, so the turn continues instead of stalling.
+
+`final_answer` is never blockable. It carries the forced-final answer rather than doing anything, so blocking it would strand a run rather than restrict it.
+
+A restricted run shows `tools:` in the status line and lists the permitted set in the [run summary](#run-summary). An unrestricted one shows neither, so the segment appearing is itself the signal.
+
+A `run_bash` child inherits these variables, so a nested `afi` inherits the restriction rather than escaping it. That is not a sandbox: a permitted `run_bash` can do anything the user can, and `--allowed-tools` bounds which afi tools run, not what a permitted command does once it starts.
 
 ## Run summary
 
@@ -53,9 +78,12 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
     "total_tokens": 11447,
     "requests": 3
   },
-  "elapsed_secs": 12.17
+  "elapsed_secs": 12.17,
+  "tools": ["read_file", "write_file", "edit_file", "list_dir", "run_bash", "wait_background"]
 }
 ```
+
+`tools` is what the run was permitted to call, so an audit of a CI log can confirm the [tool policy](#tool-policy) from the output instead of trusting that the workflow passed the flag it claims to.
 
 `answer` is the last assistant message with text, so a review flow can post it directly. Turns that only called tools are skipped.
 
@@ -107,7 +135,7 @@ steps:
       ANTHROPIC_SERVICE_ACCOUNT_ID: svac_...
 ```
 
-CI needs `--yolo` or `AFI_APPROVAL=yolo`, or every write and bash call stops for approval.
+CI needs `--yolo` or `AFI_APPROVAL=yolo`, or every write and bash call is denied - there is no terminal to answer the prompt, so afi declines rather than hanging. Pair it with a [tool policy](#tool-policy) so `--yolo` does not also mean unrestricted.
 
 **Sampling parameters stay off the wire.** Anthropic rejects `temperature`, `top_p`, and `top_k`, and `min_p` and the DRY knobs belong to llama.cpp, so recovery falls back to its prompt-level nudges. `AFI_ANTHROPIC_EXTRA_BODY` accepts `output_config`, `metadata`, `stop_sequences`, and `service_tier`, and drops the rest.
 

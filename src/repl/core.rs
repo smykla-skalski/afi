@@ -357,6 +357,7 @@ fn print_json_summary(rt: &Runtime, messages: &[Value], error: Option<&str>, ela
         answer: final_answer(messages),
         usage: usage_totals::snapshot(),
         elapsed_secs: elapsed.as_secs_f64(),
+        tools: rt.tool_policy.permitted(),
     };
     println!("{}", run.to_json());
 }

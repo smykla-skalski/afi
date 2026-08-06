@@ -91,6 +91,8 @@ afi saves every chat automatically to `~/.afi/sessions/` (override with `AFI_HOM
 | `run_bash`  | `command`             | requires confirmation           |
 | `wait_background` | `pid`          | wait for a backgrounded command |
 
+Restrict what a run may call with `--allowed-tools read_file,list_dir` or `--disallowed-tools run_bash`. Approval decides whether afi asks; this decides what exists to ask about, which is what a CI job needs when `--yolo` would otherwise hand over every write. See [tool policy](docs/reference.md#tool-policy).
+
 ## Credits
 
 Built on and influenced by [`minion.py`](https://github.com/Sentdex/minion), Sentdex's original single-file Python coding agent.

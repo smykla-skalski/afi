@@ -39,8 +39,7 @@ pub struct Runtime {
     pub tool_policy: ToolPolicy,
     /// Tool-policy flags given wrongly on the command line. See `refusals`.
     pub flag_errors: Vec<String>,
-    /// Token rates for the summary's cost figure. `None` when the caller set
-    /// none, which is also what an unusable table falls back to.
+    /// Token rates for the summary's cost, `None` when unset or unusable.
     pub pricing: Option<Pricing>,
 }
 
@@ -171,11 +170,6 @@ impl Runtime {
         let parsed = parse_args(args);
         let approval = resolve_approval(&env, &parsed);
         apply_tool_flags(&mut env, &parsed);
-        // Read after the tool flags land, so `env` is fully resolved. Parsed at
-        // startup rather than at print time, so a typo in the table is
-        // complained about while someone is still watching the log rather than
-        // after the run it was meant to price.
-        let pricing = Pricing::from_env(&env);
 
         let mut rt = Runtime {
             sources,
@@ -198,7 +192,8 @@ impl Runtime {
                 env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
             ),
             flag_errors: parsed.flag_errors,
-            pricing,
+            // At startup, so a typo is heard about before the run, not after.
+            pricing: Pricing::from_env(&env),
             env,
         };
 

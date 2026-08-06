@@ -85,6 +85,7 @@ impl RunSummary<'_> {
             "input_tokens": self.usage.input_tokens,
             "output_tokens": self.usage.output_tokens,
             "cache_read_tokens": self.usage.cache_read_tokens,
+            "cache_write_tokens": self.usage.cache_write_tokens,
             "reasoning_tokens": self.usage.reasoning_tokens,
             "total_tokens": self.usage.total_tokens(),
             "requests": self.usage.requests,

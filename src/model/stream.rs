@@ -56,9 +56,16 @@ pub struct Usage {
     pub output_tokens_details: Option<OutputTokensDetails>,
 }
 
+/// Subsets of `prompt_tokens`, following `OpenAI`'s convention that a detail
+/// here is part of the prompt total rather than an addition to it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptTokensDetails {
     pub cached_tokens: u64,
+    /// Prompt tokens written into the cache rather than read from it, which
+    /// Anthropic bills above both a read and plain input. No `OpenAI`-compatible
+    /// provider reports one, so it defaults to 0 rather than being guessed at.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -74,13 +81,22 @@ pub struct Timings {
     pub cache_n: u64,
 }
 
-/// Normalized token usage: input (minus cache), output (minus reasoning),
-/// `cache_read`, reasoning. Matches the `OpenAI` usage convention.
+/// Normalized token usage: input (minus both cache subsets), output (minus
+/// reasoning), `cache_read`, `cache_write`, reasoning.
+///
+/// The five counts are deliberately disjoint, so a caller pricing a run can
+/// multiply each by its own rate and sum. Cache reads and writes are split
+/// because they are not billed alike - Anthropic charges a write above base
+/// input and a read far below it, so folding either into `input_tokens` puts
+/// tokens at the wrong price.
 #[derive(Debug, Clone, Default)]
 pub struct NormalizedUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Prompt tokens written into the cache. Only the Anthropic path reports
+    /// this; every other provider leaves it 0.
+    pub cache_write_tokens: u64,
     pub reasoning_tokens: u64,
 }
 
@@ -105,23 +121,33 @@ pub fn normalize_usage(
             input_tokens: t.prompt_n.saturating_sub(t.cache_n),
             output_tokens: t.predicted_n,
             cache_read_tokens: t.cache_n,
+            // `cache_n` counts the reused prefix llama.cpp already held, which
+            // is a read. It has no separate figure for populating that prefix,
+            // and reporting one here would be an invention.
+            cache_write_tokens: 0,
             reasoning_tokens: 0,
         });
     }
 
     if let Some(u) = usage {
-        let cache_n = u
+        let (cache_read_n, cache_write_n) = u
             .prompt_tokens_details
             .as_ref()
-            .map_or(0, |d| d.cached_tokens);
+            .map_or((0, 0), |d| (d.cached_tokens, d.cache_write_tokens));
         let reasoning_n = u
             .output_tokens_details
             .as_ref()
             .map_or(0, |d| d.reasoning_tokens);
         return Some(NormalizedUsage {
-            input_tokens: u.prompt_tokens.saturating_sub(cache_n),
+            // Both cache counts are subsets of `prompt_tokens`, so both come
+            // out to leave the tokens billed at the plain input rate.
+            input_tokens: u
+                .prompt_tokens
+                .saturating_sub(cache_read_n)
+                .saturating_sub(cache_write_n),
             output_tokens: u.completion_tokens.saturating_sub(reasoning_n),
-            cache_read_tokens: cache_n,
+            cache_read_tokens: cache_read_n,
+            cache_write_tokens: cache_write_n,
             reasoning_tokens: reasoning_n,
         });
     }
@@ -133,6 +159,7 @@ pub fn normalize_usage(
             input_tokens: 0,
             output_tokens: estimated,
             cache_read_tokens: 0,
+            cache_write_tokens: 0,
             reasoning_tokens: 0,
         });
     }
@@ -270,122 +297,4 @@ pub fn parse_sse_body(body: &str) -> Vec<StreamChunk> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_usage_openai() {
-        let usage = Usage {
-            prompt_tokens: 1000,
-            completion_tokens: 500,
-            prompt_tokens_details: Some(PromptTokensDetails { cached_tokens: 200 }),
-            output_tokens_details: Some(OutputTokensDetails {
-                reasoning_tokens: 50,
-            }),
-        };
-        let n = normalize_usage(Some(&usage), None, 0).unwrap();
-        assert_eq!(n.input_tokens, 800); // 1000 - 200 cache
-        assert_eq!(n.output_tokens, 450); // 500 - 50 reasoning
-        assert_eq!(n.cache_read_tokens, 200);
-        assert_eq!(n.reasoning_tokens, 50);
-    }
-
-    #[test]
-    fn normalize_usage_llamacpp_timings() {
-        let timings = Timings {
-            prompt_n: 1000,
-            predicted_n: 500,
-            cache_n: 200,
-        };
-        let n = normalize_usage(None, Some(&timings), 0).unwrap();
-        assert_eq!(n.input_tokens, 800); // 1000 - 200 cache
-        assert_eq!(n.output_tokens, 500);
-        assert_eq!(n.cache_read_tokens, 200);
-        assert_eq!(n.reasoning_tokens, 0);
-    }
-
-    #[test]
-    fn normalize_usage_fallback_chars() {
-        let n = normalize_usage(None, None, 8000).unwrap();
-        assert_eq!(n.output_tokens, 2000); // 8000 / 4
-        assert_eq!(n.input_tokens, 0);
-    }
-
-    #[test]
-    fn normalize_usage_none() {
-        assert!(normalize_usage(None, None, 0).is_none());
-    }
-
-    #[test]
-    fn parse_sse_line_content() {
-        let line = r#"data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}"#;
-        let chunk = parse_sse_line(line).unwrap();
-        assert_eq!(chunk.content, Some("hello".to_string()));
-    }
-
-    #[test]
-    fn parse_sse_line_accepts_data_without_space() {
-        let line = r#"data:{"choices":[{"delta":{"content":"hello"}}]}"#;
-        let chunk = parse_sse_line(line).unwrap();
-        assert_eq!(chunk.content.as_deref(), Some("hello"));
-    }
-
-    #[test]
-    fn live_decoder_reports_malformed_json() {
-        assert!(decode_sse_line("data: {broken").is_err());
-    }
-
-    #[test]
-    fn live_decoder_reports_provider_error_payload() {
-        let error = decode_sse_line(r#"data: {"error":{"message":"overloaded"}}"#)
-            .expect_err("provider error must fail the stream");
-        assert!(error.to_string().contains("overloaded"));
-    }
-
-    #[test]
-    fn parse_sse_line_done() {
-        let line = "data: [DONE]";
-        assert!(parse_sse_line(line).is_none());
-    }
-
-    #[test]
-    fn parse_sse_line_tool_calls() {
-        let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}"#;
-        let chunk = parse_sse_line(line).unwrap();
-        assert_eq!(chunk.tool_calls.len(), 1);
-        assert_eq!(chunk.tool_calls[0].id, Some("call_1".to_string()));
-        assert_eq!(chunk.tool_calls[0].name, Some("read_file".to_string()));
-    }
-
-    #[test]
-    fn parse_sse_line_reasoning() {
-        let line = r#"data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}"#;
-        let chunk = parse_sse_line(line).unwrap();
-        assert_eq!(chunk.reasoning_content, Some("thinking...".to_string()));
-    }
-
-    #[test]
-    fn parse_sse_line_usage() {
-        let line = r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}"#;
-        let chunk = parse_sse_line(line).unwrap();
-        assert!(chunk.usage.is_some());
-        assert_eq!(chunk.usage.unwrap().prompt_tokens, 100);
-    }
-
-    #[test]
-    fn parse_sse_body_multiple_chunks() {
-        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\ndata: [DONE]\n\n";
-        let chunks = parse_sse_body(body);
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].content, Some("a".to_string()));
-        assert_eq!(chunks[1].content, Some("b".to_string()));
-    }
-
-    #[test]
-    fn parse_sse_body_joins_data_fields() {
-        let body = "data: {\"choices\":[\ndata: {\"delta\":{\"content\":\"a\"}}\ndata: ]}\n\n";
-        let chunks = parse_sse_body(body);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].content.as_deref(), Some("a"));
-    }
-}
+mod tests;

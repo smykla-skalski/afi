@@ -272,3 +272,52 @@ fn turn_status_constants_are_untouched_by_this_protocol() {
     // Guards against accidentally coupling protocol work to the turn vocabulary.
     assert_eq!(TURN_DONE, "done");
 }
+
+// --- non-streaming usage accounting ------------------------------------------
+
+use super::completion_usage;
+
+/// A `/compress` response body carrying the usage counts Anthropic returns.
+fn completion_body(input: u64, cache_read: u64, cache_creation: u64, output: u64) -> String {
+    format!(
+        r#"{{"content":[{{"type":"text","text":"summary"}}],"usage":{{"input_tokens":{input},"cache_read_input_tokens":{cache_read},"cache_creation_input_tokens":{cache_creation},"output_tokens":{output}}}}}"#
+    )
+}
+
+#[test]
+fn a_compression_request_reports_its_cache_write_separately() {
+    // /compress never reaches the streaming path, so it normalizes here. A
+    // write folded into input on this path would under-price it exactly as it
+    // did on the streamed one.
+    let usage = completion_usage(&completion_body(120, 0, 2279, 64)).expect("usage present");
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+            usage.output_tokens
+        ),
+        (120, 0, 2279, 64)
+    );
+}
+
+#[test]
+fn a_compression_request_against_a_warm_cache_reports_no_write() {
+    let usage = completion_usage(&completion_body(40, 6837, 0, 51)).expect("usage present");
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens
+        ),
+        (40, 6837, 0)
+    );
+}
+
+#[test]
+fn a_response_without_usage_is_not_counted() {
+    // Best effort: an unparseable or usage-free body must not record zeros,
+    // which would make a silent response look like a free request.
+    assert!(completion_usage(r#"{"content":[]}"#).is_none());
+    assert!(completion_usage("not json").is_none());
+}

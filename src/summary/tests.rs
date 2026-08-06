@@ -6,6 +6,7 @@ fn totals(requests: u64) -> UsageTotals {
         input_tokens: 4085,
         output_tokens: 509,
         cache_read_tokens: 6837,
+        cache_write_tokens: 2279,
         reasoning_tokens: 0,
         requests,
     }
@@ -67,10 +68,17 @@ fn usage_totals_are_reported_and_add_up() {
     assert_eq!(usage["input_tokens"], 4085);
     assert_eq!(usage["output_tokens"], 509);
     assert_eq!(usage["cache_read_tokens"], 6837);
+    // Reported on its own, because Anthropic bills a write above plain input
+    // and a consumer computing cost needs to price it separately.
+    assert_eq!(usage["cache_write_tokens"], 2279);
     assert_eq!(usage["reasoning_tokens"], 0);
     assert_eq!(usage["requests"], 3);
-    // The four counts are disjoint, so the total must be their sum.
-    assert_eq!(usage["total_tokens"], 4085 + 509 + 6837);
+}
+
+#[test]
+fn the_reported_counts_are_disjoint_and_sum_to_the_total() {
+    let json = summary(true, "x", totals(3)).to_json();
+    assert_eq!(json["usage"]["total_tokens"], 4085 + 509 + 6837 + 2279);
 }
 
 #[test]

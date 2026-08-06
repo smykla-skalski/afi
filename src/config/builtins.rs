@@ -17,7 +17,7 @@ use super::{Federation, Protocol, Source, build_http_headers, parse_extra_body};
 /// normalizes either form.
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 /// Current Sonnet generation: near-Opus quality on coding and agentic work at
-/// Sonnet pricing. Override with `AFI_SOURCE_ANTHROPIC_MODEL`.
+/// Sonnet pricing. Override with `AFI_ANTHROPIC_MODEL`.
 const ANTHROPIC_MODEL: &str = "claude-sonnet-5";
 
 /// Register every built-in source whose credentials are configured.
@@ -47,17 +47,18 @@ fn add_anthropic_source<S: BuildHasher>(
     let Some((protocol, credential)) = anthropic_auth(env) else {
         return;
     };
-    let base_url = env_value(
-        env,
-        &["AFI_SOURCE_ANTHROPIC_BASE_URL", "ANTHROPIC_BASE_URL"],
-    )
-    .unwrap_or_else(|| ANTHROPIC_BASE_URL.to_string());
-    let model = env_value(env, &["AFI_SOURCE_ANTHROPIC_MODEL"])
-        .unwrap_or_else(|| ANTHROPIC_MODEL.to_string());
-    let extra_body = parse_extra_body(
-        env.get("AFI_SOURCE_ANTHROPIC_EXTRA_BODY")
-            .map(String::as_str),
-    );
+    // These tweak the built-in, so they deliberately avoid the `AFI_SOURCE_*`
+    // namespace. A bare `AFI_SOURCE_ANTHROPIC_BASE_URL` is enough for
+    // `source_names` to auto-discover a source called `anthropic`, which would
+    // reach here already present and short-circuit the return above - leaving an
+    // `OpenAiCompat` source holding the `sk-noop` placeholder. Setting a full
+    // `AFI_SOURCE_ANTHROPIC_*` block is still supported, but then its
+    // `_PROTOCOL` selects the wire protocol, as for any other named source.
+    let base_url = env_value(env, &["AFI_ANTHROPIC_BASE_URL", "ANTHROPIC_BASE_URL"])
+        .unwrap_or_else(|| ANTHROPIC_BASE_URL.to_string());
+    let model =
+        env_value(env, &["AFI_ANTHROPIC_MODEL"]).unwrap_or_else(|| ANTHROPIC_MODEL.to_string());
+    let extra_body = parse_extra_body(env.get("AFI_ANTHROPIC_EXTRA_BODY").map(String::as_str));
     let src = Source::new(
         "anthropic",
         base_url,

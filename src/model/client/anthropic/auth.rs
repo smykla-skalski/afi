@@ -53,7 +53,7 @@ pub(super) fn auth_headers(
             // No `x-api-key`: see the module docs.
         }
         Protocol::OpenAiCompat => {
-            return Err(ClientError::Parse(
+            return Err(ClientError::Config(
                 "auth_headers called for a non-Anthropic source".to_string(),
             ));
         }

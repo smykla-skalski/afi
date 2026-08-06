@@ -64,16 +64,41 @@ fn model_and_base_url_are_overridable() {
         &[
             LOCAL,
             ("ANTHROPIC_API_KEY", "sk-ant-test"),
-            ("AFI_SOURCE_ANTHROPIC_MODEL", "claude-opus-5"),
-            (
-                "AFI_SOURCE_ANTHROPIC_BASE_URL",
-                "https://gateway.internal/v1",
-            ),
+            ("AFI_ANTHROPIC_MODEL", "claude-opus-5"),
+            ("AFI_ANTHROPIC_BASE_URL", "https://gateway.internal/v1"),
         ],
     );
     let src = &rt.sources["anthropic"];
     assert_eq!(src.model.as_deref(), Some("claude-opus-5"));
     assert_eq!(src.base_url, "https://gateway.internal/v1");
+    assert_eq!(
+        src.protocol,
+        Protocol::AnthropicApiKey,
+        "overriding the endpoint must not change the wire protocol"
+    );
+}
+
+#[test]
+fn the_builtin_overrides_avoid_the_source_namespace() {
+    // `source_names` auto-discovers any `AFI_SOURCE_<NAME>_BASE_URL`, so if the
+    // built-in read its overrides from that namespace, setting one would create
+    // an OpenAiCompat source called `anthropic` holding the sk-noop placeholder
+    // and the built-in would then short-circuit on "already registered".
+    let rt = common::build(
+        &["afi"],
+        &[
+            LOCAL,
+            ("ANTHROPIC_API_KEY", "sk-ant-test"),
+            ("AFI_ANTHROPIC_BASE_URL", "https://gateway.internal"),
+        ],
+    );
+    assert_eq!(
+        rt.source_order.iter().filter(|n| *n == "anthropic").count(),
+        1
+    );
+    let src = &rt.sources["anthropic"];
+    assert_eq!(src.protocol, Protocol::AnthropicApiKey);
+    assert_eq!(src.api_key, "sk-ant-test", "must not be the placeholder");
 }
 
 #[test]

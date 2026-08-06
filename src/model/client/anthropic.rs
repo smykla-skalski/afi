@@ -43,17 +43,36 @@ const MIN_MAX_TOKENS: u32 = 4096;
 /// Used when the caller supplied no limit at all.
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
 
-/// Body keys a source may set through `AFI_SOURCE_<NAME>_EXTRA_BODY`.
+/// Body keys a source may set through its `EXTRA_BODY`.
 ///
 /// An allowlist rather than a passthrough: Anthropic rejects unknown top-level
 /// parameters, and the recovery sampler's keys must never reach it.
+///
+/// `thinking` is deliberately absent - see [`THINKING`].
 const ALLOWED_EXTRA_KEYS: &[&str] = &[
-    "thinking",
     "output_config",
     "metadata",
     "stop_sequences",
     "service_tier",
 ];
+
+/// Thinking is turned off explicitly, and cannot currently be turned on.
+///
+/// When a thinking block accompanies a `tool_use`, the API requires the
+/// assistant turn to be echoed back *verbatim* on the follow-up request that
+/// carries the `tool_result`, thinking block and signature included. Rebuilding
+/// that message is a 400. afi stores history in `OpenAI` shape and rebuilds the
+/// assistant turn from it on every request, so it cannot round-trip a thinking
+/// block, and afi is a tool-calling agent - nearly every turn would fail.
+///
+/// Sending `disabled` rather than omitting the key matters, because thinking is
+/// on by default on Claude Opus 5, Claude Sonnet 5, and Claude Fable 5.
+///
+/// Two consequences worth knowing. Claude Fable 5 rejects an explicit
+/// `disabled`, so it is unusable here until thinking blocks round-trip. And
+/// `disabled` is what keeps Claude Haiku 4.5 working at all, since it rejects
+/// `adaptive` with a 400.
+const THINKING: &str = "disabled";
 
 /// Matches a trailing `/v1`, `/v2`, ... so a base url written with or without
 /// the version suffix resolves to the same endpoint.
@@ -99,12 +118,7 @@ fn build_body(params: &BodyParams<'_>) -> Value {
         "max_tokens": clamp_max_tokens(params.max_tokens),
         "stream": params.stream,
         "messages": translated.messages,
-        // Adaptive thinking is the current-generation replacement for a fixed
-        // token budget. `display` is left at Anthropic's default of "omitted":
-        // summarized thinking text would feed `reasoning_only_chars` and can
-        // trip the reasoning-stall cut-off on a legitimately long turn.
-        // Override with EXTRA_BODY `{"thinking": {...}}`.
-        "thinking": {"type": "adaptive"},
+        "thinking": {"type": THINKING},
     });
     if let Some(system) = &translated.system {
         body["system"] = cached_system(system);

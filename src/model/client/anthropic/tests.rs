@@ -79,13 +79,22 @@ fn stream_flag_is_explicit() {
 }
 
 #[test]
-fn adaptive_thinking_is_on_with_display_left_at_the_default() {
-    let body = body_with(None);
-    assert_eq!(body["thinking"], json!({"type": "adaptive"}));
-    // No `display`: summarized text would feed the reasoning-stall counter.
-    assert!(body["thinking"].get("display").is_none());
-    // budget_tokens is a 400 on current models.
-    assert!(body["thinking"].get("budget_tokens").is_none());
+fn thinking_is_explicitly_disabled_and_cannot_be_turned_on() {
+    // A thinking block must be echoed back verbatim alongside its tool_use on
+    // the follow-up request, which afi cannot do while history lives in OpenAI
+    // shape. Disabled must also be explicit, since thinking is on by default on
+    // Opus 5, Sonnet 5, and Fable 5.
+    assert_eq!(body_with(None)["thinking"], json!({"type": "disabled"}));
+
+    // EXTRA_BODY must not be able to turn it back on.
+    let opt_in = json!({"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}});
+    let body = body_with(Some(&opt_in));
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "disabled"}),
+        "thinking is not allowlisted, so it stays off"
+    );
+    assert_eq!(body["output_config"], json!({"effort": "high"}));
 }
 
 #[test]
@@ -171,24 +180,24 @@ fn sampling_parameters_never_reach_the_wire() {
 }
 
 #[test]
-fn allowlisted_extras_override_the_defaults() {
+fn allowlisted_extras_are_applied() {
     let configured = json!({
-        "thinking": {"type": "disabled"},
         "output_config": {"effort": "high"},
         "stop_sequences": ["STOP"],
+        "metadata": {"user_id": "u1"},
         "temperature": 0.9,
     });
     let body = body_with(Some(&configured));
-    assert_eq!(body["thinking"], json!({"type": "disabled"}));
     assert_eq!(body["output_config"], json!({"effort": "high"}));
     assert_eq!(body["stop_sequences"], json!(["STOP"]));
+    assert_eq!(body["metadata"], json!({"user_id": "u1"}));
     assert!(body.get("temperature").is_none(), "still not allowlisted");
 }
 
 #[test]
 fn a_non_object_extra_body_is_ignored() {
     let body = body_with(Some(&json!("nonsense")));
-    assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+    assert_eq!(body["thinking"], json!({"type": "disabled"}));
 }
 
 #[test]
@@ -197,11 +206,10 @@ fn a_wrapped_extra_body_applies_nothing() {
     // OpenAI SDK kwarg the Rust client never unwrapped. Callers must pass the
     // source's own keys directly; anything nested under `extra_body` is inert,
     // which is why `/compress` silently dropped configuration on every source.
-    let wrapped = json!({"extra_body": {"thinking": {"type": "disabled"}}});
+    let wrapped = json!({"extra_body": {"output_config": {"effort": "low"}}});
     let body = body_with(Some(&wrapped));
-    assert_eq!(
-        body["thinking"],
-        json!({"type": "adaptive"}),
+    assert!(
+        body.get("output_config").is_none(),
         "nested config must not be silently half-applied"
     );
     assert!(body.get("extra_body").is_none());

@@ -1,0 +1,10 @@
+# Code owners for afi.
+#
+# Two names on one line means a review from *either* satisfies the requirement,
+# not both, and GitHub never counts a pull request's author as a reviewer of
+# their own change.
+#
+# The last matching pattern wins, so the catch-all stays first and any narrower
+# rule goes below it.
+
+* @bartsmykla @Automaat

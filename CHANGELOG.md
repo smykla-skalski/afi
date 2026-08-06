@@ -3,6 +3,12 @@
 All notable changes to `afi`. Generated from the commit history; maintained by
 release-plz from the conventional-commit messages on `main`.
 
+## [0.4.0] - 2026-08-06
+
+### Added
+
+- **summary** Write the run summary to a file ([#52](https://github.com/smykla-skalski/afi/pull/52))
+
 ## [0.3.0] - 2026-08-06
 
 ### Added

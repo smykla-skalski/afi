@@ -15,17 +15,28 @@ pub struct StreamChunk {
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolCallDelta>,
+    /// Anthropic-only. Empty on every `OpenAI`-compatible chunk.
+    pub thinking: Vec<ThinkingDelta>,
     pub finish_reason: Option<String>,
     pub usage: Option<Usage>,
     pub timings: Option<Timings>,
 }
 
 /// Result of decoding one physical SSE line.
+///
+/// The chunk is boxed because the other two variants carry nothing: an SSE
+/// stream is mostly `Ignore`, and a `StreamChunk` is wide enough that inlining
+/// it would make every one of those cost the same as a real chunk.
 #[derive(Debug)]
 pub(crate) enum SseLine {
-    Chunk(StreamChunk),
+    Chunk(Box<StreamChunk>),
     Done,
     Ignore,
+}
+
+/// `SseLine::Chunk`, with the boxing kept out of every construction site.
+pub(crate) fn chunk_line(chunk: StreamChunk) -> SseLine {
+    SseLine::Chunk(Box::new(chunk))
 }
 
 #[derive(Debug, Error)]
@@ -43,6 +54,27 @@ pub struct ToolCallDelta {
     pub id: Option<String>,
     pub name: Option<String>,
     pub arguments: Option<String>,
+}
+
+/// A streamed fragment of one Anthropic thinking block.
+///
+/// Kept separate from `reasoning_content`, which is the display copy. This is
+/// the replay copy: the API requires a thinking block that accompanied a
+/// `tool_use` to come back verbatim, signature included, on the request
+/// carrying that tool's result.
+#[derive(Debug, Clone, Default)]
+pub struct ThinkingDelta {
+    /// Anthropic's content-block index, which counts every block in the
+    /// response. Ordering the blocks by it restores the order the model emitted
+    /// them in.
+    pub index: u32,
+    /// Reasoning text. Empty under the default `display: "omitted"`.
+    pub thinking: Option<String>,
+    /// The block's signature, which the API verifies on replay.
+    pub signature: Option<String>,
+    /// The opaque payload of a `redacted_thinking` block, replayed instead of
+    /// text and signature.
+    pub redacted: Option<String>,
 }
 
 /// The standard `OpenAI` usage object.
@@ -209,7 +241,7 @@ pub(crate) fn decode_sse_data(data: &str) -> Result<SseLine, SseDecodeError> {
     if let Some(t) = v.get("timings") {
         chunk.timings = serde_json::from_value(t.clone()).ok();
     }
-    Ok(SseLine::Chunk(chunk))
+    Ok(chunk_line(chunk))
 }
 
 fn provider_error_message(error: &Value) -> String {
@@ -225,7 +257,7 @@ fn provider_error_message(error: &Value) -> String {
 #[must_use]
 pub fn parse_sse_line(line: &str) -> Option<StreamChunk> {
     match decode_sse_line(line).ok()? {
-        SseLine::Chunk(chunk) => Some(chunk),
+        SseLine::Chunk(chunk) => Some(*chunk),
         SseLine::Done | SseLine::Ignore => None,
     }
 }
@@ -287,7 +319,7 @@ pub fn parse_sse_body(body: &str) -> Vec<StreamChunk> {
             continue;
         }
         match decode_sse_data(&data.join("\n")) {
-            Ok(SseLine::Chunk(chunk)) => chunks.push(chunk),
+            Ok(SseLine::Chunk(chunk)) => chunks.push(*chunk),
             Ok(SseLine::Done) => return chunks,
             Ok(SseLine::Ignore) | Err(_) => {}
         }

@@ -1,36 +1,38 @@
-//! HTTP client for OpenAI-compatible endpoints. Uses reqwest (async) for
-//! all API calls: chat completions (streaming + non-streaming), /v1/models,
-//! /props, and the over-max_tokens context probe.
+//! The model client: the `ChatClient` interface, its reqwest implementation,
+//! and the protocol dispatch between them.
+//!
+//! Two wire protocols live in submodules - [`openai`] for `/chat/completions`
+//! and [`anthropic`] for the Messages API. Which one serves a request is
+//! resolved per call from `Source::protocol`, because `/source` can switch
+//! endpoints mid-session.
 //!
 //! A `ChatClient` trait abstracts the interface so tests can mock it without
 //! a live server.
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, TryStreamExt};
-use regex::Regex;
+use futures::{Stream, StreamExt};
 use reqwest::Client;
-use tokio_util::io::StreamReader;
 
 use serde_json::Value;
 
 use crate::config::Source;
-use crate::model::stream::{StreamChunk, Usage, normalize_usage};
-use crate::model::usage_totals;
+use crate::model::stream::StreamChunk;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
-use std::io;
 use std::pin::Pin;
-use std::time::Duration;
 
 /// Live chunks from one streaming chat-completions response.
 pub type ChatCompletionStream =
     Pin<Box<dyn Stream<Item = Result<StreamChunk, ClientError>> + Send>>;
 
 mod anthropic;
+mod openai;
 mod sse;
 use anthropic::TokenCache;
-use sse::{OpenAiDecoder, decoded_stream};
+use anthropic::thinking::strip_history;
+
+pub(crate) use anthropic::thinking::{THINKING_HISTORY_KEY, thinking_disabled};
 
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
@@ -97,29 +99,6 @@ pub enum ClientError {
     /// actually a missing credential.
     #[error("{0}")]
     Config(String),
-}
-
-/// Fold a non-streaming response's usage into the run totals.
-///
-/// The streaming path records through `finalize_turn`, which this never reaches,
-/// so without this a `/compress` request is billed but missing from the run
-/// summary. Best effort: a body with no usage object is simply not counted.
-fn record_completion_usage(model: &str, body: &str) {
-    let Ok(parsed) = serde_json::from_str::<CompletionUsage>(body) else {
-        return;
-    };
-    let Some(usage) = parsed.usage else {
-        return;
-    };
-    if let Some(normalized) = normalize_usage(Some(&usage), None, 0) {
-        usage_totals::record(model, &normalized);
-    }
-}
-
-/// Just the usage object, so an unknown response shape still parses.
-#[derive(serde::Deserialize)]
-struct CompletionUsage {
-    usage: Option<Usage>,
 }
 
 /// The `OpenAI`-only probe endpoints have no Anthropic equivalent. None of them
@@ -191,22 +170,6 @@ impl ReqwestClient {
             map
         })
     }
-
-    fn chat_url(source: &Source) -> String {
-        format!("{}/chat/completions", source.base_url.trim_end_matches('/'))
-    }
-
-    fn models_url(source: &Source) -> String {
-        format!("{}/models", source.base_url.trim_end_matches('/'))
-    }
-
-    fn props_url(source: &Source) -> String {
-        // /props is at the root, not under /v1
-        let root = source.base_url.trim_end_matches('/');
-        let re = Regex::new(r"/v\d+/?$").unwrap();
-        let root = re.replace(root, "");
-        format!("{}/props", root.trim_end_matches('/'))
-    }
 }
 
 #[async_trait]
@@ -218,64 +181,7 @@ impl ChatClient for ReqwestClient {
         if stream_req.source.is_anthropic() {
             return anthropic::stream(&self.client, &self.tokens, stream_req).await;
         }
-        let StreamRequest {
-            source,
-            model,
-            messages,
-            tools,
-            tool_choice,
-            max_tokens,
-            extra_body,
-            recovery_sampling: _,
-        } = stream_req;
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "stream": true,
-            "stream_options": {"include_usage": true},
-        });
-        if let Some(t) = tools {
-            body["tools"] = t.clone();
-        }
-        if let Some(tc) = tool_choice {
-            body["tool_choice"] = tc.clone();
-        }
-        if let Some(mt) = max_tokens
-            && mt > 0
-        {
-            body["max_tokens"] = Value::from(mt);
-        }
-        if let Some(eb) = extra_body
-            && let (Some(a), Some(b)) = (eb.as_object(), body.as_object_mut())
-        {
-            for (k, v) in a {
-                b.insert(k.clone(), v.clone());
-            }
-        }
-
-        let mut req = self
-            .client
-            .post(Self::chat_url(source))
-            .header("Authorization", format!("Bearer {}", source.api_key))
-            .json(&body);
-        if let Some(h) = Self::build_headers(source) {
-            req = req.headers(h);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| ClientError::Connection(e.to_string()))?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = limited_error_body(resp).await;
-            return Err(ClientError::Http { status, body });
-        }
-        let bytes = resp.bytes_stream().map_err(io::Error::other);
-        Ok(decoded_stream(
-            StreamReader::new(bytes),
-            Box::new(OpenAiDecoder),
-        ))
+        openai::stream(&self.client, stream_req).await
     }
 
     async fn chat_completions(
@@ -298,118 +204,28 @@ impl ChatClient for ReqwestClient {
             )
             .await;
         }
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "stream": false,
-        });
-        if let Some(eb) = extra_body
-            && let (Some(a), Some(b)) = (eb.as_object(), body.as_object_mut())
-        {
-            for (k, v) in a {
-                b.insert(k.clone(), v.clone());
-            }
-        }
-        let mut req = self
-            .client
-            .post(Self::chat_url(source))
-            .header("Authorization", format!("Bearer {}", source.api_key))
-            .timeout(Duration::from_secs(timeout))
-            .json(&body);
-        if let Some(h) = Self::build_headers(source) {
-            req = req.headers(h);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| ClientError::Connection(e.to_string()))?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Http { status, body });
-        }
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| ClientError::Connection(e.to_string()))?;
-        record_completion_usage(model, &text);
-        Ok(text)
+        openai::complete(&self.client, source, model, messages, timeout, extra_body).await
     }
 
     async fn list_models(&self, source: &Source) -> Result<Value, ClientError> {
         if source.is_anthropic() {
             return Err(unsupported(source, "model listing"));
         }
-        let mut req = self
-            .client
-            .get(Self::models_url(source))
-            .header("Authorization", format!("Bearer {}", source.api_key))
-            .timeout(Duration::from_secs(10));
-        if let Some(h) = Self::build_headers(source) {
-            req = req.headers(h);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| ClientError::Connection(e.to_string()))?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Http { status, body });
-        }
-        resp.json()
-            .await
-            .map_err(|e| ClientError::Parse(e.to_string()))
+        openai::list_models(&self.client, source).await
     }
 
     async fn get_props(&self, source: &Source) -> Result<Value, ClientError> {
         if source.is_anthropic() {
             return Err(unsupported(source, "the llama.cpp /props probe"));
         }
-        let resp = self
-            .client
-            .get(Self::props_url(source))
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|e| ClientError::Connection(e.to_string()))?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Http { status, body });
-        }
-        resp.json()
-            .await
-            .map_err(|e| ClientError::Parse(e.to_string()))
+        openai::get_props(&self.client, source).await
     }
 
     async fn overrun_probe(&self, source: &Source, model: &str) -> Result<String, ClientError> {
         if source.is_anthropic() {
             return Err(unsupported(source, "the context-overrun probe"));
         }
-        let body = serde_json::json!({
-            "model": model,
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 10_000_000,
-            "stream": false,
-        });
-        let mut req = self
-            .client
-            .post(Self::chat_url(source))
-            .header("Authorization", format!("Bearer {}", source.api_key))
-            .timeout(Duration::from_secs(30))
-            .json(&body);
-        if let Some(h) = Self::build_headers(source) {
-            req = req.headers(h);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| ClientError::Connection(e.to_string()))?;
-        // The overrun probe expects a 400 with the context limit in the error.
-        // Even on error, return the body so the caller can parse it.
-        let body = resp.text().await.unwrap_or_default();
-        Ok(body)
+        openai::overrun_probe(&self.client, source, model).await
     }
 }
 

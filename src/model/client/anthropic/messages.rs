@@ -4,7 +4,7 @@
 //! and translates at the client boundary, so sessions, compression, and
 //! transcripts are unaffected by which protocol serves a turn.
 //!
-//! Four structural differences have to be reconciled:
+//! Five structural differences have to be reconciled:
 //!
 //! 1. `system` is a top-level request field, not a message.
 //! 2. Tool results are `tool_result` content blocks inside a **user** message,
@@ -13,11 +13,16 @@
 //!    `OpenAI` carries `arguments` as a JSON string.
 //! 4. Every `tool_use` needs a matching `tool_result` and vice versa; an orphan
 //!    on either side is a 400.
+//! 5. Thinking blocks have no `OpenAI` equivalent at all. They ride alongside
+//!    the turn that produced them and are replayed verbatim, first in the
+//!    assistant's content array - see [`super::thinking`].
 
 use std::collections::{HashSet, VecDeque};
 use std::mem;
 
 use serde_json::{Value, json};
+
+use super::thinking::{self, Thinking};
 
 /// Placeholder used when history would otherwise open with a non-user turn or
 /// be empty - Anthropic requires at least one message, starting with `user`.
@@ -80,13 +85,16 @@ impl SynthIds {
 
 /// Translate an `OpenAI`-shape history into a top-level `system` string plus
 /// Anthropic-shape messages.
-pub(super) fn translate(history: &[Value]) -> Translated {
+///
+/// `thinking` says whether the request asked the model to reason; stored
+/// thinking blocks are replayed only when it did.
+pub(super) fn translate(history: &[Value], thinking: Thinking) -> Translated {
     let mut system_parts: Vec<String> = Vec::new();
     let mut items: Vec<Item> = Vec::new();
     let mut ids = SynthIds::default();
 
     for message in history {
-        classify(message, &mut system_parts, &mut items, &mut ids);
+        classify(message, &mut system_parts, &mut items, &mut ids, thinking);
     }
     prune_orphans(&mut items);
 
@@ -102,6 +110,7 @@ fn classify(
     system_parts: &mut Vec<String>,
     items: &mut Vec<Item>,
     ids: &mut SynthIds,
+    thinking: Thinking,
 ) {
     let content = message.get("content");
     match message
@@ -116,7 +125,8 @@ fn classify(
         "user" => push_blocks(items, Item::User(content_blocks(content))),
         "assistant" => {
             ids.start_turn();
-            push_blocks(items, Item::Assistant(assistant_blocks(message, ids)));
+            let blocks = assistant_blocks(message, ids, thinking);
+            push_blocks(items, Item::Assistant(blocks));
         }
         // Unknown roles are dropped rather than guessed at.
         _ => {}
@@ -129,10 +139,14 @@ fn push_text(parts: &mut Vec<String>, text: String) {
     }
 }
 
-/// Keep an item only if it carries at least one content block.
+/// Keep an item only if it carries something the model can act on.
+///
+/// Thinking blocks do not count. An assistant turn that is nothing but replayed
+/// reasoning says nothing the next turn needs and is not a shape the API
+/// expects, so it is dropped along with its blocks.
 fn push_blocks(items: &mut Vec<Item>, item: Item) {
     let empty = match &item {
-        Item::User(blocks) | Item::Assistant(blocks) => blocks.is_empty(),
+        Item::User(blocks) | Item::Assistant(blocks) => !has_substance(blocks),
         Item::ToolResult { .. } => false,
     };
     if !empty {
@@ -140,10 +154,22 @@ fn push_blocks(items: &mut Vec<Item>, item: Item) {
     }
 }
 
-/// Assistant text blocks followed by its `tool_use` blocks. `content` is
-/// `Value::Null` whenever the assistant produced only tool calls.
-fn assistant_blocks(message: &Value, ids: &mut SynthIds) -> Vec<Value> {
-    let mut blocks = content_blocks(message.get("content"));
+/// True when at least one block is something other than replayed thinking.
+fn has_substance(blocks: &[Value]) -> bool {
+    blocks.iter().any(|block| !thinking::is_block(block))
+}
+
+/// Thinking blocks, then text, then `tool_use`. `content` is `Value::Null`
+/// whenever the assistant produced only tool calls.
+///
+/// Thinking comes first because the API requires it: a turn that reasoned
+/// before acting has to be replayed in that order, byte for byte.
+fn assistant_blocks(message: &Value, ids: &mut SynthIds, thinking: Thinking) -> Vec<Value> {
+    let mut blocks = match thinking {
+        Thinking::Replay => thinking::stored_blocks(message),
+        Thinking::Drop => Vec::new(),
+    };
+    blocks.extend(content_blocks(message.get("content")));
     let Some(calls) = message.get("tool_calls").and_then(Value::as_array) else {
         return blocks;
     };
@@ -238,7 +264,11 @@ fn prune_orphans(items: &mut Vec<Item>) {
     let call_ids = surviving_call_ids(items);
     items.retain(|item| match item {
         Item::ToolResult { id, .. } => call_ids.contains(id),
-        Item::User(blocks) | Item::Assistant(blocks) => !blocks.is_empty(),
+        // `has_substance` rather than `is_empty`: pruning an unanswered
+        // `tool_use` can leave a turn holding nothing but its thinking blocks,
+        // and the reasoning behind an action that was cut away is not worth
+        // replaying on its own.
+        Item::User(blocks) | Item::Assistant(blocks) => has_substance(blocks),
     });
 }
 

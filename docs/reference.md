@@ -190,9 +190,27 @@ CI needs `--yolo` or `AFI_APPROVAL=yolo`, or every write and bash call is denied
 
 **Sampling parameters stay off the wire.** Anthropic rejects `temperature`, `top_p`, and `top_k`, and `min_p` and the DRY knobs belong to llama.cpp, so recovery falls back to its prompt-level nudges. `AFI_ANTHROPIC_EXTRA_BODY` accepts `output_config`, `metadata`, `stop_sequences`, and `service_tier`, and drops the rest.
 
-**Thinking is off, and cannot be turned on yet.** When a thinking block accompanies a tool call, the API requires the assistant turn to be echoed back verbatim on the request carrying the tool result, thinking block and signature included. afi keeps history in OpenAI shape and rebuilds that turn on every request, so it cannot round-trip one. Since afi calls tools on nearly every turn, leaving thinking on would fail most of them. `thinking` is therefore sent as `disabled` and is not in the `EXTRA_BODY` allowlist.
+**Thinking is off by default, and `AFI_ANTHROPIC_EXTRA_BODY` turns it on.** The `thinking` key has three states:
 
-Two consequences. `claude-fable-5` rejects an explicit `disabled`, so it is unusable here for now. And sending `disabled` is what keeps `claude-haiku-4-5` working, since it rejects adaptive thinking outright.
+| `thinking` in `EXTRA_BODY` | sent as | for |
+| ---------------------------- | --------------------------- | -------------------------------------------- |
+| absent                       | `{"type": "disabled"}`      | the default; the only shape `claude-haiku-4-5` accepts |
+| `null`                       | omitted entirely            | `claude-fable-5`, which rejects an explicit `disabled` and always thinks |
+| an object                    | verbatim                    | `{"type": "adaptive", "display": "summarized"}` |
+
+```bash
+AFI_ANTHROPIC_EXTRA_BODY='{"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"high"}}'
+```
+
+Disabled stays the default because it is the one value every current model accepts: `claude-haiku-4-5` rejects adaptive outright, and on `claude-opus-5` disabling thinking is only allowed at effort `high` or below.
+
+`display` decides what you see. The API's default, `omitted`, still thinks and still bills for it but returns empty text, so the reasoning pane stays blank and the turn looks like a long pause. `summarized` streams a readable summary.
+
+**Thinking blocks round-trip.** When a thinking block accompanies a tool call, the API requires the assistant turn echoed back verbatim on the request carrying the tool result — block, text, and signature. afi stores the raw blocks under an `afi_thinking` key on the assistant turn that made the calls, and replays them ahead of the `tool_use` they belong to. That is the only turn that needs them; a plain text answer ends the exchange, so nothing is kept for it. Sessions carry the key (schema stays `afi-1`; a session written by an older afi simply has none), and it is stripped from every OpenAI-protocol request, since it is not part of that wire format.
+
+Three cases lose a block rather than risk the turn: a stream cut before the signature arrived, a `/compress` that sliced away the tool result the reasoning was aimed at, and a request that turns thinking back off. Anthropic validates the whole request, so one unusable block would fail the turn instead of being ignored.
+
+**The reasoning-only cut is off while thinking is on.** `AFI_REASONING_ONLY_CHARS` exists for local models that loop in their scratchpad forever; Anthropic's thinking is server-side and already bounded by `max_tokens`, so cutting one of those turns short would fire on a healthy turn that was about to emit its tool call.
 
 **Other endpoints.** `AFI_SOURCE_<NAME>_PROTOCOL` takes `anthropic` or `anthropic-oauth`. It defaults to `openai`, so existing sources keep working.
 

@@ -79,22 +79,70 @@ fn stream_flag_is_explicit() {
 }
 
 #[test]
-fn thinking_is_explicitly_disabled_and_cannot_be_turned_on() {
-    // A thinking block must be echoed back verbatim alongside its tool_use on
-    // the follow-up request, which afi cannot do while history lives in OpenAI
-    // shape. Disabled must also be explicit, since thinking is on by default on
-    // Opus 5, Sonnet 5, and Fable 5.
+fn thinking_defaults_to_an_explicit_disabled() {
+    // Explicit rather than omitted: thinking is on by default on Opus 5,
+    // Sonnet 5, and Fable 5, and Haiku 4.5 rejects adaptive outright.
     assert_eq!(body_with(None)["thinking"], json!({"type": "disabled"}));
+}
 
-    // EXTRA_BODY must not be able to turn it back on.
-    let opt_in = json!({"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}});
+#[test]
+fn extra_body_can_turn_thinking_on() {
+    let opt_in = json!({"thinking": {"type": "adaptive", "display": "summarized"},
+                        "output_config": {"effort": "high"}});
     let body = body_with(Some(&opt_in));
     assert_eq!(
         body["thinking"],
-        json!({"type": "disabled"}),
-        "thinking is not allowlisted, so it stays off"
+        json!({"type": "adaptive", "display": "summarized"})
     );
     assert_eq!(body["output_config"], json!({"effort": "high"}));
+}
+
+#[test]
+fn a_null_thinking_omits_the_key() {
+    // Claude Fable 5 rejects an explicit `disabled` and always thinks, so
+    // omission is the only shape it accepts.
+    let body = body_with(Some(&json!({"thinking": null})));
+    assert!(
+        body.get("thinking").is_none(),
+        "thinking must be absent, not null"
+    );
+}
+
+#[test]
+fn thinking_blocks_replay_only_when_thinking_is_on() {
+    let block = json!({"type": "thinking", "thinking": "plan", "signature": "sig"});
+    let history = vec![
+        json!({"role": "user", "content": "read it"}),
+        json!({
+            "role": "assistant",
+            "content": Value::Null,
+            "tool_calls": [{"id": "call_1", "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"}}],
+            thinking::THINKING_HISTORY_KEY: [block],
+        }),
+        json!({"role": "tool", "tool_call_id": "call_1", "content": "contents"}),
+    ];
+    let body = |extra_body: Option<&Value>| {
+        build_body(&BodyParams {
+            model: "claude-sonnet-5",
+            history: &history,
+            tools: None,
+            tool_choice: None,
+            max_tokens: None,
+            extra_body,
+            stream: true,
+        })
+    };
+
+    // Default (disabled): the blocks are dropped, matching what the request asks for.
+    let off = body(None);
+    assert_eq!(off["messages"][1]["content"][0]["type"], "tool_use");
+
+    // Adaptive: the block comes back verbatim, ahead of the tool_use it belongs to.
+    let on = body(Some(&json!({"thinking": {"type": "adaptive"}})));
+    let blocks = on["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(blocks[0], block);
+    assert_eq!(blocks[1]["type"], "tool_use");
 }
 
 #[test]

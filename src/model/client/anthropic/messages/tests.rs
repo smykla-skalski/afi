@@ -41,7 +41,7 @@ fn system_is_hoisted_out_of_messages() {
         json!({"role": "system", "content": "You are a terminal coding agent."}),
         json!({"role": "user", "content": "hi"}),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     assert_eq!(
         out.system.as_deref(),
         Some("You are a terminal coding agent.")
@@ -56,14 +56,14 @@ fn multiple_system_messages_join() {
         json!({"role": "user", "content": "hi"}),
         json!({"role": "system", "content": "second"}),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     assert_eq!(out.system.as_deref(), Some("first\n\nsecond"));
     assert_eq!(roles(&out.messages), vec!["user"]);
 }
 
 #[test]
 fn no_system_message_means_no_system_field() {
-    let out = translate(&[json!({"role": "user", "content": "hi"})]);
+    let out = translate(&[json!({"role": "user", "content": "hi"})], Thinking::Drop);
     assert!(out.system.is_none());
 }
 
@@ -73,7 +73,7 @@ fn blank_system_message_is_not_hoisted() {
         json!({"role": "system", "content": "   "}),
         json!({"role": "user", "content": "hi"}),
     ];
-    assert!(translate(&history).system.is_none());
+    assert!(translate(&history, Thinking::Drop).system.is_none());
 }
 
 // --- text ---------------------------------------------------------------------
@@ -84,7 +84,7 @@ fn plain_strings_become_text_blocks() {
         json!({"role": "user", "content": "hello"}),
         json!({"role": "assistant", "content": "hi there"}),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     assert_eq!(roles(&out.messages), vec!["user", "assistant"]);
     assert_eq!(
         blocks(&out.messages[0])[0],
@@ -102,7 +102,7 @@ fn array_content_parts_are_flattened_to_text_blocks() {
         "role": "user",
         "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}],
     })];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     assert_eq!(blocks(&out.messages[0]).len(), 2);
     assert_eq!(blocks(&out.messages[0])[1]["text"], "two");
 }
@@ -116,7 +116,10 @@ fn empty_and_blank_messages_are_dropped_entirely() {
         json!({"role": "assistant", "content": Value::Null}),
     ];
     // Anthropic rejects empty text blocks, and a message with no blocks at all.
-    assert_eq!(roles(&translate(&history).messages), vec!["user"]);
+    assert_eq!(
+        roles(&translate(&history, Thinking::Drop).messages),
+        vec!["user"]
+    );
 }
 
 #[test]
@@ -125,7 +128,7 @@ fn non_text_content_parts_are_dropped() {
         "role": "user",
         "content": [{"type": "image", "source": {}}, {"type": "text", "text": "kept"}],
     })];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     assert_eq!(blocks(&out.messages[0]).len(), 1);
     assert_eq!(blocks(&out.messages[0])[0]["text"], "kept");
 }
@@ -137,7 +140,10 @@ fn unknown_roles_are_dropped() {
         json!({"role": "function", "content": "legacy"}),
         json!({"content": "no role at all"}),
     ];
-    assert_eq!(roles(&translate(&history).messages), vec!["user"]);
+    assert_eq!(
+        roles(&translate(&history, Thinking::Drop).messages),
+        vec!["user"]
+    );
 }
 
 // --- tool calls ---------------------------------------------------------------
@@ -149,7 +155,7 @@ fn assistant_tool_call_becomes_tool_use_with_parsed_input() {
         assistant_tool_call("call_1", "read_file", r#"{"path":"a.rs"}"#),
         tool_result("call_1", "file contents"),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     assert_eq!(roles(&out.messages), vec!["user", "assistant", "user"]);
     // `arguments` was a JSON string; `input` must be a real object.
     assert_eq!(
@@ -185,7 +191,7 @@ fn assistant_text_precedes_its_tool_use_blocks() {
         }),
         tool_result("c1", "src/"),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     let assistant = blocks(&out.messages[1]);
     assert_eq!(assistant.len(), 2);
     assert_eq!(assistant[0]["type"], "text");
@@ -200,7 +206,7 @@ fn malformed_or_non_object_arguments_degrade_to_empty_input() {
             assistant_tool_call("c1", "read_file", arguments),
             tool_result("c1", "ok"),
         ];
-        let out = translate(&history);
+        let out = translate(&history, Thinking::Drop);
         assert_eq!(
             blocks(&out.messages[1])[0]["input"],
             json!({}),
@@ -219,7 +225,7 @@ fn tool_calls_without_a_name_are_dropped() {
             "tool_calls": [{"id": "c1", "type": "function", "function": {"arguments": "{}"}}],
         }),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     let assistant = blocks(&out.messages[1]);
     assert_eq!(assistant.len(), 1);
     assert_eq!(assistant[0]["type"], "text");
@@ -235,7 +241,7 @@ fn empty_tool_call_ids_get_matching_synthetic_ids() {
         assistant_tool_call("", "read_file", "{}"),
         tool_result("", "contents"),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     let call_id = blocks(&out.messages[1])[0]["id"].as_str().unwrap();
     let result_id = blocks(&out.messages[2])[0]["tool_use_id"].as_str().unwrap();
     assert!(!call_id.is_empty());
@@ -252,7 +258,7 @@ fn empty_tool_result_content_gets_a_placeholder() {
         assistant_tool_call("c1", "run_bash", "{}"),
         tool_result("c1", ""),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     assert_eq!(
         blocks(&out.messages[2])[0]["content"],
         EMPTY_TOOL_OUTPUT,
@@ -277,7 +283,7 @@ fn consecutive_tool_results_collapse_into_one_user_message() {
         tool_result("c1", "one"),
         tool_result("c2", "two"),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     // Splitting results across messages trains the model out of parallel calls.
     assert_eq!(roles(&out.messages), vec!["user", "assistant", "user"]);
     let results = blocks(&out.messages[2]);
@@ -305,7 +311,7 @@ fn the_esc_cancel_path_keeps_every_result() {
         tool_result("c2", "SKIPPED"),
         tool_result("c3", "SKIPPED"),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     assert_eq!(blocks(&out.messages[1]).len(), 3, "all tool_use kept");
     assert_eq!(blocks(&out.messages[2]).len(), 3, "all tool_result kept");
 }
@@ -320,7 +326,7 @@ fn tool_results_separated_by_a_user_turn_do_not_merge() {
         assistant_tool_call("c2", "read_file", "{}"),
         tool_result("c2", "two"),
     ];
-    let out = translate(&history);
+    let out = translate(&history, Thinking::Drop);
     assert_eq!(
         roles(&out.messages),
         vec!["user", "assistant", "user", "user", "assistant", "user"]

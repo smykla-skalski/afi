@@ -8,7 +8,8 @@
 //!   keeps the `saw_finish` EOF guard and `turn_finalize`'s `.contains("length")`
 //!   truncation check working untouched.
 //! * `thinking_delta` lands in `reasoning_content`, the field the llama.cpp /
-//!   `DeepSeek` reasoning path already uses.
+//!   `DeepSeek` reasoning path already uses, *and* in `thinking`, which is the
+//!   replay copy the assistant turn has to echo back verbatim.
 //!
 //! Anthropic frames every event with both an `event:` name and a `"type"` field
 //! inside the `data:` payload. Only the payload is read, so the framing layer
@@ -18,7 +19,8 @@ use serde_json::Value;
 
 use crate::model::client::sse::SseDecoder;
 use crate::model::stream::{
-    PromptTokensDetails, SseDecodeError, SseLine, StreamChunk, ToolCallDelta, Usage,
+    PromptTokensDetails, SseDecodeError, SseLine, StreamChunk, ThinkingDelta, ToolCallDelta, Usage,
+    chunk_line,
 };
 
 /// Decoder for Anthropic Messages API streams.
@@ -93,7 +95,7 @@ impl AnthropicDecoder {
         if stop == Some("refusal") {
             return Err(SseDecodeError::Provider(refusal_message(delta)));
         }
-        Ok(SseLine::Chunk(StreamChunk {
+        Ok(chunk_line(StreamChunk {
             finish_reason: stop.map(normalize_stop_reason),
             usage: Some(self.merged_usage(event)),
             ..StreamChunk::default()
@@ -151,24 +153,33 @@ fn normalize_stop_reason(raw: &str) -> String {
     .to_string()
 }
 
-/// `content_block_start`. Only `tool_use` blocks carry information here - text
-/// and thinking blocks always start empty and stream their content as deltas.
+/// `content_block_start`. `tool_use` and `redacted_thinking` carry their whole
+/// payload here; text and thinking blocks start empty and stream as deltas.
 fn block_start(event: &Value) -> SseLine {
     let Some(block) = event.get("content_block") else {
         return SseLine::Ignore;
     };
-    if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-        return SseLine::Ignore;
-    }
-    SseLine::Chunk(StreamChunk {
-        tool_calls: vec![ToolCallDelta {
+    match block
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "tool_use" => chunk_line(StreamChunk {
+            tool_calls: vec![ToolCallDelta {
+                index: index_of(event),
+                id: str_field(block, "id"),
+                name: str_field(block, "name"),
+                arguments: None,
+            }],
+            ..StreamChunk::default()
+        }),
+        "redacted_thinking" => thinking_chunk(ThinkingDelta {
             index: index_of(event),
-            id: str_field(block, "id"),
-            name: str_field(block, "name"),
-            arguments: None,
-        }],
-        ..StreamChunk::default()
-    })
+            redacted: str_field(block, "data"),
+            ..ThinkingDelta::default()
+        }),
+        _ => SseLine::Ignore,
+    }
 }
 
 /// `content_block_delta`. The delta self-describes its kind, so no per-index
@@ -177,23 +188,27 @@ fn block_delta(event: &Value) -> SseLine {
     let Some(delta) = event.get("delta") else {
         return SseLine::Ignore;
     };
+    let index = index_of(event);
     match delta
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default()
     {
         "text_delta" => text_chunk(str_field(delta, "text")),
-        "thinking_delta" => reasoning_chunk(str_field(delta, "thinking")),
-        "input_json_delta" => args_chunk(index_of(event), str_field(delta, "partial_json")),
-        // `signature_delta` carries a thinking-block signature. afi never
-        // replays thinking blocks, so it is dropped.
+        "thinking_delta" => reasoning_chunk(index, str_field(delta, "thinking")),
+        "signature_delta" => thinking_chunk(ThinkingDelta {
+            index,
+            signature: str_field(delta, "signature"),
+            ..ThinkingDelta::default()
+        }),
+        "input_json_delta" => args_chunk(index, str_field(delta, "partial_json")),
         _ => SseLine::Ignore,
     }
 }
 
 fn text_chunk(text: Option<String>) -> SseLine {
     match text {
-        Some(content) => SseLine::Chunk(StreamChunk {
+        Some(content) => chunk_line(StreamChunk {
             content: Some(content),
             ..StreamChunk::default()
         }),
@@ -201,19 +216,38 @@ fn text_chunk(text: Option<String>) -> SseLine {
     }
 }
 
-fn reasoning_chunk(thinking: Option<String>) -> SseLine {
-    match thinking {
-        Some(reasoning) => SseLine::Chunk(StreamChunk {
-            reasoning_content: Some(reasoning),
-            ..StreamChunk::default()
-        }),
-        None => SseLine::Ignore,
+/// A thinking fragment feeds two consumers: the live reasoning stream the user
+/// watches, and the replay buffer the next request echoes back.
+fn reasoning_chunk(index: u32, thinking: Option<String>) -> SseLine {
+    let Some(reasoning) = thinking else {
+        return SseLine::Ignore;
+    };
+    chunk_line(StreamChunk {
+        reasoning_content: Some(reasoning.clone()),
+        thinking: vec![ThinkingDelta {
+            index,
+            thinking: Some(reasoning),
+            ..ThinkingDelta::default()
+        }],
+        ..StreamChunk::default()
+    })
+}
+
+/// A replay-only fragment: a signature, or a `redacted_thinking` payload.
+/// Neither is displayable, so nothing reaches `reasoning_content`.
+fn thinking_chunk(delta: ThinkingDelta) -> SseLine {
+    if delta.signature.is_none() && delta.redacted.is_none() {
+        return SseLine::Ignore;
     }
+    chunk_line(StreamChunk {
+        thinking: vec![delta],
+        ..StreamChunk::default()
+    })
 }
 
 fn args_chunk(index: u32, partial: Option<String>) -> SseLine {
     match partial {
-        Some(arguments) => SseLine::Chunk(StreamChunk {
+        Some(arguments) => chunk_line(StreamChunk {
             tool_calls: vec![ToolCallDelta {
                 index,
                 id: None,

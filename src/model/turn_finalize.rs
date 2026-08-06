@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
+use crate::model::client::THINKING_HISTORY_KEY;
 use crate::model::recovery::{
     EMPTY_TURN_NUDGE, FORCED_FINAL_NUDGE, last_is_dangling_tool, nudge_current_user_turn,
 };
@@ -39,6 +40,7 @@ pub(crate) fn finalize_turn(
         content_parts,
         tool_calls,
         reasoning_parts,
+        thinking_blocks,
         usage,
         timings,
         finish_reasons,
@@ -96,7 +98,12 @@ pub(crate) fn finalize_turn(
     {
         return status;
     }
-    if let Some(status) = run_structured_tools(messages, tr, &tool_calls, &text, cancel, ui) {
+    let structured = StructuredTurn {
+        tool_calls: &tool_calls,
+        text: &text,
+        thinking_blocks: &thinking_blocks,
+    };
+    if let Some(status) = run_structured_tools(messages, tr, &structured, cancel, ui) {
         return status;
     }
     if let Some(status) = run_text_tools(messages, tr, &text, cancel, ui) {
@@ -168,15 +175,36 @@ fn emit_forced_final(
     TURN_DONE.to_string()
 }
 
+/// The parts of a streamed turn that a structured tool dispatch needs.
+struct StructuredTurn<'a> {
+    tool_calls: &'a HashMap<u32, ToolCallAccum>,
+    text: &'a str,
+    thinking_blocks: &'a [Value],
+}
+
 /// Push the assistant turn that carries the structured tool calls.
-fn push_assistant_tool_calls(messages: &mut Vec<Value>, ordered: &[ToolCallAccum], text: &str) {
+///
+/// Any thinking blocks ride along under `THINKING_HISTORY_KEY`. This is the
+/// turn that needs them: Anthropic requires a thinking block that accompanied a
+/// `tool_use` to be echoed back verbatim on the request carrying that tool's
+/// result, and the `OpenAI`-shape fields alone cannot express one.
+fn push_assistant_tool_calls(
+    messages: &mut Vec<Value>,
+    ordered: &[ToolCallAccum],
+    turn: &StructuredTurn<'_>,
+) {
     let tool_calls_json: Vec<Value> = ordered.iter().map(|c| json!({"id": c.id.clone().unwrap_or_default(), "type": "function", "function": {"name": c.name.clone().unwrap_or_default(), "arguments": c.args.clone()}})).collect();
-    let content = if text.trim().is_empty() {
+    let content = if turn.text.trim().is_empty() {
         Value::Null
     } else {
-        json!(text)
+        json!(turn.text)
     };
-    messages.push(json!({"role": "assistant", "content": content, "tool_calls": tool_calls_json}));
+    let mut message =
+        json!({"role": "assistant", "content": content, "tool_calls": tool_calls_json});
+    if !turn.thinking_blocks.is_empty() {
+        message[THINKING_HISTORY_KEY] = Value::Array(turn.thinking_blocks.to_vec());
+    }
+    messages.push(message);
 }
 
 /// Warn about (and either give up or retry) a malformed tool-call payload.
@@ -218,15 +246,14 @@ fn malformed_tool_retry(
 fn run_structured_tools(
     messages: &mut Vec<Value>,
     tr: &TurnRequest<'_>,
-    tool_calls: &HashMap<u32, ToolCallAccum>,
-    text: &str,
+    turn: &StructuredTurn<'_>,
     cancel: &CancellationToken,
     ui: &mut dyn UserInterface,
 ) -> Option<String> {
-    if tool_calls.is_empty() {
+    if turn.tool_calls.is_empty() {
         return None;
     }
-    let ordered = order_tool_calls(tool_calls);
+    let ordered = order_tool_calls(turn.tool_calls);
     let mut parsed_args: Vec<Value> = Vec::new();
     for (i, c) in ordered.iter().enumerate() {
         match serde_json::from_str::<Value>(&c.args) {
@@ -243,7 +270,7 @@ fn run_structured_tools(
             }
         }
     }
-    push_assistant_tool_calls(messages, &ordered, text);
+    push_assistant_tool_calls(messages, &ordered, turn);
     let mut da = DispatchArgs {
         approval: tr.approval,
         classifier: tr.classifier,

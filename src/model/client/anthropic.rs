@@ -33,6 +33,7 @@ use crate::model::usage_totals;
 pub(crate) mod auth;
 mod decode;
 mod messages;
+pub(crate) mod thinking;
 mod tools;
 
 pub(crate) use auth::TokenCache;
@@ -50,31 +51,15 @@ const DEFAULT_MAX_TOKENS: u32 = 16_000;
 /// An allowlist rather than a passthrough: Anthropic rejects unknown top-level
 /// parameters, and the recovery sampler's keys must never reach it.
 ///
-/// `thinking` is deliberately absent - see [`THINKING`].
+/// `thinking` is also configurable, but not through this list - it has three
+/// states rather than two and decides whether history replays thinking blocks,
+/// so it is resolved separately in [`thinking::resolve`].
 const ALLOWED_EXTRA_KEYS: &[&str] = &[
     "output_config",
     "metadata",
     "stop_sequences",
     "service_tier",
 ];
-
-/// Thinking is turned off explicitly, and cannot currently be turned on.
-///
-/// When a thinking block accompanies a `tool_use`, the API requires the
-/// assistant turn to be echoed back *verbatim* on the follow-up request that
-/// carries the `tool_result`, thinking block and signature included. Rebuilding
-/// that message is a 400. afi stores history in `OpenAI` shape and rebuilds the
-/// assistant turn from it on every request, so it cannot round-trip a thinking
-/// block, and afi is a tool-calling agent - nearly every turn would fail.
-///
-/// Sending `disabled` rather than omitting the key matters, because thinking is
-/// on by default on Claude Opus 5, Claude Sonnet 5, and Claude Fable 5.
-///
-/// Two consequences worth knowing. Claude Fable 5 rejects an explicit
-/// `disabled`, so it is unusable here until thinking blocks round-trip. And
-/// `disabled` is what keeps Claude Haiku 4.5 working at all, since it rejects
-/// `adaptive` with a 400.
-const THINKING: &str = "disabled";
 
 /// Matches a trailing `/v1`, `/v2`, ... so a base url written with or without
 /// the version suffix resolves to the same endpoint.
@@ -114,14 +99,19 @@ struct BodyParams<'a> {
 }
 
 fn build_body(params: &BodyParams<'_>) -> Value {
-    let translated = messages::translate(params.history);
+    let thinking = thinking::resolve(params.extra_body);
+    let translated = messages::translate(params.history, thinking::mode(thinking.as_ref()));
     let mut body = json!({
         "model": params.model,
         "max_tokens": clamp_max_tokens(params.max_tokens),
         "stream": params.stream,
         "messages": translated.messages,
-        "thinking": {"type": THINKING},
     });
+    // Absent only when the source asked for omission, which is what Claude
+    // Fable 5 needs - it rejects an explicit `disabled` and always thinks.
+    if let Some(value) = thinking {
+        body["thinking"] = value;
+    }
     if let Some(system) = &translated.system {
         body["system"] = cached_system(system);
     }

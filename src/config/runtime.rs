@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
 use crate::envfile;
+use crate::summary::SummaryFormat;
 
 use super::builtins::add_builtin_sources;
 use super::{Protocol, Source, build_http_headers, parse_extra_body};
@@ -28,6 +29,8 @@ pub struct Runtime {
     pub resume: Option<Option<String>>,
     pub session: Option<String>,
     pub env: HashMap<String, String>,
+    /// How to report the run once it finishes. Off unless asked for.
+    pub summary: SummaryFormat,
 }
 
 /// Parsed CLI args - the subset that affects initial state. The `sessions`
@@ -41,6 +44,7 @@ pub struct ParsedArgs {
     pub session: Option<String>,
     pub prompt_file: Option<String>,
     pub sessions_query: Option<Vec<String>>,
+    pub summary: Option<String>,
 }
 
 /// Parse argv into the subset that affects runtime construction.
@@ -80,6 +84,7 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
         "--source" => return set_opt(&mut out.source, value),
         "--session" => return set_opt(&mut out.session, value),
         "--prompt-file" | "-f" => return set_opt(&mut out.prompt_file, value),
+        "--summary" => return set_opt(&mut out.summary, value),
         "--resume" | "-r" => {
             // bare --resume, or --resume <target> where target doesn't start
             // with '-' (so `--resume --yolo` doesn't swallow --yolo).
@@ -135,6 +140,13 @@ impl Runtime {
             prompt_file: parsed.prompt_file,
             resume: parsed.resume,
             session: parsed.session,
+            // The flag wins over the env var, matching every other setting.
+            summary: SummaryFormat::from_value(
+                parsed
+                    .summary
+                    .as_deref()
+                    .or_else(|| env.get("AFI_SUMMARY").map(String::as_str)),
+            ),
             env,
         };
 

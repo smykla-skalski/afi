@@ -2,6 +2,16 @@
 
 All notable changes to `afi` from this point forward.
 
+**Fixed — a failed one-shot run no longer exits 0.** `report_client_error` returned `TURN_DONE`, the same status a completed turn returns, so an unreachable server, an HTTP error, or a bad credential printed its message and then exited successfully. CI read a broken run as a passing one. Client errors now return a distinct `TURN_FAILED`, which the turn loop treats as terminal - retrying it would hammer a server that just refused us - and `main` exits 1.
+
+### Added — machine-readable run summary
+
+`--summary json`, or `AFI_SUMMARY=json`, prints one JSON object on stdout after a one-shot run: `ok`, `error`, `source`, `model`, `answer`, `usage`, and `elapsed_secs`. `answer` is the last assistant message carrying text, so a review flow can post it without parsing the transcript. Off by default.
+
+This also fixes the token accounting it reports. `normalize_usage` computed the input / output / cache-read / reasoning split and `turn_finalize` discarded the result, so the breakdown was thrown away on every provider and only a bare total reached the footer. Totals now accumulate across the run and are verified against the per-request numbers Anthropic reports. The four counts are disjoint and sum to `total_tokens`; `usage` is `null` rather than zeros when no turn reported any, so a silent provider is distinguishable from a free run.
+
+No cost figure is emitted, deliberately: no provider here returns one, so it would have to come from a hard-coded price table that goes stale silently. One known gap - Anthropic prices cache writes above cache reads, but `cache_creation_input_tokens` folds into `input_tokens` instead of being broken out, so a cost calculation under-counts a write.
+
 ### Added — native Anthropic Messages API
 
 `afi` now speaks a second wire protocol. Anthropic sources use `POST /v1/messages` rather than OpenAI-compatible `/chat/completions`, so tool calls arrive as real `tool_use` blocks and the system prompt carries a `cache_control` breakpoint. Set `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or the `ANTHROPIC_FEDERATION_*` ids and an `anthropic` source registers itself, defaulting to `claude-sonnet-5`. Any named source can switch protocol with `AFI_SOURCE_<NAME>_PROTOCOL`, which defaults to `openai`.

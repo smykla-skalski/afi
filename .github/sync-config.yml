@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/smykla-skalski/.github/main/schemas/sync-config.schema.json
+# renovate.json was created by Renovate's own onboarding PR (not org sync), so
+# dotsync's manual-modification check would otherwise exclude it from sync
+# forever. Declaring an explicit merge strategy here makes org sync deep-merge
+# the org template into it instead.
+sync:
+  files:
+    merge:
+      - path: "renovate.json"
+        strategy: "deep-merge"

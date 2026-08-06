@@ -15,6 +15,7 @@ use crate::risk::{RiskClassifier, confirm};
 use crate::term::{OutputEvent, UserInterface};
 use crate::tools;
 use crate::tools::policy::ToolPolicy;
+use crate::tools::policy::is_mutating;
 use crate::tools::protocol::sanitize_tool_result;
 use std::path::PathBuf;
 
@@ -119,7 +120,7 @@ pub(crate) fn dispatch_tool(
         return ToolDispatchResult::Ok(refusal);
     }
 
-    if matches!(name, "write_file" | "edit_file" | "run_bash") {
+    if is_mutating(name) {
         let decision = {
             let ui = RefCell::new(&mut *da.ui);
             let ask = |prompt: &str| ui.borrow_mut().approve(prompt);

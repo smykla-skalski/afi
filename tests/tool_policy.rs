@@ -242,3 +242,69 @@ fn the_json_summary_records_what_the_run_could_call() {
         serde_json::from_str(stdout.trim()).unwrap_or_else(|error| panic!("{error}: {stdout}"));
     assert_eq!(summary["tools"], serde_json::json!(["read_file"]));
 }
+
+#[test]
+fn the_read_only_flag_permits_only_the_readers() {
+    let rt = common::build(&["afi", "--read-only"], &[]);
+    assert_eq!(
+        rt.tool_policy.permitted(),
+        ["read_file", "list_dir", "wait_background"]
+    );
+    assert!(rt.tool_policy.is_read_only());
+}
+
+#[test]
+fn read_only_cannot_be_widened_by_an_allow_list() {
+    // The reason it is a denial. A job sets --read-only; whatever the prompt or a
+    // later argument asks for, run_bash stays gone.
+    let rt = common::build(&["afi", "--read-only", "--allowed-tools", "run_bash"], &[]);
+    assert!(!rt.tool_policy.permits("run_bash"));
+    assert_eq!(rt.tool_policy.permitted(), Vec::<&str>::new());
+}
+
+#[test]
+fn read_only_needs_no_yolo_to_run_unattended() {
+    // The pairing the docs used to teach. --yolo only decides whether afi asks,
+    // and nothing a read-only run can call is ever asked about, so the flag is
+    // inert here - it was granting writes for no reason.
+    let with = common::build(&["afi", "--read-only", "--yolo"], &[]);
+    let without = common::build(&["afi", "--read-only"], &[]);
+    assert_eq!(with.tool_policy, without.tool_policy);
+    for name in ["write_file", "edit_file", "run_bash"] {
+        assert!(!with.tool_policy.permits(name), "{name} with --yolo");
+    }
+}
+
+#[test]
+fn the_read_only_env_var_works_on_its_own() {
+    let rt = common::build(&["afi"], &[("AFI_READ_ONLY", "1")]);
+    assert!(rt.tool_policy.is_read_only());
+}
+
+#[test]
+fn a_blank_read_only_var_is_not_a_lockout() {
+    // An unset shell variable expanded into the environment must not silently
+    // restrict a run, matching how the two lists treat a blank value.
+    let rt = common::build(&["afi"], &[("AFI_READ_ONLY", "")]);
+    assert!(rt.tool_policy.is_unrestricted());
+}
+
+#[test]
+fn an_explicit_off_turns_the_read_only_var_off() {
+    for value in ["0", "false", "no", "off", "OFF"] {
+        let rt = common::build(&["afi"], &[("AFI_READ_ONLY", value)]);
+        assert!(rt.tool_policy.is_unrestricted(), "AFI_READ_ONLY={value}");
+    }
+    for value in ["1", "true", "yes", "on"] {
+        let rt = common::build(&["afi"], &[("AFI_READ_ONLY", value)]);
+        assert!(rt.tool_policy.is_read_only(), "AFI_READ_ONLY={value}");
+    }
+}
+
+#[test]
+fn the_read_only_flag_cannot_be_turned_off_by_the_env_var() {
+    // One-way on purpose: a wrapper that passes --read-only should not be
+    // defeated by AFI_READ_ONLY=0 further out in the environment.
+    let rt = common::build(&["afi", "--read-only"], &[("AFI_READ_ONLY", "0")]);
+    assert!(rt.tool_policy.is_read_only());
+}

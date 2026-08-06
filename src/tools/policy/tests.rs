@@ -177,3 +177,72 @@ fn a_non_array_schema_value_passes_through_untouched() {
     let not_an_array = Value::Null;
     assert_eq!(policy.filter_tools(&not_an_array), not_an_array);
 }
+
+/// The read-only posture permits exactly the tools that cannot change anything.
+#[test]
+fn read_only_denies_every_mutating_tool() {
+    let policy = ToolPolicy::default().read_only();
+    assert_permits_exactly(&policy, &["read_file", "list_dir", "wait_background"]);
+    assert!(policy.is_read_only());
+}
+
+/// The property the posture exists for. An allow list cannot widen it, so a
+/// wrapper that sets it cannot be argued out of it by a later argument.
+#[test]
+fn read_only_outranks_an_allow_list_naming_a_writer() {
+    let policy = ToolPolicy::parse(Some("read_file,run_bash,write_file"), None).read_only();
+    assert_permits_exactly(&policy, &["read_file"]);
+    assert!(policy.is_read_only());
+    assert!(!policy.permits("run_bash"));
+}
+
+/// Applying it twice is applying it once: the caller may not know whether a
+/// wrapper already did.
+#[test]
+fn read_only_is_idempotent() {
+    let once = ToolPolicy::default().read_only();
+    let twice = ToolPolicy::default().read_only().read_only();
+    assert_eq!(once, twice);
+}
+
+/// A read-only run is a restricted run, so the banner and summary show it.
+#[test]
+fn read_only_is_not_unrestricted_and_describes_its_set() {
+    let policy = ToolPolicy::default().read_only();
+    assert!(!policy.is_unrestricted());
+    assert_eq!(policy.describe(), "read_file,list_dir,wait_background");
+}
+
+/// `is_read_only` reports the effect, not how it was asked for.
+#[test]
+fn a_deny_list_naming_all_three_reads_as_read_only() {
+    let spelled = ToolPolicy::parse(None, Some("write_file,edit_file,run_bash"));
+    assert!(spelled.is_read_only());
+    assert!(!ToolPolicy::parse(None, Some("write_file,edit_file")).is_read_only());
+    assert!(!ToolPolicy::default().is_read_only());
+}
+
+/// Every mutating tool has to be a real tool, or the posture would deny a name
+/// nothing dispatches and quietly permit the tool it was meant to stop.
+#[test]
+fn the_mutating_list_names_only_registered_tools() {
+    for name in MUTATING_TOOLS {
+        assert!(
+            known_tool_names().contains(&name),
+            "{name} is not a registered tool"
+        );
+        assert!(is_mutating(name));
+    }
+    assert!(!is_mutating("read_file"));
+    assert!(!is_mutating("nope"));
+}
+
+/// A read-only run never offers a writer's schema, so the model does not learn
+/// the tool exists.
+#[test]
+fn read_only_filters_the_advertised_schemas() {
+    let policy = ToolPolicy::default().read_only();
+    let filtered = policy.filter_tools(&TOOLS);
+    let names = advertised(&filtered);
+    assert_eq!(names, ["read_file", "list_dir", "wait_background"]);
+}

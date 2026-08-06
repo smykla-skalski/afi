@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 mod builtins;
 mod protocol;
 mod runtime;
+mod tools;
 pub use protocol::{Federation, IdentitySource, NOOP_KEY, Protocol};
 pub use runtime::{ParsedArgs, Runtime, discover_sources, parse_args};
 

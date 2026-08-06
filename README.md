@@ -118,7 +118,7 @@ afi saves every chat automatically to `~/.afi/sessions/` (override with `AFI_HOM
 | `run_bash`  | `command`             | requires confirmation           |
 | `wait_background` | `pid`          | wait for a backgrounded command |
 
-Restrict what a run may call with `--allowed-tools read_file,list_dir` or `--disallowed-tools run_bash`. Approval decides whether afi asks; this decides what exists to ask about, which is what a CI job needs when `--yolo` would otherwise hand over every write. See [tool policy](docs/reference.md#tool-policy).
+`--read-only` denies every tool that can change anything, which is the posture a CI job wants: it needs no approval bypass, because the tools approval asks about are the ones it removes. `--allowed-tools` and `--disallowed-tools` bound the set more precisely. Approval decides whether afi asks; these decide what exists to ask about. See [tool policy](docs/reference.md#tool-policy).
 
 ## Credits
 

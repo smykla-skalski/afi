@@ -11,6 +11,7 @@ use crate::summary::SummaryFormat;
 use crate::tools::policy::ToolPolicy;
 
 use super::builtins::add_builtin_sources;
+use super::tools::apply_tool_flags;
 use super::{Protocol, Source, build_http_headers, parse_extra_body};
 
 // --- Runtime -----------------------------------------------------------------
@@ -49,6 +50,7 @@ pub struct Runtime {
 pub struct ParsedArgs {
     pub source: Option<String>,
     pub yolo: bool,
+    pub read_only: bool,
     pub approval: Option<String>,
     pub resume: Option<Option<String>>,
     pub session: Option<String>,
@@ -96,6 +98,7 @@ pub fn parse_args(args: &[String]) -> ParsedArgs {
 fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
     match flag {
         "--yolo" => out.yolo = true,
+        "--read-only" => out.read_only = true,
         "--approval" => return set_opt(&mut out.approval, value),
         "--source" => return set_opt(&mut out.source, value),
         "--session" => return set_opt(&mut out.session, value),
@@ -187,9 +190,10 @@ impl Runtime {
                     .as_deref()
                     .or_else(|| env.get("AFI_SUMMARY").map(String::as_str)),
             ),
-            tool_policy: ToolPolicy::parse(
+            tool_policy: ToolPolicy::from_env(
                 env.get("AFI_ALLOWED_TOOLS").map(String::as_str),
                 env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
+                env.get("AFI_READ_ONLY").map(String::as_str),
             ),
             flag_errors: parsed.flag_errors,
             // At startup, so a typo is heard about before the run, not after.
@@ -307,25 +311,6 @@ fn resolve_approval(env: &HashMap<String, String>, parsed: &ParsedArgs) -> Appro
         approval.approve_level = None;
     }
     approval
-}
-
-/// Materialize `--allowed-tools` / `--disallowed-tools` into the env map so the
-/// flag wins over the variable, matching every other setting.
-///
-/// The env map is where the policy lives because `ModelConfig::from_env` is
-/// built in four places from an env map alone, and all four must agree on what
-/// the run may call. Note this map is afi's own view, not the child process
-/// environment: `run_detached` does not export it, so a `run_bash` child does
-/// not inherit a flag-supplied policy.
-fn apply_tool_flags(env: &mut HashMap<String, String>, parsed: &ParsedArgs) {
-    for (flag, var) in [
-        (&parsed.allowed_tools, "AFI_ALLOWED_TOOLS"),
-        (&parsed.disallowed_tools, "AFI_DISALLOWED_TOOLS"),
-    ] {
-        if let Some(value) = flag {
-            env.insert(var.to_string(), value.clone());
-        }
-    }
 }
 
 /// Build the sources map + ordered list from `AFI_SOURCE_*` env vars,

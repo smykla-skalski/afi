@@ -74,7 +74,7 @@ pub(crate) fn finalize_turn(
     // the cache and reasoning split was computed and thrown away on every
     // provider, leaving nothing for a run report to draw on.
     if let Some(normalized) = normalize_usage(usage.as_ref(), timings.as_ref(), streamed_chars) {
-        usage_totals::record(&normalized);
+        usage_totals::record(tr.model, &normalized);
     }
 
     if reasoning_only_chars > 0

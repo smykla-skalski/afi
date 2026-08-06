@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
 use crate::envfile;
+use crate::pricing::Pricing;
 use crate::summary::SummaryFormat;
 use crate::tools::policy::ToolPolicy;
 
@@ -38,6 +39,8 @@ pub struct Runtime {
     pub tool_policy: ToolPolicy,
     /// Tool-policy flags given wrongly on the command line. See `refusals`.
     pub flag_errors: Vec<String>,
+    /// Token rates for the summary's cost, `None` when unset or unusable.
+    pub pricing: Option<Pricing>,
 }
 
 /// Parsed CLI args - the subset that affects initial state. The `sessions`
@@ -189,6 +192,8 @@ impl Runtime {
                 env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
             ),
             flag_errors: parsed.flag_errors,
+            // At startup, so a typo is heard about before the run, not after.
+            pricing: Pricing::from_env(&env),
             env,
         };
 

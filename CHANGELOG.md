@@ -2,6 +2,22 @@
 
 All notable changes to `afi` from this point forward.
 
+### Added — cost in the run summary
+
+Set `AFI_PRICES` to a JSON object mapping model id to USD per million tokens and the summary's `usage` object gains `cost_usd`, rounded to the micro-dollar:
+
+```bash
+AFI_PRICES='{"claude-sonnet-5": {"input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75}}'
+```
+
+The rates come from the caller rather than a table compiled into afi, because no provider here returns a cost and a price table nobody notices going stale reports a wrong number with total confidence. Leave `AFI_PRICES` unset and there is no `cost_usd` key at all - not a null and not a zero, both of which read as a free run to anything summing the field.
+
+The same rule covers every gap. A model missing from the table, or a rate missing for a class the run actually spent tokens on, drops the field rather than reporting the part that could be priced. A class with no rate that the run never used is harmless, so an OpenAI-compatible source needing no cache-write rate still gets a figure. `reasoning` is optional and falls back to the `output` rate, which is how every provider here bills it. A negative rate, a rate finer than the sixth decimal place or too large to hold, a misspelled class key, or a model named twice warns at startup and disables cost reporting for that run - the duplicate check counts case and surrounding space as the same id, since otherwise one spelling would win at random and the bill would change between runs.
+
+Token totals are now kept per model, so a piped session that switched models mid-run is billed against each one's own rates instead of the last one's. The flat counts in `usage` are unchanged - they are those per-model totals folded back together.
+
+Arithmetic runs in integer micro-USD from the parsed rate to the printed figure, so the number is reproducible by hand and does not depend on the order the turns happened in.
+
 ### Added — tool allow and deny lists
 
 `--allowed-tools` and `--disallowed-tools`, or `AFI_ALLOWED_TOOLS` and `AFI_DISALLOWED_TOOLS`, bound what a run may call. The flag wins over the variable, an absent or blank list means every tool, a non-empty allow list is exhaustive, and deny wins over allow.
@@ -28,7 +44,7 @@ Both non-interactive entry points report it - `--prompt-file` and piped stdin - 
 
 This also fixes the token accounting it reports. `normalize_usage` computed the input / output / cache-read / reasoning split and `turn_finalize` discarded the result, so the breakdown was thrown away on every provider and only a bare total reached the footer. Totals now accumulate across the run and are verified against the per-request numbers Anthropic reports. The counts are disjoint and sum to `total_tokens`; `usage` is `null` rather than zeros when no turn reported any, so a silent provider is distinguishable from a free run.
 
-No cost figure is emitted, deliberately: no provider here returns one, so it would have to come from a hard-coded price table that goes stale silently.
+No cost figure is emitted at this point, deliberately: no provider here returns one, so it would have to come from a hard-coded price table that goes stale silently. Cost arrives later, priced against rates the caller supplies.
 
 **Fixed - cache writes are no longer counted as plain input.** Anthropic's `cache_creation_input_tokens` was folded into `input_tokens`, so a run summary reported a write at the base input rate. It is billed at 1.25x that, against 0.1x for a read, and the error grew with every rebuild of a lapsed cached prefix - once in a short CI job, repeatedly in a long session. The summary now carries `cache_write_tokens` as a fifth disjoint count, on both Anthropic paths - the non-streaming one a `/compress` request takes included. Providers that report no such figure send `0` rather than an estimate, llama.cpp included: its `timings.cache_n` is a reused prefix, which is a read.
 

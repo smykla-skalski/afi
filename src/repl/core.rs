@@ -349,13 +349,22 @@ async fn one_shot_run(
 
 /// Print the machine-readable run summary on stdout.
 fn print_json_summary(rt: &Runtime, messages: &[Value], error: Option<&str>, elapsed: Duration) {
+    // One read of the accumulator, folded for the counts and priced for the
+    // cost. Reading it twice would let the two describe different instants.
+    let by_model = usage_totals::snapshot_by_model();
     let run = RunSummary {
         ok: error.is_none(),
         error,
         source: rt.active.as_deref(),
         model: rt.model.as_deref(),
         answer: final_answer(messages),
-        usage: usage_totals::snapshot(),
+        usage: usage_totals::total(&by_model),
+        // Priced per model, so a session that switched models mid-run is still
+        // billed at each one's own rates.
+        cost_usd: rt
+            .pricing
+            .as_ref()
+            .and_then(|pricing| pricing.run_cost_usd(&by_model)),
         elapsed_secs: elapsed.as_secs_f64(),
         tools: rt.tool_policy.permitted(),
     };

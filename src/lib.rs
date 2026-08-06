@@ -17,6 +17,7 @@ pub mod log;
 pub mod memory;
 pub mod metrics;
 pub mod model;
+pub mod pricing;
 pub mod prompt;
 pub mod repl;
 pub mod risk;

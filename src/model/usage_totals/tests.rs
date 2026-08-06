@@ -99,19 +99,28 @@ fn saturates_instead_of_overflowing() {
     assert_eq!(totals.total_tokens(), u64::MAX);
 }
 
+/// One test owns the process-wide accumulator. A second one would interleave
+/// with it under the parallel runner, so the phases below are plain calls.
 #[test]
 fn the_process_accumulator_records_and_resets() {
-    // Serialized against the other global-state test by the shared mutex; both
-    // reset first so ordering between them cannot matter.
     reset();
+    records_one_model_then_clears();
+    keeps_models_apart_while_still_totalling();
+    reset();
+}
+
+fn records_one_model_then_clears() {
     assert!(snapshot().is_empty());
-    record(&NormalizedUsage {
-        input_tokens: 7,
-        output_tokens: 8,
-        cache_read_tokens: 9,
-        cache_write_tokens: 5,
-        reasoning_tokens: 1,
-    });
+    record(
+        "claude-sonnet-5",
+        &NormalizedUsage {
+            input_tokens: 7,
+            output_tokens: 8,
+            cache_read_tokens: 9,
+            cache_write_tokens: 5,
+            reasoning_tokens: 1,
+        },
+    );
     let snap = snapshot();
     assert_eq!((snap.input_tokens, snap.output_tokens), (7, 8));
     assert_eq!((snap.cache_read_tokens, snap.reasoning_tokens), (9, 1));
@@ -119,4 +128,44 @@ fn the_process_accumulator_records_and_resets() {
     assert_eq!(snap.requests, 1);
     reset();
     assert!(snapshot().is_empty(), "reset must clear the accumulator");
+}
+
+/// A piped session can `/source` its way onto a second model, and the two are
+/// not billed alike - so the flat counts stay whole while pricing sees the split.
+fn keeps_models_apart_while_still_totalling() {
+    record("cheap", &usage(100, 20, 0, 0));
+    record("dear", &usage(300, 40, 0, 0));
+    record("cheap", &usage(50, 10, 0, 0));
+    let by_model: Vec<_> = snapshot_by_model()
+        .iter()
+        .map(|(model, totals)| (model.clone(), totals.input_tokens, totals.requests))
+        .collect();
+    assert_eq!(
+        by_model,
+        vec![("cheap".to_string(), 150, 2), ("dear".to_string(), 300, 1)],
+        "models keep first-seen order and accumulate on their own"
+    );
+    let snap = snapshot();
+    assert_eq!((snap.input_tokens, snap.output_tokens), (450, 70));
+    assert_eq!(snap.requests, 3);
+}
+
+#[test]
+fn merging_two_models_totals_adds_every_field() {
+    let mut left = UsageTotals::default();
+    left.add(&usage(1, 2, 3, 4));
+    let mut right = UsageTotals::default();
+    right.add(&usage(10, 20, 30, 40));
+    left.merge(&right);
+    assert_eq!(
+        left,
+        UsageTotals {
+            input_tokens: 11,
+            output_tokens: 22,
+            cache_read_tokens: 33,
+            cache_write_tokens: 0,
+            reasoning_tokens: 44,
+            requests: 2,
+        }
+    );
 }

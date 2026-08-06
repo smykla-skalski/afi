@@ -35,6 +35,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `AFI_TOOL_RESULT_CHARS`                      | per-tool-result char cap (default 20000)                             |
 | `AFI_SUMMARY`                                | set to `json` for a run summary on stdout ([details](#run-summary))  |
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
+| `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
 
 ## Tool policy
 
@@ -76,7 +77,8 @@ A restricted run shows `tools:` in the status line and lists the permitted set i
     "cache_write_tokens": 2279,
     "reasoning_tokens": 0,
     "total_tokens": 11447,
-    "requests": 3
+    "requests": 3,
+    "cost_usd": 0.023398
   },
   "elapsed_secs": 12.17,
   "tools": ["read_file", "write_file", "edit_file", "list_dir", "run_bash", "wait_background"]
@@ -95,13 +97,37 @@ Reporting writes separately re-attributes tokens rather than adding them. The 22
 
 Anthropic prices a 5-minute cache write differently from a 1-hour one and reports them separately. `afi` only ever requests the default TTL, so the single figure here covers every write it can make.
 
-**No cost field.** Anthropic returns no cost, so any figure here would come from a price table that goes stale without anyone noticing. Multiply the token counts by rates you control.
+`cost_usd` appears only when you supply rates - see [Cost](#cost) below.
 
 A failed run sets `ok` to false, fills in `error`, and exits 1.
 
 Both non-interactive entry points report it: `--prompt-file`, and piped stdin with no prompt file. A piped session summarizes the whole session, so `answer` is its last assistant text and `usage` covers every request it made, `/compress` included; any turn failing outright makes the run fail, `/recover` included. An interactive TTY session prints nothing extra and always exits 0 — stdout there is the rendered interface, and a human is already reading it.
 
 **Human output moves to stderr** while `--summary json` is set, so stdout holds nothing but the JSON and pipes straight into a parser. Errors go to stderr either way.
+
+## Cost
+
+No provider afi speaks to returns a cost. Anthropic's Messages API reports tokens, and so does every OpenAI-compatible endpoint, so the rates have to come from somewhere - and a table compiled into afi is a table nobody notices going stale. You supply it in `AFI_PRICES`, a JSON object mapping model id to USD per million tokens:
+
+```bash
+export AFI_PRICES='{
+  "claude-sonnet-5": {"input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75}
+}'
+```
+
+The summary then carries `usage.cost_usd`, rounded to the micro-dollar. Without it there is no `cost_usd` key at all - not a null, not a zero, both of which read as "this run was free" to anything summing the field.
+
+The four classes match the token counts they price. `reasoning` is a fifth, optional key; leave it out and reasoning tokens are billed at the `output` rate, which is what every provider here does.
+
+A class you leave unpriced is fine as long as the run spent nothing there - an OpenAI-compatible source reports `0` cache writes on every request, so demanding a write rate would suppress every figure. Spend tokens on an unpriced class, or on a model missing from the table, and `cost_usd` disappears rather than reporting the part it could price.
+
+Model ids match case-insensitively after trimming, and must otherwise be exactly the id afi sends to the provider - what `model` shows in the summary, or what `/source` reports. A mismatch drops the field, which is the point: an absent number is checkable, a wrong one is not.
+
+Rates are read as exact decimals, down to the sixth place - a millionth of a dollar per million tokens, which is a hundredth of a micro-dollar on a ten-million-token run. Exponent notation is read as the number it denotes, so `3e-1` and `0.3` are the same rate.
+
+Four things warn at startup and disable cost reporting for the whole run: a negative rate, a rate finer than the sixth decimal place or too large to hold, a misspelled class key, and a model named twice. The last one counts case and surrounding space as the same id, so `{"M": ..., "m": ...}` is a duplicate - one of the two would otherwise win at random and the bill would change between runs. One unreadable entry is not priced around.
+
+A session that switches models is billed against each model's own rates, so `cost_usd` stays right even though `model` can only name the last one.
 
 ## Anthropic
 

@@ -40,7 +40,10 @@ pub struct UsageTotals {
 
 impl UsageTotals {
     /// Fold one request's normalized usage in.
-    pub fn add(&mut self, usage: &NormalizedUsage) {
+    ///
+    /// Crate-internal, like `merge`: the counts are a public shape to read, but
+    /// building one is afi's own business and not a semver commitment.
+    pub(crate) fn add(&mut self, usage: &NormalizedUsage) {
         self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
         self.cache_read_tokens = self
@@ -54,7 +57,7 @@ impl UsageTotals {
     }
 
     /// Fold another model's totals in, for the run-wide flat counts.
-    pub fn merge(&mut self, other: &Self) {
+    pub(crate) fn merge(&mut self, other: &Self) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
         self.cache_read_tokens = self
@@ -108,11 +111,22 @@ pub fn record(model: &str, usage: &NormalizedUsage) {
 /// The run's totals so far, every model folded together.
 #[must_use]
 pub fn snapshot() -> UsageTotals {
-    let guard = totals().lock().unwrap_or_else(PoisonError::into_inner);
-    guard.iter().fold(UsageTotals::default(), |mut acc, entry| {
-        acc.merge(&entry.1);
-        acc
-    })
+    total(&snapshot_by_model())
+}
+
+/// Fold a per-model snapshot into one set of counts.
+///
+/// Takes the snapshot rather than reading the accumulator itself, so a caller
+/// that also prices the run derives both from one read. Two reads would let the
+/// counts and the cost describe different instants.
+#[must_use]
+pub fn total(by_model: &[(String, UsageTotals)]) -> UsageTotals {
+    by_model
+        .iter()
+        .fold(UsageTotals::default(), |mut acc, entry| {
+            acc.merge(&entry.1);
+            acc
+        })
 }
 
 /// The run's totals split by model, for anything that prices them.

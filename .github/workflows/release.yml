@@ -37,7 +37,7 @@ env:
 jobs:
   verify:
     name: Verify
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     outputs:
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
@@ -76,7 +76,12 @@ jobs:
 
           version="${INPUT_VERSION#v}"
 
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+          # SemVer 2.0: no leading zeros, hyphens allowed inside a prerelease
+          # identifier, optional build metadata. Cargo accepts all of that, so a
+          # narrower pattern here would refuse to release a version the manifest
+          # legitimately holds.
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          if [[ ! "${version}" =~ ${semver} ]]; then
             echo "::error::'${version}' is not a semver version. Expected e.g. 0.2.0 or 1.0.0-rc.1."
             exit 1
           fi
@@ -120,7 +125,7 @@ jobs:
     name: Tag and release
     needs: verify
     if: needs.verify.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     permissions:
       contents: write
     steps:
@@ -152,7 +157,7 @@ jobs:
       - tag
     # `tag` is skipped on a dry run, which must not skip the build.
     if: ${{ !cancelled() && needs.verify.result == 'success' && needs.tag.result != 'failure' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     permissions:
       contents: write
     strategy:

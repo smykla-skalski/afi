@@ -68,9 +68,47 @@ fn max_tokens_is_always_present_and_floored() {
         (Some(2048), MIN_MAX_TOKENS),
         (Some(64_000), 64_000),
     ] {
-        assert_eq!(clamp_max_tokens(requested), expected);
+        assert_eq!(
+            clamp_max_tokens(requested, thinking::Thinking::Drop),
+            expected
+        );
     }
     assert_eq!(body_with(None)["max_tokens"], 16_000);
+}
+
+#[test]
+fn the_floor_rises_once_the_request_may_think() {
+    // 4096 is room for an answer and not for the reasoning in front of it: the
+    // forced-final turn spends the lot thinking and comes back empty.
+    for (requested, expected) in [
+        (None, DEFAULT_MAX_TOKENS),
+        (Some(2048), MIN_MAX_TOKENS_THINKING),
+        (Some(4096), MIN_MAX_TOKENS_THINKING),
+        // Never downward: a caller who asked for more keeps it.
+        (Some(64_000), 64_000),
+    ] {
+        assert_eq!(
+            clamp_max_tokens(requested, thinking::Thinking::Replay),
+            expected
+        );
+    }
+}
+
+#[test]
+fn a_forced_final_at_max_effort_is_not_left_at_the_disabled_floor() {
+    // The whole sequence: effort above `high` omits the `disabled` default,
+    // which turns thinking on, which is what makes 4096 too small.
+    let body = build_body(&BodyParams {
+        model: "claude-opus-5",
+        history: &history(),
+        tools: Some(&TOOLS),
+        tool_choice: None,
+        max_tokens: Some(2048),
+        extra_body: Some(&json!({"output_config": {"effort": "max"}})),
+        stream: true,
+    });
+    assert_eq!(body.get("thinking"), None, "max effort rejects disabled");
+    assert_eq!(body["max_tokens"], MIN_MAX_TOKENS_THINKING);
 }
 
 #[test]

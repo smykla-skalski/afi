@@ -43,6 +43,14 @@ pub(super) enum Thinking {
     Drop,
 }
 
+impl Thinking {
+    /// Whether this request may spend tokens thinking. The same fact the
+    /// replay rule turns on, under the name the `max_tokens` floor needs it by.
+    pub(super) fn is_on(self) -> bool {
+        self == Self::Replay
+    }
+}
+
 /// The `thinking` value for a request, or `None` to omit the key entirely.
 ///
 /// Three states, all reachable from a source's `EXTRA_BODY`:

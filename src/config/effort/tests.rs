@@ -147,6 +147,9 @@ fn the_note_says_what_the_source_ended_up_with() {
     apply(&mut nowhere, Effort::Max);
     let message = note(&nowhere, Effort::Max).expect("an untranslatable level must be reported");
     assert!(message.contains("nowhere to put it"), "{message}");
+    // No advice to set a variable, since the source that most often raises this
+    // (the legacy single-source fallback) reads no EXTRA_BODY at all.
+    assert!(!message.contains("EXTRA_BODY"), "{message}");
 
     let mut sent = anthropic(None);
     apply(&mut sent, Effort::High);
@@ -182,13 +185,31 @@ fn a_hand_written_effort_wins() {
 }
 
 #[test]
-fn the_level_joins_a_container_that_is_already_there() {
+fn a_container_that_is_already_there_is_left_as_written() {
+    // Not merged into. OpenRouter documents `reasoning.effort` and
+    // `reasoning.max_tokens` as mutually exclusive, so composing the two out of
+    // a hand-written object would build a request neither side asked for - and
+    // afi cannot know which keys any given endpoint pairs that way.
+    let mut router = source(
+        "https://openrouter.ai/api/v1",
+        Some(json!({"reasoning": {"max_tokens": 2000}})),
+    );
+    apply(&mut router, Effort::High);
+    assert_eq!(
+        router.extra_body,
+        Some(json!({"reasoning": {"max_tokens": 2000}}))
+    );
+
     let mut src = anthropic(Some(json!({"output_config": {"task_budget": 64_000}})));
     apply(&mut src, Effort::High);
     assert_eq!(
         src.extra_body,
-        Some(json!({"output_config": {"task_budget": 64_000, "effort": "high"}}))
+        Some(json!({"output_config": {"task_budget": 64_000}}))
     );
+    // And it is said out loud, rather than the run quietly going without.
+    let message = note(&src, Effort::High).expect("a skipped container must be reported");
+    assert!(message.contains("output_config"), "{message}");
+    assert!(message.contains("leaves as written"), "{message}");
 }
 
 #[test]
@@ -212,4 +233,18 @@ fn a_container_of_the_wrong_type_is_not_rewritten() {
     apply(&mut src, Effort::Max);
     assert_eq!(src.extra_body, Some(json!({"output_config": "high"})));
     assert_eq!(src.resolved_effort(), None);
+}
+
+#[test]
+fn a_flat_key_of_the_wrong_type_is_reported_rather_than_replaced() {
+    // `reasoning_effort` is set but unreadable, so the run carries a level afi
+    // cannot report - which is worth a line, not a silent overwrite.
+    let mut src = source(
+        "https://api.openai.com/v1",
+        Some(json!({"reasoning_effort": 3})),
+    );
+    apply(&mut src, Effort::High);
+    assert_eq!(src.extra_body, Some(json!({"reasoning_effort": 3})));
+    let message = note(&src, Effort::High).expect("an unreadable level must be reported");
+    assert!(message.contains("reasoning_effort"), "{message}");
 }

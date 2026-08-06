@@ -102,6 +102,42 @@ fn a_hand_written_effort_survives_the_flag() {
 }
 
 #[test]
+fn a_hand_written_container_is_left_as_written() {
+    // Merging into it would compose `reasoning: {"max_tokens": …, "effort": …}`,
+    // two keys OpenRouter documents as mutually exclusive.
+    let rt = common::build(
+        &["afi", "--effort", "high"],
+        &[
+            LOCAL,
+            OPENROUTER_KEY,
+            (
+                "AFI_SOURCE_OPENROUTER_EXTRA_BODY",
+                r#"{"reasoning":{"max_tokens":2000}}"#,
+            ),
+        ],
+    );
+    assert_eq!(
+        rt.sources["openrouter"].extra_body,
+        Some(json!({"reasoning": {"max_tokens": 2000}}))
+    );
+    assert_eq!(rt.sources["openrouter"].resolved_effort(), None);
+}
+
+#[test]
+fn another_flag_cannot_swallow_the_level() {
+    // `--summary` used to consume `--effort` as its value and leave `xhigh` as a
+    // stray positional: no summary, and a run at an effort nobody asked for.
+    let rt = common::build(
+        &["afi", "--summary", "--effort", "xhigh", "-f", "p.txt"],
+        &[LOCAL, ANTHROPIC_KEY],
+    );
+    assert!(rt.refusals().is_empty(), "{:?}", rt.refusals());
+    assert_eq!(rt.effort, Some(Effort::XHigh));
+    assert_eq!(rt.sources["anthropic"].resolved_effort(), Some("xhigh"));
+    assert_eq!(rt.prompt_file.as_deref(), Some("p.txt"));
+}
+
+#[test]
 fn an_effort_only_extra_body_is_still_reported() {
     // Nothing on the command line, so what the summary reports has to come from
     // the source itself.

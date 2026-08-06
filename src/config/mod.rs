@@ -146,25 +146,41 @@ impl Source {
     /// lists or 404 there, so the context-window probe order flips for them.
     #[must_use]
     pub fn is_local(&self) -> bool {
-        let host = self.base_url.to_lowercase();
-        let host = match host.split_once("://") {
-            Some((_, h)) => h,
-            None => &host,
-        };
-        let host = host
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .split(':')
-            .next()
-            .unwrap_or("");
+        let host = self.host();
         if host.is_empty() {
             return true;
         }
-        if matches!(host, "localhost" | "0.0.0.0" | "::1") {
+        if matches!(host.as_str(), "localhost" | "0.0.0.0" | "::1") {
             return true;
         }
-        LAN_RE.with(|re| re.is_match(host))
+        LAN_RE.with(|re| re.is_match(&host))
+    }
+
+    /// The host of this source's base url, lowercased and without port or path.
+    #[must_use]
+    pub fn host(&self) -> String {
+        let lower = self.base_url.to_lowercase();
+        let after_scheme = lower.split_once("://").map_or(lower.as_str(), |(_, h)| h);
+        after_scheme
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// True when this source points at `OpenAI`'s own API rather than one of
+    /// the many servers that merely speak its protocol.
+    ///
+    /// The two have diverged: `OpenAI`'s reasoning models reject `max_tokens`
+    /// and take `max_completion_tokens`, which no self-hosted server implements.
+    /// Host rather than model, because the newer spelling is right for every
+    /// model on that host, and a list of model names would go stale.
+    #[must_use]
+    pub fn is_openai(&self) -> bool {
+        self.host() == "api.openai.com"
     }
 
     /// Shorten a server-advertised model id into a concise display name. Only

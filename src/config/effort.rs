@@ -8,8 +8,9 @@
 //! effort nobody asked for. `--effort` and `AFI_EFFORT` name the level once and
 //! either take it or refuse to start.
 //!
-//! `EXTRA_BODY` still wins where both set an effort. It is the escape hatch,
-//! and an escape hatch that loses to a flag is not one.
+//! `EXTRA_BODY` wins wherever the two would meet, and the object it writes is
+//! left exactly as written rather than merged into. It is the escape hatch, and
+//! an escape hatch that loses to a flag is not one.
 //!
 //! Not every endpoint has the same ladder, so a level is capped at the highest
 //! one its dialect defines and the difference is reported. Sending a level an
@@ -108,28 +109,14 @@ fn dialect(source: &Source) -> Dialect {
     if source.is_anthropic() {
         return Dialect::OutputConfig;
     }
-    let host = host_of(&source.base_url);
+    if source.is_openai() {
+        return Dialect::Flat;
+    }
+    let host = source.host();
     if host == "openrouter.ai" || host.ends_with(".openrouter.ai") {
         return Dialect::Reasoning;
     }
-    if host == "api.openai.com" {
-        return Dialect::Flat;
-    }
     Dialect::Unknown
-}
-
-/// The host of a base url, lowercased and without port or path.
-fn host_of(base_url: &str) -> String {
-    let lower = base_url.to_lowercase();
-    let after_scheme = lower.split_once("://").map_or(lower.as_str(), |(_, r)| r);
-    after_scheme
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_string()
 }
 
 /// How a dialect carries the level: an optional container object, the field
@@ -198,27 +185,28 @@ pub(super) fn apply_to_sources(rt: &mut Runtime) {
 /// that switches source.
 fn note(source: &Source, asked: Effort) -> Option<String> {
     let name = &source.name;
-    let ceiling = wire(dialect(source)).map(|w| w.ceiling);
-    match (source.resolved_effort(), ceiling) {
+    match (source.resolved_effort(), wire(dialect(source))) {
         (Some(sent), _) if sent == asked.as_str() => None,
-        (Some(sent), Some(ceiling)) if asked > ceiling && sent == ceiling.as_str() => {
-            Some(format!(
-                "source {name:?} defines no effort above {}, so its requests carry \
-                 that rather than {}",
-                ceiling.as_str(),
-                asked.as_str(),
-            ))
-        }
+        (Some(sent), Some(w)) if asked > w.ceiling && sent == w.ceiling.as_str() => Some(format!(
+            "source {name:?} defines no effort above {}, so its requests carry \
+             that rather than {}",
+            w.ceiling.as_str(),
+            asked.as_str(),
+        )),
         (Some(sent), _) => Some(format!(
             "source {name:?} already sets effort {sent:?}, which wins over --effort {}",
             asked.as_str(),
         )),
-        (None, _) => Some(format!(
-            "effort {} did not reach source {name:?} - afi has nowhere to put it on \
-             that endpoint, so the run takes whatever the endpoint defaults to \
-             (set AFI_SOURCE_{}_EXTRA_BODY if it does take one)",
+        (None, Some(w)) => Some(format!(
+            "source {name:?} sets {:?} in EXTRA_BODY, which afi leaves as written, \
+             so effort {} was not added to it",
+            w.container.unwrap_or(w.key),
             asked.as_str(),
-            name.to_uppercase(),
+        )),
+        (None, None) => Some(format!(
+            "effort {} did not reach source {name:?} - afi has nowhere to put it on \
+             that endpoint, so the run takes whatever the endpoint defaults to",
+            asked.as_str(),
         )),
     }
 }
@@ -226,8 +214,9 @@ fn note(source: &Source, asked: Effort) -> Option<String> {
 /// Fold `level` into one source's `extra_body`, in the spelling its endpoint
 /// understands and no higher than the level its schema defines.
 ///
-/// A source that already carries an effort keeps it, whatever shape it is in:
-/// `EXTRA_BODY` is the escape hatch, so anything written there by hand wins.
+/// Nothing already in `extra_body` is touched - not the key the level would
+/// take, and not the object that key lives in. `EXTRA_BODY` is the escape
+/// hatch, so anything written there by hand wins.
 fn apply(source: &mut Source, level: Effort) {
     let Some(Wire {
         container,
@@ -251,15 +240,15 @@ fn apply(source: &mut Source, level: Effort) {
             body.insert(key.to_string(), value);
         }
         Some(name) => {
-            let mut nested = match body.get(name) {
-                Some(Value::Object(map)) => map.clone(),
-                // Configured by hand in a shape afi will not second-guess.
-                Some(_) => return,
-                None => Map::new(),
-            };
-            if nested.contains_key(key) {
+            // A container written by hand belongs to whoever wrote it, whatever
+            // is in it. Merging a level into one would compose a request
+            // neither side asked for: `OpenRouter` documents `reasoning.effort`
+            // and `reasoning.max_tokens` as mutually exclusive, and afi cannot
+            // know which keys any endpoint pairs that way.
+            if body.contains_key(name) {
                 return;
             }
+            let mut nested = Map::new();
             nested.insert(key.to_string(), value);
             body.insert(name.to_string(), Value::Object(nested));
         }

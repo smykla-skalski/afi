@@ -92,7 +92,9 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
 /// three are silent failures in the direction nobody wants, so the run refuses
 /// to start instead. A value that looks like another flag - what
 /// `--summary-file --yolo` produces - is the same mistake and is refused too,
-/// and is left unconsumed so the following flag still applies.
+/// and is left unconsumed so the following flag still applies. A bare `-` is
+/// refused here as well, unlike on the `set_opt` path: none of these flags
+/// takes one, and a summary file literally named `-` is a typo every time.
 fn set_required(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> Option<String> {
     let Some(v) = value.filter(|v| !v.starts_with('-')) else {
         out.flag_errors.push(format!("{flag} needs a value"));
@@ -155,11 +157,29 @@ fn set_tool_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool 
     true
 }
 
-/// Set `slot` to `value` when present; returns whether a value was consumed.
+/// Set `slot` to `value` when there is one; returns whether a value was
+/// consumed.
+///
+/// A flag-shaped token is left alone rather than swallowed. Taking it loses two
+/// settings at once: `afi --summary --effort xhigh` set `summary` to
+/// `"--effort"` and then dropped `xhigh` as a stray positional, so the run
+/// produced no summary *and* ran at an effort nobody asked for - the silent
+/// failure `--effort` exists to prevent, reached through a flag that has
+/// nothing to do with it. Not consuming costs a missing value here, which every
+/// flag on this path already tolerates.
 fn set_opt(slot: &mut Option<String>, value: Option<&str>) -> bool {
-    if let Some(v) = value {
-        *slot = Some(v.to_string());
-        return true;
-    }
-    false
+    let Some(v) = value.filter(|v| !is_another_flag(v)) else {
+        return false;
+    };
+    *slot = Some(v.to_string());
+    true
+}
+
+/// True for a token that is the next flag rather than this one's value.
+///
+/// A bare `-` is not one: it is `--prompt-file`'s documented "read the prompt
+/// from stdin". `set_required` is stricter and refuses it, because none of the
+/// flags on that path takes a dash for a value.
+fn is_another_flag(value: &str) -> bool {
+    value.starts_with('-') && value != "-"
 }

@@ -113,13 +113,17 @@ The same level reaches every source in whatever its endpoint calls it:
 
 A level above an endpoint's ceiling is capped rather than sent, and a source with no effort control afi knows of - llama.cpp, vLLM, SGLang, Z.ai - gets nothing at all. Both print a line on stderr naming the source, and neither stops the run: a level is a preference the endpoint may simply not have, and dying over it would make the flag unusable in any script that switches source. Only the source the run starts on is reported; `/source` switches to an endpoint with a different ladder without saying so.
 
+Talking to OpenAI's own API also switches the output limit from `max_tokens` to `max_completion_tokens`, since its reasoning models - the only ones `reasoning_effort` applies to - reject the older key outright. Every other endpoint keeps `max_tokens`, the only spelling a self-hosted server implements.
+
 The ceilings above belong to the wire formats, which are stable. **Individual models are stricter, and afi keeps no table of that** - `claude-haiku-4-5` takes no effort at all, and older Opus stops at `high`. A model that rejects a level says so on the first request, which is a clearer answer than a compiled-in list nobody notices going stale.
 
 **An unusable level exits 2 without starting**, whether it came from the flag or the variable. This is the reason to prefer it over hand-writing the same JSON into `EXTRA_BODY`, where a typo is warned about and ignored: a run at an effort nobody asked for finishes normally and looks exactly like one at the right effort, so there is nothing downstream to notice.
 
-`EXTRA_BODY` stays the escape hatch and wins where both set an effort - afi never overwrites a level written there by hand, and says on stderr that it did not. The [run summary](#run-summary) reports whichever level the requests actually carried, from either source.
+`EXTRA_BODY` stays the escape hatch and wins wherever the two would meet. afi never overwrites a level written there by hand, and it never adds one to an object written there either: `{"reasoning":{"max_tokens":2000}}` is left exactly as it is rather than becoming `{"max_tokens":2000,"effort":"high"}`, because OpenRouter documents those two keys as mutually exclusive and afi cannot know which keys any given endpoint pairs that way. Either case prints a line on stderr, and the [run summary](#run-summary) reports whichever level the requests actually carried.
 
 On the Anthropic path one default gives way. `thinking` is sent as `disabled` unless [`AFI_ANTHROPIC_EXTRA_BODY`](#anthropic) says otherwise, and `claude-opus-5` rejects an explicit `disabled` above effort `high`; at `xhigh` and `max` the key is therefore omitted, leaving the model at its own default. Anything explicit in `EXTRA_BODY` is still sent as written, `disabled` included.
+
+**Thinking is charged against `max_tokens`, so the floor moves with it.** Anthropic caps thinking and visible text with one number, and afi's forced-final turn asks for only 2048. Whenever a request may think - because `EXTRA_BODY` turned it on, or because the effort is above `high` - that request's `max_tokens` is floored at 16000 rather than 4096, so the budget cannot go entirely on reasoning and leave nothing to say. Higher effort wants more than the floor, and `AFI_MAX_TOKENS` is how to give it (Anthropic's own guidance is 64000 at `xhigh` and `max`). A turn that ends with no answer at all now prints `FORCED FINAL RETURNED NO ANSWER`, exits 1, and reports `"ok": false` rather than a successful empty answer.
 
 ## Run summary
 

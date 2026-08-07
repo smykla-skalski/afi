@@ -10,7 +10,10 @@ use super::super::lower;
 fn pairs(body: &str) -> HashMap<String, String> {
     let read = lower::read(Path::new("config.json"), body, Origin::Operator);
     assert_eq!(read.refusals, Vec::<String>::new(), "unexpected refusals");
-    read.pairs.into_iter().collect()
+    read.pairs
+        .into_iter()
+        .map(|(name, value, _)| (name, value))
+        .collect()
 }
 
 /// Lower `body` and return the refusals, asserting there was at least one.

@@ -33,7 +33,11 @@ fn a_project_file_may_say_what_to_work_with() {
         Origin::WorkingTree,
     );
     assert_eq!(read.refusals, Vec::<String>::new());
-    let out: HashMap<String, String> = read.pairs.into_iter().collect();
+    let out: HashMap<String, String> = read
+        .pairs
+        .into_iter()
+        .map(|(name, value, _)| (name, value))
+        .collect();
     assert_eq!(out.get("AFI_ACTIVE").unwrap(), "local");
     assert_eq!(out.get("AFI_SOURCE_LOCAL_MODEL").unwrap(), "glm-4.6");
 }

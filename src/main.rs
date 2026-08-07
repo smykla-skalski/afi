@@ -7,7 +7,7 @@ use std::io::{IsTerminal, stdout};
 use std::process;
 
 use afi::Runtime;
-use afi::cli::{cli_meta, cli_sessions_with_style};
+use afi::cli::{Listing, cli_meta, cli_sessions_with_style};
 use afi::repl::run_repl;
 use afi::summary::{ErrorKind, RunError, RunSummary, writable, write_file};
 use afi::tools::known_tool_names;
@@ -37,9 +37,7 @@ fn main() {
     // then failed would have it quietly list the default one instead. Falling
     // through reaches the refusal below, which reports itself properly.
     let styled = stdout.is_terminal();
-    if settings.refusals().is_empty()
-        && cli_sessions_with_style(&args[1..], &env_map, &mut stdout.lock(), styled)
-    {
+    if settings.refusals().is_empty() && listed_sessions(&args, &env_map, styled) {
         return;
     }
 
@@ -69,6 +67,25 @@ fn main() {
     // code, and reporting success after printing an HTTP error hides the failure.
     if !run_repl(&mut rt) {
         process::exit(1);
+    }
+}
+
+/// Answer `afi sessions [query]`, when that is what argv asked for.
+///
+/// Returns whether the listing answered, so the caller can stop reading argv. An
+/// argument the listing cannot honour exits here rather than being handed back: a
+/// listing has no summary to carry the reason and no runtime to ask for one, so
+/// the report on stderr is the whole of it.
+fn listed_sessions(args: &[String], env: &HashMap<String, String>, styled: bool) -> bool {
+    match cli_sessions_with_style(&args[1..], env, &mut stdout().lock(), styled) {
+        Listing::Printed => true,
+        Listing::NotAsked => false,
+        Listing::Refused(why) => {
+            for refusal in &why {
+                eprintln!("  \u{2717} {refusal}");
+            }
+            process::exit(2);
+        }
     }
 }
 

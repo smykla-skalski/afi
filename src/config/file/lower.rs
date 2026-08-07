@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 
 use super::super::sources;
 use super::Origin;
-use super::schema::{self, Scope};
+use super::schema::{self, Merge, Scope};
 use super::suggest::nearest;
 use super::value::{self, Convert};
 
@@ -26,7 +26,9 @@ pub(super) struct Lowered<'f> {
     /// Where this file came from, which decides what it is allowed to set - see
     /// [`Scope`].
     origin: Origin,
-    pub pairs: Vec<(String, String)>,
+    /// The variables this file sets, each with how it combines with what an
+    /// earlier file said - see [`Merge`].
+    pub pairs: Vec<(String, String, Merge)>,
     pub refusals: Vec<String>,
 }
 
@@ -129,7 +131,9 @@ impl Lowered<'_> {
         for (model, rates) in table {
             self.rates(model, rates);
         }
-        self.set("prices", "AFI_PRICES", value::object, value);
+        // Per model, so a project file pricing one does not drop the rates for
+        // every other one.
+        self.set("prices", "AFI_PRICES", value::object, value, Merge::Object);
     }
 
     /// One model's rates.
@@ -215,13 +219,13 @@ impl Lowered<'_> {
             return;
         }
         let env = format!("{env_prefix}{}", setting.env);
-        self.set(&path, &env, setting.convert, value);
+        self.set(&path, &env, setting.convert, value, setting.merge);
     }
 
     /// Record one variable, or why the value could not become one.
-    fn set(&mut self, path: &str, env: &str, convert: Convert, value: &Value) {
+    fn set(&mut self, path: &str, env: &str, convert: Convert, value: &Value, merge: Merge) {
         match convert(value) {
-            Ok(text) => self.pairs.push((env.to_string(), text)),
+            Ok(text) => self.pairs.push((env.to_string(), text, merge)),
             Err(why) => self.refuse(path, &why),
         }
     }

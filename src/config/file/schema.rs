@@ -52,6 +52,29 @@ pub(super) enum Scope {
     Operator,
 }
 
+/// How a key combines when two files both set it.
+///
+/// Replacing is the rule and the rest are the exceptions, each for its own
+/// reason. The three that bound what a run may do combine so a project file
+/// cannot widen them by replacing - see `super::FileSettings::merge`. The two
+/// that carry an object combine key by key, because replacing drops what the
+/// other file said about a key this one is silent on: a project file pricing one
+/// model would take the rates for every other model with it, and `cost_usd` would
+/// go quiet for them without a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Merge {
+    /// A later file's value stands in for an earlier one's.
+    Replace,
+    /// Objects combine key by key, the later file's winning per key.
+    Object,
+    /// Every name in either list, so a deny list only ever grows.
+    Union,
+    /// Only the names both lists carry, so an allow list only ever shrinks.
+    Intersection,
+    /// On as soon as either file asks for it.
+    Either,
+}
+
 /// One key and the variable it carries.
 pub(super) struct Setting {
     pub key: &'static str,
@@ -59,15 +82,29 @@ pub(super) struct Setting {
     pub env: &'static str,
     pub convert: Convert,
     pub scope: Scope,
+    pub merge: Merge,
 }
 
-/// Shorthand so a table row reads as one line. A key a project may set.
+/// Shorthand so a table row reads as one line. A key a project may set, whose
+/// value a later file replaces.
 const fn row(key: &'static str, env: &'static str, convert: Convert) -> Setting {
     Setting {
         key,
         env,
         convert,
         scope: Scope::Anywhere,
+        merge: Merge::Replace,
+    }
+}
+
+/// A key a project may set that combines rather than replaces. See [`Merge`].
+const fn joins(key: &'static str, env: &'static str, convert: Convert, merge: Merge) -> Setting {
+    Setting {
+        key,
+        env,
+        convert,
+        scope: Scope::Anywhere,
+        merge,
     }
 }
 
@@ -85,6 +122,7 @@ const fn mine(key: &'static str, env: &'static str, convert: Convert) -> Setting
         env,
         convert,
         scope: Scope::Operator,
+        merge: Merge::Replace,
     }
 }
 
@@ -141,9 +179,19 @@ pub(super) const TOP: &[Setting] = &[
     mine("home", "AFI_HOME", text),
     mine("sessions_dir", "AFI_SESSIONS_DIR", text),
     // What the run may reach.
-    row("read_only", "AFI_READ_ONLY", flag),
-    row("allowed_tools", "AFI_ALLOWED_TOOLS", allow_list),
-    row("disallowed_tools", "AFI_DISALLOWED_TOOLS", list),
+    joins("read_only", "AFI_READ_ONLY", flag, Merge::Either),
+    joins(
+        "allowed_tools",
+        "AFI_ALLOWED_TOOLS",
+        allow_list,
+        Merge::Intersection,
+    ),
+    joins(
+        "disallowed_tools",
+        "AFI_DISALLOWED_TOOLS",
+        list,
+        Merge::Union,
+    ),
     // What it is told to do, before the conversation starts.
     mine("system_prompt_file", "AFI_SYSTEM_PROMPT_FILE", text),
     mine("system_prompt_mode", "AFI_SYSTEM_PROMPT_MODE", prompt_mode),
@@ -219,7 +267,7 @@ pub(super) const SOURCE: &[Setting] = &[
     mine("protocol", "PROTOCOL", protocol_name),
     row("app_name", "APP_NAME", text),
     row("app_url", "APP_URL", text),
-    row("extra_body", "EXTRA_BODY", object),
+    joins("extra_body", "EXTRA_BODY", object, Merge::Object),
 ];
 
 /// The built-in `anthropic` source's overrides. Outside the `AFI_SOURCE_*`
@@ -228,7 +276,12 @@ pub(super) const SOURCE: &[Setting] = &[
 pub(super) const ANTHROPIC: &[Setting] = &[
     mine("base_url", "AFI_ANTHROPIC_BASE_URL", text),
     row("model", "AFI_ANTHROPIC_MODEL", text),
-    row("extra_body", "AFI_ANTHROPIC_EXTRA_BODY", object),
+    joins(
+        "extra_body",
+        "AFI_ANTHROPIC_EXTRA_BODY",
+        object,
+        Merge::Object,
+    ),
 ];
 
 /// The workload-identity-federation ids, under `anthropic.federation`.

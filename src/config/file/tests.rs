@@ -127,9 +127,11 @@ fn a_project_file_may_tighten_what_the_operator_allowed() {
 }
 
 #[test]
-fn two_allow_lists_with_nothing_in_common_permit_nothing() {
-    // An empty list reads as "every tool" downstream, so it cannot be the answer
-    // to "these two agreed on nothing" - the run refuses over the name instead.
+fn two_allow_lists_with_nothing_in_common_say_so() {
+    // A conflict between two files, not a value either of them got wrong, so the
+    // refusal names it as one. It cannot be answered with an empty list either:
+    // that reads as "every tool" by the time it reaches the policy, so the run
+    // would end up with every tool precisely because two files agreed on none.
     let dir = TempDir::new().unwrap();
     let user = write(
         dir.path(),
@@ -141,17 +143,51 @@ fn two_allow_lists_with_nothing_in_common_permit_nothing() {
         "repo/config.json",
         r#"{"allowed_tools": ["run_bash"]}"#,
     );
+    let files = [(user, Origin::Operator), (project, Origin::WorkingTree)];
+    let settings = FileSettings::load(&files);
+    let why = settings.refusals();
+    assert_eq!(why.len(), 1, "{why:?}");
+    assert!(why[0].contains("permit nothing"), "{why:?}");
+    assert!(why[0].contains("read_file"), "{why:?}");
+    // And nothing is in force, so no allow list reaches the policy at all.
+    let mut out = env(&[]);
+    settings.apply_to(&mut out);
+    assert!(out.is_empty(), "{out:?}");
+}
+
+#[test]
+fn an_object_combines_key_by_key_rather_than_replacing() {
+    // A project file pricing one model used to take the rates for every other one
+    // with it, and `cost_usd` went quiet for them without a word.
+    let dir = TempDir::new().unwrap();
+    let user = write(
+        dir.path(),
+        "user/config.json",
+        r#"{"prices": {"glm-4.6": {"input": 0.6}, "claude-opus-5": {"input": 5}},
+             "sources": {"zai": {"extra_body": {"provider": {"order": ["z-ai"]}}}}}"#,
+    );
+    let project = write(
+        dir.path(),
+        "repo/config.json",
+        r#"{"prices": {"glm-4.6": {"input": 0.9}},
+             "sources": {"zai": {"extra_body": {"reasoning": {"effort": "high"}}}}}"#,
+    );
     let out = applied(
         &[(user, Origin::Operator), (project, Origin::WorkingTree)],
         &[],
     );
-    let allowed = out.get("AFI_ALLOWED_TOOLS").unwrap();
+    let prices = out.get("AFI_PRICES").unwrap();
+    // The model both files priced takes the later answer.
+    assert!(prices.contains(r#""glm-4.6":{"input":0.9}"#), "{prices}");
+    // The model only one file priced keeps its rates.
     assert!(
-        !allowed.trim().is_empty(),
-        "an empty list would grant every tool"
+        prices.contains(r#""claude-opus-5":{"input":5}"#),
+        "{prices}"
     );
-    assert!(!allowed.contains("read_file"), "{allowed}");
-    assert!(!allowed.contains("run_bash"), "{allowed}");
+
+    let body = out.get("AFI_SOURCE_ZAI_EXTRA_BODY").unwrap();
+    assert!(body.contains("provider"), "{body}");
+    assert!(body.contains("reasoning"), "{body}");
 }
 
 #[test]

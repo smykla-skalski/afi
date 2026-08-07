@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use afi::cli::{
-    PageOptions, cli_sessions, fmt_when, print_session_list, session_id_from_args,
+    Listing, PageOptions, cli_sessions, fmt_when, print_session_list, session_id_from_args,
     session_list_page_options,
 };
 use afi::sessions::{SessionSummary, write_session};
@@ -37,11 +37,19 @@ fn bump_mtime(dir: &Path, sid: &str, secs: i64) {
     let _ = f.set_times(times);
 }
 
-/// Run `cli_sessions` and capture (handled, stdout) for assertions.
+/// Run `cli_sessions` and capture (printed, stdout) for assertions.
 fn run_cli(args: &[String], env: &HashMap<String, String>) -> (bool, String) {
     let mut buf = Vec::new();
-    let handled = cli_sessions(args, env, &mut buf);
-    (handled, String::from_utf8(buf).unwrap())
+    let answer = cli_sessions(args, env, &mut buf);
+    (answer == Listing::Printed, String::from_utf8(buf).unwrap())
+}
+
+/// Run `cli_sessions` and return why it refused.
+fn refusals_of(args: &[String], env: &HashMap<String, String>) -> Vec<String> {
+    match cli_sessions(args, env, &mut Vec::new()) {
+        Listing::Refused(why) => why,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 /// Seed a known set: 12 `topic NN` sessions plus an auth and a css session.
@@ -189,7 +197,31 @@ fn test_cli_sessions_not_invoked_returns_false() {
     let env = env_for(tmp.path());
     let args = ["--resume", "1"].map(String::from);
     assert!(!run_cli(&args, &env).0);
-    assert!(!cli_sessions(&[], &env, &mut Vec::new()));
+    assert_eq!(cli_sessions(&[], &env, &mut Vec::new()), Listing::NotAsked);
+}
+
+#[test]
+fn an_argument_the_listing_does_not_take_refuses_rather_than_being_searched_for() {
+    // `afi sessions --config x` looked for sessions titled "--config x" and found
+    // none, while the flag itself quietly did not apply. Nobody searches for a
+    // `--` word.
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env_for(tmp.path());
+    for flag in ["--config", "--read-only", "--limitt"] {
+        let args = ["sessions", flag].map(String::from);
+        let why = refusals_of(&args, &env);
+        assert_eq!(why.len(), 1, "{flag}: {why:?}");
+        assert!(why[0].contains(flag), "{flag}: {why:?}");
+    }
+}
+
+#[test]
+fn a_single_dash_stays_part_of_the_query() {
+    // A session title may well start with one, so only `--` words are refused.
+    let args = ["sessions", "-weird-title"].map(String::from);
+    let options = session_list_page_options(&args[1..]);
+    assert!(options.refusals.is_empty(), "{:?}", options.refusals);
+    assert_eq!(options.query.as_deref(), Some("-weird-title"));
 }
 
 #[test]

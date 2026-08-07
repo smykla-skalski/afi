@@ -17,16 +17,16 @@ use chrono::{DateTime, Local};
 use crate::util::now_secs_f64;
 
 use crate::repl::{DIM, GREEN, MAGENTA, RESET, YELLOW};
-use crate::sessions::{
-    SESSION_LIST_DEFAULT_LIMIT, SESSION_LIST_MAX_LIMIT, SessionSummary, list_sessions,
-    resolve_session, sessions_dir,
-};
+use crate::sessions::{SessionSummary, list_sessions, resolve_session, sessions_dir};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::path::PathBuf;
 
 mod meta;
 pub use meta::cli_meta;
+
+mod paging;
+pub use paging::{Listing, PageOptions, session_list_page_options};
 
 mod transcript;
 pub use transcript::print_transcript;
@@ -78,102 +78,6 @@ pub fn session_id_from_args<S: BuildHasher>(
         i += 1;
     }
     out
-}
-
-/// Parsed paging flags + leftover query from a `sessions` invocation.
-#[derive(Debug, Clone)]
-pub struct PageOptions {
-    pub query: Option<String>,
-    pub page: usize,
-    pub limit: usize,
-    pub warnings: Vec<String>,
-}
-
-/// Parse `--page`/`-p` / `--limit`/`-n` flags (and `--page=N` / `--limit=N`
-/// equals forms) out of `args`. Anything that isn't a paging flag becomes the
-/// search query. `limit` is clamped to `[1, SESSION_LIST_MAX_LIMIT]`.
-#[must_use]
-pub fn session_list_page_options(args: &[String]) -> PageOptions {
-    let mut acc = PageAccum {
-        page: 1,
-        limit: SESSION_LIST_DEFAULT_LIMIT,
-        query_parts: Vec::new(),
-        warnings: Vec::new(),
-    };
-    let mut i = 0;
-    while i < args.len() {
-        i += apply_page_arg(&mut acc, &args[i], args.get(i + 1).map(String::as_str));
-    }
-
-    let limit = acc.limit.clamp(1, SESSION_LIST_MAX_LIMIT);
-    let joined = acc.query_parts.join(" ");
-    let query = if joined.trim().is_empty() {
-        None
-    } else {
-        Some(joined)
-    };
-    PageOptions {
-        query,
-        page: acc.page,
-        limit,
-        warnings: acc.warnings,
-    }
-}
-
-struct PageAccum {
-    page: usize,
-    limit: usize,
-    query_parts: Vec<String>,
-    warnings: Vec<String>,
-}
-
-/// Parse `v` as a positive integer, or warn and keep `fallback`.
-fn positive_int(v: &str, fallback: usize, name: &str, warns: &mut Vec<String>) -> usize {
-    match v.parse::<usize>() {
-        Ok(n) if n >= 1 => n,
-        _ => {
-            warns.push(format!("ignored invalid {name}: {v:?}"));
-            fallback
-        }
-    }
-}
-
-/// Consume a `--flag value` pair into `slot`, warning if the value is missing.
-/// Returns the number of args consumed (2 with a value, else 1).
-fn take_num(
-    slot: &mut usize,
-    name: &str,
-    flag: &str,
-    next: Option<&str>,
-    warns: &mut Vec<String>,
-) -> usize {
-    if let Some(v) = next {
-        *slot = positive_int(v, *slot, name, warns);
-        2
-    } else {
-        warns.push(format!("ignored missing value for {flag}"));
-        1
-    }
-}
-
-/// Apply one `sessions` list arg to `acc`. Returns args consumed.
-fn apply_page_arg(acc: &mut PageAccum, a: &str, next: Option<&str>) -> usize {
-    if let Some(rest) = a.strip_prefix("--page=") {
-        acc.page = positive_int(rest, acc.page, "page", &mut acc.warnings);
-        return 1;
-    }
-    if let Some(rest) = a.strip_prefix("--limit=") {
-        acc.limit = positive_int(rest, acc.limit, "limit", &mut acc.warnings);
-        return 1;
-    }
-    match a {
-        "--page" | "-p" => take_num(&mut acc.page, "page", a, next, &mut acc.warnings),
-        "--limit" | "-n" => take_num(&mut acc.limit, "limit", a, next, &mut acc.warnings),
-        _ => {
-            acc.query_parts.push(a.to_string());
-            1
-        }
-    }
 }
 
 /// Compact relative timestamp for the session list.
@@ -333,14 +237,13 @@ fn print_no_sessions<W: Write>(out: &mut W, query: Option<&str>, page: usize, di
 }
 
 /// Handle `afi sessions [query] [--page N] [--limit N]` (or the
-/// `--sessions` / `ls` / `list` aliases). Returns `true` if this was a
-/// sessions invocation (and `out` has been written); `false` if `args`
-/// isn't a sessions request and the caller should proceed normally.
+/// `--sessions` / `ls` / `list` aliases). See [`Listing`] for what the answer
+/// means; anything but [`Listing::NotAsked`] means the caller is done with argv.
 pub fn cli_sessions<W: Write, S: BuildHasher>(
     args: &[String],
     env: &HashMap<String, String, S>,
     out: &mut W,
-) -> bool {
+) -> Listing {
     cli_sessions_with_style(args, env, out, true)
 }
 
@@ -351,13 +254,13 @@ pub fn cli_sessions_with_style<W: Write, S: BuildHasher>(
     env: &HashMap<String, String, S>,
     out: &mut W,
     styled: bool,
-) -> bool {
+) -> Listing {
     if args.is_empty() {
-        return false;
+        return Listing::NotAsked;
     }
     let first = args[0].as_str();
     if !matches!(first, "sessions" | "--sessions" | "ls" | "list") {
-        return false;
+        return Listing::NotAsked;
     }
     let dir = sessions_dir(env);
     let PageOptions {
@@ -365,7 +268,11 @@ pub fn cli_sessions_with_style<W: Write, S: BuildHasher>(
         page,
         limit,
         warnings,
+        refusals,
     } = session_list_page_options(&args[1..]);
+    if !refusals.is_empty() {
+        return Listing::Refused(refusals);
+    }
     let offset = (page - 1) * limit;
     let fetched = list_sessions(&dir, Some(limit + 1), offset, query.as_deref());
     let sessions: Vec<SessionSummary> = fetched.into_iter().take(limit).collect();
@@ -380,7 +287,7 @@ pub fn cli_sessions_with_style<W: Write, S: BuildHasher>(
     }
     if sessions.is_empty() {
         print_no_sessions(out, query.as_deref(), page, &dir);
-        return true;
+        return Listing::Printed;
     }
     let where_ = query
         .as_ref()
@@ -405,5 +312,5 @@ pub fn cli_sessions_with_style<W: Write, S: BuildHasher>(
             session_next_hint("afi sessions", page, limit, query.as_deref())
         );
     }
-    true
+    Listing::Printed
 }

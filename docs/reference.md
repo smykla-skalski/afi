@@ -148,7 +148,11 @@ Reaching for one of those from a project file refuses the run and says so, namin
 | `"disallowed_tools": ["run_bash"]`  | `[]`                         | `run_bash` still denied   |
 | `"read_only": true`                 | `false`                      | read-only                 |
 
-Two allow lists with nothing in common permit nothing, and the run refuses rather than reading an empty list as "every tool". `--config <path>` reads a file with your full trust, whatever directory it sits in, because naming a path is the act of trust - so `afi --config ./.afi/config.json` opts into a repository's file whole.
+Two allow lists with nothing in common are a conflict between the files rather than a value either got wrong, so the run exits 2 saying which tools each one permits. It cannot be answered with an empty list: that reads as "every tool" by the time it reaches the policy, so the run would end up with every tool precisely because two files agreed on none.
+
+`prices` and a source's `extra_body` combine key by key too, the later file winning per key. A project file pricing one model leaves your rates for the others standing, where replacing would have dropped them and taken `cost_usd` quiet with them.
+
+`--config <path>` reads a file with your full trust, whatever directory it sits in, because naming a path is the act of trust - so `afi --config ./.afi/config.json` opts into a repository's file whole.
 
 **Every key is its variable, minus the `AFI_` prefix and lowercased.** `AFI_MAX_TOKENS` is `max_tokens`, `AFI_READ_ONLY` is `read_only`, and so on through the table above and the tuning variables that are not in it. A test reads the source for `AFI_*` names and fails when one has neither a key nor a stated reason, so this stays true as settings are added. Four groups have structure instead:
 
@@ -501,6 +505,8 @@ Three cases lose a block rather than risk the turn: a stream cut before the sign
 | `afi sessions [query]` | list saved sessions, 10 per page (prints + exits) - optional substring filter |
 
 `afi sessions` reads `AFI_SESSIONS_DIR` and `AFI_HOME` from the same resolved settings a run does, so the env file and the [config file](#config-file) move the listing and the runs that saved into it together.
+
+It takes `--page`/`-p` and `--limit`/`-n`, in either spelling, and everything else is the search query. Everything else that is not a `--` word, that is: `afi sessions --config x` used to look for sessions titled `--config x` and find none, while the flag itself quietly did not apply, so a long flag the listing does not have exits 2 naming it. A single dash stays query text, because a title may well start with one.
 
 ## Commands
 

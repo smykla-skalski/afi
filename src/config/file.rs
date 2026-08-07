@@ -38,6 +38,8 @@ use std::fs;
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 use crate::sessions::afi_home;
 use crate::util;
 
@@ -45,6 +47,8 @@ mod lower;
 mod schema;
 mod suggest;
 mod value;
+
+use schema::Merge;
 
 #[cfg(test)]
 mod tests;
@@ -228,38 +232,59 @@ impl FileSettings {
         };
         let lowered = lower::read(path, &text, origin);
         self.refusals.extend(lowered.refusals);
-        for (name, value) in lowered.pairs {
-            self.merge(name, value);
+        for (name, value, how) in lowered.pairs {
+            if let Err(why) = self.merge(name, value, how) {
+                self.refusals.push(format!("{}: {why}", path.display()));
+            }
         }
     }
 
     /// Take one variable from a file, combining it with what an earlier file said
-    /// rather than replacing it where replacing could grant something.
+    /// rather than replacing it where replacing could lose something.
     ///
     /// A later file wins, which for most settings is the whole rule: the project
-    /// picks the model, and the operator's choice of model is what it replaces. The
-    /// tool policy cannot work that way. A project file replacing the operator's
-    /// allow list could add a tool to it, and replacing their deny list could drop
-    /// one - either way the working tree would have widened what the run may do,
-    /// which is the one direction it must never move. So the three that bound a
-    /// run combine instead: deny lists add up, allow lists keep only what both
-    /// agree on, and read-only stays on once anything asks for it.
-    fn merge(&mut self, name: String, value: String) {
-        let combined = match self.values.get(&name) {
-            Some(first) if name == DISALLOWED => Some(union(first, &value)),
-            Some(first) if name == ALLOWED => Some(intersection(first, &value)),
-            Some(first) if name == READ_ONLY => Some(either_on(first, &value)),
-            _ => None,
+    /// picks the model, and the operator's choice of model is what it replaces.
+    /// Which settings are exceptions, and why each one is, belongs to the schema -
+    /// see [`schema::Merge`]. This decides nothing, it applies what the key
+    /// carried.
+    ///
+    /// # Errors
+    ///
+    /// When two files cannot be combined at all, which only an allow list with
+    /// nothing in common can be.
+    fn merge(&mut self, name: String, value: String, how: Merge) -> Result<(), String> {
+        let combined = match (self.values.get(&name), how) {
+            (Some(first), Merge::Union) => union(first, &value),
+            (Some(first), Merge::Intersection) => intersection(first, &value)?,
+            (Some(first), Merge::Either) => either_on(first, &value),
+            (Some(first), Merge::Object) => objects(first, &value),
+            (None, _) | (Some(_), Merge::Replace) => value,
         };
-        self.values.insert(name, combined.unwrap_or(value));
+        self.values.insert(name, combined);
+        Ok(())
     }
 }
 
-/// The three variables that bound what a run may do, and so combine rather than
-/// replace when two files set them. See `FileSettings::merge`.
-const ALLOWED: &str = "AFI_ALLOWED_TOOLS";
-const DISALLOWED: &str = "AFI_DISALLOWED_TOOLS";
-const READ_ONLY: &str = "AFI_READ_ONLY";
+/// Two JSON objects, key by key, the later file's winning where both speak.
+///
+/// Only the top level: a key either file sets, it sets whole. That is the line
+/// between "the other file said nothing about this model" - which must survive -
+/// and "both said something about it", where one answer has to win and the later
+/// file is the one that does.
+///
+/// Either side failing to parse leaves the later value alone. Both were written by
+/// `value::object` from JSON that already parsed once, so this is unreachable
+/// rather than tolerated; replacing is what the caller would have done anyway.
+fn objects(first: &str, second: &str) -> String {
+    let (Ok(Value::Object(mut base)), Ok(Value::Object(over))) = (
+        serde_json::from_str::<Value>(first),
+        serde_json::from_str::<Value>(second),
+    ) else {
+        return second.to_string();
+    };
+    base.extend(over);
+    Value::Object(base).to_string()
+}
 
 /// Every name in either list. A longer deny list denies more.
 fn union(first: &str, second: &str) -> String {
@@ -272,21 +297,29 @@ fn union(first: &str, second: &str) -> String {
 /// Only the names in both lists, so neither file can add to what the other
 /// permitted.
 ///
-/// An empty list on either side would read as "every tool" downstream, so it
-/// cannot be the answer here: a list that ends up with nothing in common keeps one
-/// name that neither side permitted, which the tool registry then reports as
-/// unknown and the run refuses over. Saying no tools at all is what `read_only`
-/// and a deny list are for.
-fn intersection(first: &str, second: &str) -> String {
-    let mut names: Vec<&str> = names(first)
+/// # Errors
+///
+/// When the two have no name in common, which is a conflict between two files
+/// rather than a value either of them got wrong. It cannot be answered with an
+/// empty list, because an empty list reads as "every tool" by the time it reaches
+/// the policy - the run would end up with every tool precisely because two files
+/// agreed on none. Reported here, where both lists are in hand and the reason can
+/// be said, rather than through a placeholder name the tool registry would then
+/// call a typo.
+fn intersection(first: &str, second: &str) -> Result<String, String> {
+    let mut both: Vec<&str> = names(first)
         .filter(|name| names(second).any(|other| other.eq_ignore_ascii_case(name)))
         .collect();
-    names.sort_unstable();
-    names.dedup();
-    if names.is_empty() {
-        return "none-of-the-above".to_string();
+    both.sort_unstable();
+    both.dedup();
+    if both.is_empty() {
+        return Err(format!(
+            "allowed_tools names no tool the allow list already read permits \
+             ({first}), so the two together permit nothing - name a tool both \
+             carry, or take tools away with disallowed_tools or read_only"
+        ));
     }
-    names.join(",")
+    Ok(both.join(","))
 }
 
 /// On when either file asks for it, since the posture only ever tightens.

@@ -3,6 +3,17 @@
 All notable changes to `afi`. Generated from the commit history; maintained by
 release-plz from the conventional-commit messages on `main`.
 
+## [0.6.0] - 2026-08-07
+
+### Added
+
+- **release** Build targets before publishing ([#65](https://github.com/smykla-skalski/afi/pull/65))
+- **prompt** Let a run supply its own prompt ([#67](https://github.com/smykla-skalski/afi/pull/67))
+
+### Fixed
+
+- **model** Keep credentials out of reported error bodies ([#66](https://github.com/smykla-skalski/afi/pull/66))
+
 ## [0.5.0] - 2026-08-07
 
 ### Added

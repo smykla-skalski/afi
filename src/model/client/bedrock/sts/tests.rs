@@ -266,8 +266,13 @@ fn a_refused_assumption_is_an_auth_failure() {
 /// STS answers a throttled call with a 400 rather than a 429, so the status
 /// alone would file it as a credential to go fix. The code is what says
 /// otherwise, and a run shed under load has to read as one worth repeating.
+///
+/// Every status is walked, not just the one AWS documents. `kind()` reads the
+/// status again downstream and calls a 401 or a 403 an auth failure whatever the
+/// body said, so a classification that only survived a 400 would be undone by
+/// the next status STS decided to use.
 #[test]
-fn a_throttled_assumption_stays_retryable_despite_its_status() {
+fn a_throttled_assumption_stays_retryable_whatever_status_it_arrives_on() {
     for code in [
         "Throttling",
         "ThrottlingException",
@@ -275,21 +280,37 @@ fn a_throttled_assumption_stays_retryable_despite_its_status() {
         // Not the token and not the policy - AWS could not reach GitHub.
         "IDPCommunicationError",
     ] {
-        let failure = refused(
+        for status in [
             StatusCode::BAD_REQUEST,
-            &error(code, "Rate exceeded"),
-            ASSERTION,
-        );
-        assert!(
-            !matches!(failure, ClientError::Auth(_)),
-            "{code} is not a credential to fix: {failure:?}"
-        );
-        assert_eq!(failure.kind(), ErrorKind::ProviderHttp, "{code}");
-        assert!(
-            failure.to_string().contains("Rate exceeded"),
-            "AWS's own words must survive: {failure}"
-        );
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+        ] {
+            stays_retryable(code, status);
+        }
     }
+}
+
+/// One transient refusal, checked the same way whatever status carried it.
+fn stays_retryable(code: &str, status: StatusCode) {
+    let failure = refused(status, &error(code, "Rate exceeded"), ASSERTION);
+    assert!(
+        !matches!(failure, ClientError::Auth(_)),
+        "{code} on {status} is not a credential to fix: {failure:?}"
+    );
+    assert_eq!(
+        failure.kind(),
+        ErrorKind::ProviderHttp,
+        "{code} on {status}"
+    );
+    let text = failure.to_string();
+    assert!(
+        text.contains("Rate exceeded"),
+        "AWS's own words must survive: {text}"
+    );
+    assert!(
+        text.contains(&format!("STS answered HTTP {}", status.as_u16())),
+        "the status AWS used is not hidden: {text}"
+    );
 }
 
 /// The redaction runs on this path too. A throttled call is refused after the

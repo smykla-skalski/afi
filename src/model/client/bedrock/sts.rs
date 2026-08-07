@@ -144,14 +144,26 @@ async fn assume_role(
 /// throttling as a 429. The Query protocol predates that convention and answers
 /// a throttled call with a 400 carrying the code, so [`transient`] gets first
 /// refusal on the body.
+///
+/// A transient one is then reported as the 429 it would have been on a modern
+/// API rather than as the status AWS used, because the status is read again
+/// downstream: [`ClientError::kind`] files a 401 or a 403 as an auth failure
+/// whatever the body said, which would undo this branch for any transient code
+/// that ever arrived on one. Translating the status here is what makes the
+/// classification stick. Nothing is hidden - what AWS answered with leads the
+/// body, ahead of the preview window every reader cuts at.
 fn refused(status: StatusCode, body: &str, assertion: &str) -> ClientError {
     let redact = Redactor::default().with(assertion, Credential::IdentityToken);
     let code = element(body, "Code").unwrap_or_default();
     let what = describe(code);
     if transient(code) {
         return ClientError::Http {
-            status: status.as_u16(),
-            body: format!("{what}: {}", redact.clean(body)),
+            status: StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            body: format!(
+                "{what} (STS answered HTTP {}): {}",
+                status.as_u16(),
+                redact.clean(body)
+            ),
         };
     }
     refused_credential(&what, status, body, &redact)

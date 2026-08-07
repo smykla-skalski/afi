@@ -280,3 +280,36 @@ fn an_explained_rejection_gets_no_hint() {
         );
     }
 }
+
+/// The reference documents these strings verbatim, and the last time they moved
+/// the docs were left behind. Asserted here so a message edit fails a test
+/// rather than shipping a manual that describes the previous release.
+///
+/// Whitespace is collapsed on both sides, because the reference wraps the
+/// example across lines inside its code block.
+#[test]
+fn the_reference_quotes_the_messages_this_module_produces() {
+    fn flat(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    let doc = flat(include_str!("../../../../../docs/reference.md"));
+
+    let hint = flat(&validation("This model does not support tool use.").to_string());
+    let hint = hint.strip_prefix("HTTP 400: ").unwrap_or(&hint);
+    assert!(
+        doc.contains(hint),
+        "the documented hint example is not the one produced: {hint}"
+    );
+
+    let expired = flat(&reject(403, "ExpiredTokenException", "").to_string());
+    let expired = expired.strip_prefix("HTTP 403: ").unwrap_or(&expired);
+    assert!(
+        doc.contains(expired),
+        "the documented credential row is not the message produced: {expired}"
+    );
+
+    assert!(
+        !doc.contains("or any other 403"),
+        "a headerless 403 is no longer an entitlement verdict, but the table still says so"
+    );
+}

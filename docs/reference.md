@@ -328,7 +328,7 @@ The policy count also covers calls thrown away before dispatch could rule on the
 
 **These are attempts, not distinct intentions.** Every blocked call in a discarded batch counts, including one whose own arguments parsed, and a retried batch counts again - so a persistently truncated stream carrying two blocked calls reports six with the default two recoveries, for what a human would call one thing the model wanted. Read the count as "how many times was this run told no", and alert on whether it is zero rather than on how large it is. `AFI_MALFORMED_STREAM_RETRIES` bounds the multiplier.
 
-`auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, `federated` for one afi minted itself, `sigv4` for an AWS signature ([details](#bedrock)), and `none` for a source with no credential configured, which is the local llama.cpp case. `federated` and `sigv4` each carry the non-secret identifiers their credential has — the federation ids for one, `region` and `access_key_id` for the other. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
+`auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, `federated` for one afi minted itself, `sigv4` for an AWS signature ([details](#bedrock)), and `none` for a source with no credential configured, which is the local llama.cpp case. `federated` and `sigv4` each carry the non-secret identifiers their credential has: the federation ids for one, `region` and `access_key_id` for the other. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
 
 It names the credential the tokens were **billed** to, not the one that happens to be active when the run ends. Those differ in a piped session that `/source`-switches after spending: `source` and `model` report where the session finished, while `auth` stays with whoever paid. A session that spent on two sources gets `"auth": null`, since no single credential paid for it - as does a run with no source at all. A run that billed nothing reports the credential it tried, which is what a failed run has to show.
 
@@ -541,19 +541,20 @@ Only the source the run starts on is checked. A stray `AWS_ACCESS_KEY_ID` in the
 
 ```
 HTTP 400: This model does not support tool use. (if zai.glm-5 cannot call
-tools, an agent turn has nothing to dispatch without them - try a model
-that can)
+tools, an agent turn has nothing to dispatch)
 ```
 
-afi does not claim to know which happened. Bedrock answers a tool-incapable model and a malformed tool schema with the same `ValidationException`, the same status, and the same header, so the only difference is prose — and reading that prose is a trap: afi's own system prompt contains the sentence "does NOT support native tool calls", and any AWS error that quotes the request back carries it. So the hint rides along on an ordinary malformed-request 400 too. AWS's own sentence always leads, and nothing is lost by not guessing: a wrong tool schema and a model that cannot call tools are equally terminal here.
+afi does not claim to know which happened. Bedrock answers a tool-incapable model and a malformed tool schema with the same `ValidationException`, the same status, and the same header, so the only difference is prose, and reading that prose is a trap: afi's own system prompt contains the sentence "does NOT support native tool calls", and any AWS error that quotes the request back carries it. So the hint rides along on an ordinary malformed-request 400 too. AWS's own sentence always leads, and nothing is lost by not guessing: a wrong tool schema and a model that cannot call tools are equally terminal here.
 
 **AWS rejections are told apart.** Every one ends the run with a non-zero exit, and the message AWS wrote is always quoted:
 
 | what happened                                                   | how it reads                                        |
 | ----------------------------------------------------------------- | ----------------------------------------------------- |
-| `ExpiredTokenException`, `InvalidSignatureException`, and kin  | `AWS rejected the credentials (expired or wrong)`   |
+| `ExpiredTokenException`, `InvalidSignatureException`, and kin  | `AWS rejected the credentials (expired or wrong; afi reads them at startup, so a refresh needs a restart)` |
 | `ThrottlingException`, or any 429                              | `AWS throttled the request`                         |
-| `AccessDeniedException`, or any other 403                      | `the account is not entitled to <model> in this Region` |
+| `AccessDeniedException`                                        | `the account is not entitled to <model> in this Region` |
+
+The kind is read from `x-amzn-errortype` and the status, never from the body, because AWS echoes the request into a validation message and a turn whose prompt discussed throttling would otherwise classify itself. A 429 needs no header, meaning the same thing whoever sent it. Anything else arriving without one did not come from Bedrock's API layer - a proxy or a VPC endpoint refusing on the way - so it stays unclassified and its body is reported as it came, rather than a headerless 403 being called an entitlement problem.
 
 **Anthropic models on Bedrock are out of scope.** afi reaches those directly through the [Anthropic](#anthropic) protocol, which gets prompt caching and thinking blocks that this path does not. Cross-region inference profiles and provisioned throughput are not handled either; point `AFI_BEDROCK_BASE_URL` somewhere else if you need them.
 

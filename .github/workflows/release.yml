@@ -328,19 +328,42 @@ jobs:
           private-key: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
           permission-contents: write
 
-      # The bump commit the plan job made, which is exactly what the build jobs
-      # compiled. release-plz tags whatever is checked out, so this is the commit
-      # the tag will point at.
+      # The branch, not the commit. release-plz asks git for the current branch's
+      # upstream before it does anything, and a checkout by sha leaves a detached
+      # HEAD, so it stops with "cannot determine current branch" -- measured, on
+      # the first real run of this pipeline.
       #
       # Credentials stay on this checkout on purpose: release-plz pushes the tag
       # over git, so removing them would break the one job that needs them. This
       # is the only job in the workflow that keeps them.
-      - name: Check out the bump commit
+      - name: Check out the default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
-          ref: ${{ needs.plan.outputs.sha }}
+          ref: main
           fetch-depth: 0
           token: ${{ steps.token.outputs.token }}
+
+      # release-plz tags whatever is checked out, and what has to be tagged is
+      # the commit the build compiled. Moving the local branch rather than
+      # detaching keeps HEAD attached, which is the part release-plz needs.
+      #
+      # Normally a no-op: `sha` is main's tip, because plan committed the bump
+      # there and nothing else landed in between. When something did land, this
+      # tags what was actually built and leaves the newer commits for the next
+      # release, rather than tagging code no build ever saw.
+      - name: Point the branch at the commit that was built
+        env:
+          BUILT: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [[ "${head}" == "${BUILT}" ]]; then
+            echo "main is at ${BUILT}, the commit the build used."
+            exit 0
+          fi
+          echo "::warning::main has moved to ${head} since the build; tagging ${BUILT}, which is what was compiled."
+          git reset --hard "${BUILT}" --quiet
+          git --no-pager log --oneline -1
 
       - name: Install mise
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4

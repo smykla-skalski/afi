@@ -7,11 +7,14 @@
 
 [graph]
 # Scoped to the triples afi actually publishes, not to every target Cargo knows
-# about. That is the honest question -- the policy should describe what ships --
-# and it is also what keeps `r-efi` out of the answer. r-efi is LGPL-2.1-or-later
-# and reachable only through getrandom's UEFI backend, so an unscoped check
-# reports a copyleft dependency that is never compiled, never linked, and never
-# distributed. Add a triple here when the release matrix gains one.
+# about, because the policy should describe what ships. An unscoped check also
+# drags in target-conditional crates that are never compiled, never linked, and
+# never distributed -- getrandom's UEFI backend and the Windows API bindings
+# among them.
+#
+# This list has to match scripts/release-targets.sh, and `mise run check:dist`
+# asserts that it does. Drift here would be silent and would weaken the gate: a
+# target in the matrix but not here has its dependencies checked by nothing.
 targets = [
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
@@ -19,13 +22,14 @@ targets = [
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
 ]
-# Build and proc-macro dependencies are compiled on the release runner even when
-# nothing of them reaches the binary, so they stay in scope for advisories.
+# Check the graph with every Cargo feature enabled, so a dependency that only
+# appears behind an optional feature is still covered.
 all-features = true
 
 [advisories]
-# RustSec, refreshed on every run. `version = 2` makes unmaintained, unsound, and
-# notice advisories errors by default rather than warnings.
+# RustSec, refreshed on every run. `version = 2` is the current schema, and is
+# stated rather than defaulted so a cargo-deny upgrade cannot change the meaning
+# of this file without the change being visible here.
 version = 2
 # A yanked dependency is a release hazard on its own: the version resolves today
 # from the local cache and stops resolving for anyone building fresh.
@@ -34,18 +38,19 @@ ignore = []
 
 [licenses]
 version = 2
-# Permissive licenses only, plus the two special cases noted below. Anything not
+# Permissive licenses only, plus the one special case noted below. Anything not
 # on this list fails the gate rather than being waved through, so a new
 # dependency that changes afi's own distribution terms has to be looked at.
+#
+# Only licenses actually present in the shipped graph are listed. An allowance
+# for something absent is reported as unmatched on every run, and a gate that
+# always prints warnings is a gate people stop reading.
 allow = [
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
-  "BSD-2-Clause",
   "BSD-3-Clause",
   "BSL-1.0",
   "CC0-1.0",
-  # webpki-root-certs. Mozilla's CA bundle, redistributable as data.
-  "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
   "MIT-0",

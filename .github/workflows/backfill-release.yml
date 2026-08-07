@@ -95,96 +95,17 @@ jobs:
           echo "Backfilling ${TAG} (${version})."
 
   build:
-    name: ${{ matrix.target }}
+    name: Build
     needs: plan
-    runs-on: ${{ matrix.os == 'macos' && fromJSON(vars.MACOS_RUNNER_LABEL || '["macos-15"]') || fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    steps:
-      - name: Check out the tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.tag }}
-          persist-credentials: false
-
-      - name: Check out the current tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: .release-tooling
-          persist-credentials: false
-
-      - name: Build
-        id: build
-        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
-        with:
-          bin: afi
-          target: ${{ matrix.target }}
-          build-tool: ${{ matrix.build_tool }}
-          locked: true
-          checksum: sha256
-          tar: unix
-          zip: none
-          include: README.md,LICENSE,CHANGELOG.md
-          dry-run: true
-          dry-run-intended: true
-
-      - name: Install mise
-        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
-
-      - name: Set up QEMU
-        if: matrix.os == 'linux'
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-
-      # Invoked directly rather than through the mise task, because the task
-      # belongs to the default branch's lane and this checkout is the tag's.
-      # smoke-archive.sh takes everything it needs as arguments, so it runs
-      # correctly from anywhere.
-      - name: Smoke-test the archive
-        env:
-          ARCHIVE: ${{ steps.build.outputs.tar }}
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: ./.release-tooling/scripts/smoke-archive.sh "${ARCHIVE}" "${TARGET}" "${VERSION}"
-
-      # The tag's own packaging, not the default branch's: this has to produce
-      # the package that version would have produced.
-      - name: Build the Debian package
-        if: matrix.deb
-        id: deb
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          path="$(mise run deb "${TARGET}" | tail -1)"
-          test -f "${path}"
-          echo "path=${path}" >>"${GITHUB_OUTPUT}"
-
-      - name: Verify the Debian package installs
-        if: matrix.deb
-        env:
-          DEB: ${{ steps.deb.outputs.path }}
-        run: mise run deb:verify "${DEB}"
-
-      - name: Stage the artifacts
-        env:
-          TAR: ${{ steps.build.outputs.tar }}
-          SHA256: ${{ steps.build.outputs.sha256 }}
-          DEB: ${{ steps.deb.outputs.path }}
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          mv "${TAR}" "${SHA256}" dist/
-          [[ -z "${DEB}" ]] || mv "${DEB}" dist/
-          ls -l dist
-
-      - name: Upload the built artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dist-${{ matrix.target }}
-          path: dist
-          if-no-files-found: error
-          retention-days: 7
+    # The same build release.yml uses. That shared workflow takes its sources
+    # from `ref` and its tooling from the default branch, which is exactly what
+    # a backfill needs: a tag old enough to be missing a release is old enough
+    # to predate the target list and the smoke test.
+    uses: ./.github/workflows/build-targets.yml
+    with:
+      ref: ${{ inputs.tag }}
+      version: ${{ needs.plan.outputs.version }}
+      matrix: ${{ needs.plan.outputs.matrix }}
 
   publish:
     name: Publish
@@ -214,25 +135,6 @@ jobs:
           pattern: dist-*
           merge-multiple: true
           path: dist
-
-      # The same question release.yml's verify job asks, minus the apt half:
-      # is everything the target list promises actually here. Asked before the
-      # upload, because an incomplete backfill should not become a release.
-      - name: Check the artifacts are complete
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          missing=0
-          while read -r want; do
-            if [[ -f "dist/${want}" ]]; then
-              echo "  ok       ${want}"
-            else
-              echo "::error::the build produced no ${want}"
-              missing=$((missing + 1))
-            fi
-          done < <(./.release-tooling/scripts/release-targets.sh --assets "$(./scripts/deb-version.sh)")
-          (( missing == 0 )) || exit 1
 
       - name: Attest the release artifacts
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -301,5 +203,22 @@ jobs:
 
           gh release upload "${TAG}" dist/* --repo "${REPO}" --clobber
 
+      # The same gate release.yml runs, in its --no-apt form. Asked of the draft
+      # after the upload rather than of the staging directory before it, so it
+      # answers "the release carries this" and not merely "the build produced
+      # it". A backfill publishes nothing to apt, so that half is skipped.
+      - name: Check the draft is complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: ./.release-tooling/scripts/reconcile-release.sh --no-apt "${TAG}" "$(./scripts/deb-version.sh)"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
           gh release edit "${TAG}" --repo "${REPO}" --draft=false --latest=false
           echo "Published https://github.com/${REPO}/releases/tag/${TAG}"

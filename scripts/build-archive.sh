@@ -35,9 +35,9 @@ staging=$(mktemp -d "${TMPDIR:-/tmp}/afi-dist.XXXXXX")
 trap 'rm -rf "$staging"' EXIT HUP INT TERM
 
 cp "$binary" "$staging/afi"
-# Stripped to match the release archives. A cross build has no target-specific
-# binutils on PATH, so this uses the toolchain's own strip via rustc rather than
-# a bare `strip`, and tolerates a target that cannot be stripped here.
+# Stripped to match the release archives, and tolerant of failure: the host
+# `strip` cannot read an object file for a foreign target, and this script is
+# meant to work for any triple the host can build.
 strip "$staging/afi" 2>/dev/null || true
 
 for doc in README.md LICENSE CHANGELOG.md; do

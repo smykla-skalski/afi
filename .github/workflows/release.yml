@@ -12,19 +12,29 @@ name: release
 # backwards. It tagged and published a release first and built the binaries
 # afterwards, so a release was live and empty for as long as the builds took, and
 # a build that failed left the empty release behind. Measured on v0.4.0: the
-# release was published at 20:37:48Z carrying one of five platforms, and the last
-# asset landed at 04:15:57Z the following morning. v0.3.0 came out of the same
-# hole with a tag and no release at all. So:
+# release was published at 20:37:48Z carrying one of the three platforms it
+# shipped, and the last asset landed at 04:15:57Z the following morning. v0.3.0
+# came out of the same hole with a tag and no release at all. So:
 #
-#   plan     work out the version. Touch nothing outside the runner.
-#   build    compile, smoke-test, and package every target. Still nothing public.
-#   release  commit the bump, tag, open a *draft* release, attach and attest.
+#   plan     work out the version and commit the bump. No tag, no release.
+#   build    compile, smoke-test, and package every target. Nothing public.
+#   release  tag, open a *draft* release, attach and attest, publish the crate.
 #   apt      push the Debian packages.
 #   verify   assert the release and the apt repository agree.
 #   publish  flip the draft. This is the first moment a user can see anything.
 #
-# A failure anywhere before `publish` leaves a draft, which is invisible to
-# everyone without push access, and a tag. Re-running the workflow resumes.
+# The bump is committed in `plan`, before the build, and that is deliberate even
+# though it is the one thing here that writes outside the runner early. The
+# alternative was to build from an overlay of the bumped files on top of the
+# previous commit, which leaves the working tree modified, and build.rs stamps a
+# modified tree as "(dirty)". Every released binary would have reported itself
+# dirty and named a commit that is not the one the tag points at. A version bump
+# sitting on main is cheap by comparison, and plan-release.sh already treats "a
+# manifest version with no tag" as its resume case.
+#
+# A failure anywhere before `publish` therefore leaves a bump commit on main, and
+# from `release` onwards a tag and a draft. None of it is visible to anyone
+# without push access. Re-running the workflow resumes.
 #
 # Daily rather than on every push to main: a release rebuilds five targets,
 # packages two of them, and pushes to the apt repository, which is a lot of
@@ -43,6 +53,9 @@ name: release
 # The target list lives in scripts/release-targets.sh, not here. The build matrix
 # and the reconciliation gate both read it, so "what a release contains" has one
 # definition instead of one in YAML and none anywhere else.
+#
+# The build itself lives in build-targets.yml, shared with backfill-release.yml,
+# so a change to how a target is compiled, run, or packaged lands once.
 #
 # apt publishing setup, needed once before the first release that publishes:
 #
@@ -93,20 +106,32 @@ jobs:
   plan:
     name: Plan
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
+    permissions:
+      contents: read
     outputs:
       released: ${{ steps.plan.outputs.released }}
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
-      sha: ${{ steps.plan.outputs.sha }}
+      sha: ${{ steps.commit.outputs.sha || steps.plan.outputs.sha }}
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
+      # Scoped to contents. Without a `permission-` input the token would carry
+      # every permission the installation holds, which for a release is issues,
+      # pull requests, and workflows it has no use for.
+      - name: Mint an app token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SMYKLOT_CLIENT_ID || 'Iv23liMyF31aNYay8IXy' }}
+          private-key: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       # Full history and tags: release-plz compares against the last tag to work
       # out what changed, so a shallow clone would make every release look like
       # the first one.
       #
-      # No app token and no persisted credentials. This job writes nothing
-      # anywhere, and the identity that can push to main is not needed until the
-      # release job, three jobs later.
+      # The bump is committed through the API rather than pushed, so this
+      # checkout keeps no credentials.
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -201,9 +226,8 @@ jobs:
             echo "released=true"
             echo "version=${version}"
             echo "tag=v${version}"
-            # The commit every later job builds from. Pinning it means a merge
-            # that lands mid-release cannot make the build and the tag disagree
-            # about what was compiled.
+            # Only used by a dry run, which does not commit. Every other path
+            # overrides this with the bump commit made below.
             echo "sha=$(git rev-parse HEAD)"
           } >>"${GITHUB_OUTPUT}"
           echo "Releasing ${version} from $(git rev-parse --short HEAD)."
@@ -212,12 +236,40 @@ jobs:
         if: steps.plan.outputs.released == 'true'
         run: git --no-pager diff --stat
 
-      # The bumped manifest, lockfile, and changelog, handed to the build jobs so
-      # they compile the version being released rather than the one on main. The
-      # release job applies the same three files to make the commit, so what was
-      # built and what gets tagged are the same tree.
+      # Through the API rather than git, because the ruleset requires signed
+      # commits and a runner has no key to sign with. GitHub signs commits it
+      # creates, so the rule is satisfied outright instead of relying on the app
+      # being exempt from it. The app's bypass then covers only the missing pull
+      # request, which is the one rule it has to.
+      #
+      # `expectedHeadOid` is this checkout's HEAD, so the mutation is rejected if
+      # main moved while the gate was running. That is what stops a release from
+      # silently building one tree and tagging another.
+      - name: Commit the version bump
+        id: commit
+        if: steps.plan.outputs.released == 'true' && !inputs.dry_run
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          AFI_RELEASE_TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Nothing to commit means a previous run already landed this bump and
+          # died before tagging. HEAD is that commit, which is what to build.
+          if git diff --quiet -- Cargo.toml Cargo.lock CHANGELOG.md; then
+            oid="$(git rev-parse HEAD)"
+            echo "The bump for ${AFI_RELEASE_TAG} is already on main at ${oid}."
+          else
+            oid="$(./scripts/commit-release.sh Cargo.toml Cargo.lock CHANGELOG.md)"
+            echo "Committed ${oid} to main."
+          fi
+          echo "sha=${oid}" >>"${GITHUB_OUTPUT}"
+
+      # A dry run has no commit to build, so the build jobs get the bumped files
+      # as an artifact and lay them over the previous commit instead. That leaves
+      # the tree modified and the binaries stamped "(dirty)", which is why it is
+      # the dry-run path and not the release one.
       - name: Upload the version bump
-        if: steps.plan.outputs.released == 'true'
+        if: steps.plan.outputs.released == 'true' && inputs.dry_run
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-bump
@@ -229,113 +281,20 @@ jobs:
           retention-days: 7
 
   build:
-    name: ${{ matrix.target }}
+    name: Build
     needs: plan
     if: needs.plan.outputs.released == 'true'
-    runs-on: ${{ matrix.os == 'macos' && fromJSON(vars.MACOS_RUNNER_LABEL || '["macos-15"]') || fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
-    strategy:
-      # Every leg runs even when one fails, so a single broken target reports
-      # once with the full picture instead of hiding the state of the other four.
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    steps:
-      - name: Check out the planned commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.plan.outputs.sha }}
-          persist-credentials: false
-
-      - name: Apply the version bump
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-bump
-
-      # Builds and archives, and does not upload: there is no release to upload
-      # to yet, which is the point. dry-run also means no token is handed to this
-      # job at all. `dry-run-intended` suppresses the warning the action prints
-      # when it notices it is not running from a tag ref, which here is expected.
-      - name: Build
-        id: build
-        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
-        with:
-          bin: afi
-          target: ${{ matrix.target }}
-          build-tool: ${{ matrix.build_tool }}
-          locked: true
-          checksum: sha256
-          tar: unix
-          zip: none
-          include: README.md,LICENSE,CHANGELOG.md
-          dry-run: true
-          dry-run-intended: true
-
-      - name: Install mise
-        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
-
-      # Lets the x86_64 runner execute the arm64 Linux binary, for the smoke test
-      # below and for the package install check further down. macOS needs none of
-      # it: both Apple targets run on the arm64 runner, natively or under Rosetta.
-      - name: Set up QEMU
-        if: matrix.os == 'linux'
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-
-      # Opens the archive that is about to be published and runs the binary in
-      # it, asserting that it reports the version being released and the target
-      # the filename claims. Nothing checked either of those before.
-      - name: Smoke-test the archive
-        env:
-          ARCHIVE: ${{ steps.build.outputs.tar }}
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: mise run smoke "${ARCHIVE}" "${TARGET}" "${VERSION}"
-
-      # Packages the binary the build step already produced, rather than
-      # compiling again, so the .deb and the tarball ship identical bytes.
-      - name: Build the Debian package
-        if: matrix.deb
-        id: deb
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          # build-deb.sh prints the package path and nothing else, but mise may
-          # add a task banner ahead of it, so take the last line.
-          path="$(mise run deb "${TARGET}" | tail -1)"
-          test -f "${path}"
-          echo "path=${path}" >>"${GITHUB_OUTPUT}"
-          echo "Built ${path}"
-
-      - name: Verify the Debian package installs
-        if: matrix.deb
-        env:
-          DEB: ${{ steps.deb.outputs.path }}
-        run: mise run deb:verify "${DEB}"
-
-      # Gathered into one directory first, rather than listed as three paths on
-      # the upload step, because the third is empty for the targets that produce
-      # no .deb. Staging makes the artifact's contents explicit and keeps the
-      # upload from having to reason about a blank path.
-      - name: Stage the artifacts
-        env:
-          TAR: ${{ steps.build.outputs.tar }}
-          SHA256: ${{ steps.build.outputs.sha256 }}
-          DEB: ${{ steps.deb.outputs.path }}
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          mv "${TAR}" "${SHA256}" dist/
-          [[ -z "${DEB}" ]] || mv "${DEB}" dist/
-          ls -l dist
-
-      # One artifact per target, collected by the release job. Everything a
-      # release publishes exists here before anything public has been created.
-      - name: Upload the built artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dist-${{ matrix.target }}
-          path: dist
-          if-no-files-found: error
-          retention-days: 7
+    # Shared with backfill-release.yml. The matrix, the smoke test, the packaging
+    # and the artifact layout all live there, so a change to any of them lands
+    # once rather than in two places that have to be kept identical by hand.
+    uses: ./.github/workflows/build-targets.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      matrix: ${{ needs.plan.outputs.matrix }}
+      # Only a dry run needs the overlay: it skips the bump commit, so the tree
+      # at `sha` still carries the previous version.
+      bump-artifact: ${{ inputs.dry_run && 'release-bump' || '' }}
 
   release:
     name: Tag and draft
@@ -350,9 +309,8 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      # The bump lands on main without a pull request, which the branch ruleset
-      # otherwise forbids. This app is a bypass actor on that ruleset, so it is
-      # the identity that can do it. GITHUB_TOKEN cannot.
+      # release-plz pushes the tag, which the branch ruleset would otherwise
+      # forbid. This app is a bypass actor on that ruleset. GITHUB_TOKEN is not.
       #
       # Scoped to contents. Without a `permission-` input the token would carry
       # every permission the installation holds, which for a release is issues,
@@ -365,48 +323,22 @@ jobs:
           private-key: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
           permission-contents: write
 
+      # The bump commit the plan job made, which is exactly what the build jobs
+      # compiled. release-plz tags whatever is checked out, so this is the commit
+      # the tag will point at.
+      #
       # Credentials stay on this checkout on purpose: release-plz pushes the tag
       # over git, so removing them would break the one job that needs them. This
       # is the only job in the workflow that keeps them.
-      - name: Check out the planned commit
+      - name: Check out the bump commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
           ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0
           token: ${{ steps.token.outputs.token }}
 
-      - name: Apply the version bump
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-bump
-
       - name: Install mise
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
-
-      # Through the API rather than git, because the ruleset requires signed
-      # commits and a runner has no key to sign with. GitHub signs commits it
-      # creates, so the rule is satisfied outright instead of relying on the app
-      # being exempt from it. The app's bypass then covers only the missing pull
-      # request, which is the one rule it has to.
-      - name: Commit the version bump
-        env:
-          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
-          AFI_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          # Nothing to commit means a previous run already landed this bump and
-          # died before tagging. HEAD is that commit, which is what to tag.
-          if git diff --quiet -- Cargo.toml Cargo.lock CHANGELOG.md; then
-            echo "The bump for ${AFI_RELEASE_TAG} is already on main at $(git rev-parse HEAD)."
-            exit 0
-          fi
-          oid="$(./scripts/commit-release.sh Cargo.toml Cargo.lock CHANGELOG.md)"
-          echo "Committed ${oid} to main."
-          # release-plz tags whatever is checked out, so move to the commit the
-          # API just made. Without this the tag would point at the parent and the
-          # released tarballs and packages would carry the previous version.
-          git fetch origin main --quiet
-          git reset --hard "${oid}" --quiet
 
       # release-plz creates the tag and the GitHub release, and fills the release
       # body with this version's changelog section. `git_release_draft` in
@@ -460,7 +392,9 @@ jobs:
 
   apt:
     name: Publish to apt
-    needs: [plan, release]
+    # `plan` arrives transitively through `release`; naming it here too would
+    # suggest this job reads a plan output, which it does not.
+    needs: release
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     permissions:
       contents: read
@@ -468,10 +402,13 @@ jobs:
       # long-lived API key has to live in the repository secrets.
       id-token: write
     steps:
+      # The narrow `deb-*` artifacts, not `dist-*`: this job wants two packages
+      # and the wider pattern would pull five tarballs and five checksums to
+      # find them.
       - name: Collect the Debian packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: dist-*
+          pattern: deb-*
           merge-multiple: true
           path: dist
 
@@ -514,7 +451,7 @@ jobs:
 
   verify:
     name: Verify
-    needs: [plan, release, apt]
+    needs: [plan, apt]
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     permissions:
       # write rather than read because the release under inspection is still a
@@ -539,7 +476,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [plan, release, verify]
+    needs: [plan, verify]
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     permissions:
       contents: write
@@ -555,13 +492,14 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
+          # Only `--latest` is decided here. Whether the release is a
+          # prerelease was already settled by `git_release_type = "auto"` in
+          # release-plz.toml, which reads the same version; re-deriving it would
+          # put the same predicate in two places.
+          #
+          # A SemVer prerelease is deliberately not marked latest, so
+          # `releases/latest` keeps pointing at the last stable version.
           args=(--draft=false)
-          case "${VERSION}" in
-            # A SemVer prerelease. Marked as one, and deliberately not marked
-            # latest: `releases/latest` and a bare `apt-get install afi` should
-            # keep pointing at the last stable version.
-            *-*) args+=(--prerelease) ;;
-            *)   args+=(--latest --prerelease=false) ;;
-          esac
+          [[ "${VERSION}" == *-* ]] || args+=(--latest)
           gh release edit "${TAG}" "${args[@]}" --repo "${REPO}"
           echo "Published https://github.com/${REPO}/releases/tag/${TAG}"

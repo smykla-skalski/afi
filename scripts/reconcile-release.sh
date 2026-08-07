@@ -16,10 +16,14 @@ set -eu
 # Inputs from the environment:
 #
 #   GH_TOKEN              a token that can read the draft release
-#   CLOUDSMITH_WORKSPACE  the apt workspace
-#   CLOUDSMITH_REPOSITORY the apt repository
+#   CLOUDSMITH_WORKSPACE  the apt workspace (not needed with --no-apt)
+#   CLOUDSMITH_REPOSITORY the apt repository (not needed with --no-apt)
 #
-# Arguments: <tag> <deb-version>
+# Arguments: [--no-apt] <tag> <deb-version>
+#
+# --no-apt checks the release alone. A backfill uses it: it deliberately does not
+# publish to apt, because the version it restores is older than what apt already
+# serves, so asking whether apt has it would always fail.
 #
 # The apt side is read through Cloudsmith's public API rather than the CLI. The
 # repository is an open-source one and its package list is world-readable, so
@@ -27,8 +31,14 @@ set -eu
 # no privileges at all. The push job immediately before it is what proves the
 # publishing credential still works.
 
+check_apt=true
+if [ "${1:-}" = --no-apt ]; then
+    check_apt=false
+    shift
+fi
+
 if [ $# -ne 2 ]; then
-    printf 'usage: %s <tag> <deb-version>\n' "$0" >&2
+    printf 'usage: %s [--no-apt] <tag> <deb-version>\n' "$0" >&2
     exit 2
 fi
 
@@ -36,8 +46,10 @@ tag=$1
 deb_version=$2
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-: "${CLOUDSMITH_WORKSPACE:?CLOUDSMITH_WORKSPACE is required}"
-: "${CLOUDSMITH_REPOSITORY:?CLOUDSMITH_REPOSITORY is required}"
+if [ "$check_apt" = true ]; then
+    : "${CLOUDSMITH_WORKSPACE:?CLOUDSMITH_WORKSPACE is required}"
+    : "${CLOUDSMITH_REPOSITORY:?CLOUDSMITH_REPOSITORY is required}"
+fi
 
 failures=0
 fail() {
@@ -47,8 +59,8 @@ fail() {
 
 # --- the GitHub release ---------------------------------------------------
 
-# The draft is not reachable by tag through the releases API, so find it by
-# listing. `gh release view` handles drafts for a user who can see them.
+# `gh release view` resolves a draft by tag for anyone who can see it, which is
+# anyone with push access. The plain releases API would not.
 attached=$(gh release view "$tag" --json assets --jq '.assets[].name' | sort)
 
 printf 'release %s carries:\n' "$tag"
@@ -74,6 +86,7 @@ done
 
 # --- the apt repository ---------------------------------------------------
 
+if [ "$check_apt" = true ]; then
 printf '\nchecking the apt repository for %s:\n' "$deb_version"
 # The version can contain a tilde for a prerelease, which is legal in a query
 # string but has to survive the shell and the URL intact.
@@ -92,10 +105,15 @@ for arch in $("$repo_root/scripts/release-targets.sh" --deb-arches); do
         fail "the apt repository has no afi $deb_version for $arch"
     fi
 done
+fi
 
 if [ "$failures" -ne 0 ]; then
     printf '\n%s check(s) failed; the release stays a draft\n' "$failures" >&2
     exit 1
 fi
 
-printf '\nthe release and the apt repository agree on %s\n' "$tag"
+if [ "$check_apt" = true ]; then
+    printf '\nthe release and the apt repository agree on %s\n' "$tag"
+else
+    printf '\n%s carries everything the target list promises\n' "$tag"
+fi

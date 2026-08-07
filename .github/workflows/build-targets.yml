@@ -1,0 +1,206 @@
+name: build-targets
+
+# Compile, run, and package every target in the release matrix.
+#
+# Called by release.yml and by backfill-release.yml. It exists because those two
+# needed the same build job and had a copy each: 69 of 76 lines identical, and
+# already drifted in three places by the time anyone counted. A build sequence
+# that lands in one and not the other is worst on the recovery path, which is
+# rarely exercised and is being used precisely when a second failure is most
+# expensive.
+#
+# Two checkouts, and the rule is the same for both callers:
+#
+#   the sources come from `ref`, the commit being released
+#   the tooling comes from this workflow's own ref, the default branch
+#
+# That matters for backfill, where `ref` is a tag old enough to predate the
+# scripts here. It is a no-op for a normal release, where the two are the same
+# tree, and having one rule rather than a per-caller judgement is the point.
+#
+# The tooling checkout lands in a subdirectory, which git reports as untracked,
+# and build.rs asks `git status --untracked-files=no`. So it cannot make the
+# build look dirty.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit or tag to build."
+        required: true
+        type: string
+      version:
+        description: "The version every archive has to report."
+        required: true
+        type: string
+      matrix:
+        description: "The build matrix, as JSON. From scripts/release-targets.sh --matrix."
+        required: true
+        type: string
+      bump-artifact:
+        description: >
+          An artifact holding a version bump to lay over the checkout. Only a dry
+          run needs it: every other caller builds a commit that already carries
+          the version, because overlaying tracked files would leave the working
+          tree modified and make build.rs stamp the binary "(dirty)".
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os == 'macos' && fromJSON(vars.MACOS_RUNNER_LABEL || '["macos-15"]') || fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
+    strategy:
+      # Every leg runs even when one fails, so a single broken target reports
+      # once with the full picture instead of hiding the state of the other four.
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.matrix) }}
+    steps:
+      - name: Check out the sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # No `ref`: in a called workflow the default is the caller's commit, which
+      # is the default branch. That is what makes this the current tooling even
+      # when `inputs.ref` is an old tag.
+      - name: Check out the release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .release-tooling
+          persist-credentials: false
+
+      - name: Apply the version bump
+        if: inputs.bump-artifact != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.bump-artifact }}
+
+      # Keyed on the lockfile and holding dependency artifacts only, so a hit
+      # cannot mask a change to afi's own sources. Without it every leg compiled
+      # all 347 lockfile entries from scratch, on five runners, every release.
+      - name: Cache the cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+
+      # Builds and archives, and does not upload: there is no release to upload
+      # to yet, which is the point. dry-run also means no token is handed to this
+      # job at all. `dry-run-intended` suppresses the warning the action prints
+      # when it notices it is not running from a tag ref, which here is expected.
+      - name: Build
+        id: build
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: afi
+          target: ${{ matrix.target }}
+          build-tool: ${{ matrix.build_tool }}
+          locked: true
+          checksum: sha256
+          tar: unix
+          zip: none
+          include: README.md,LICENSE,CHANGELOG.md
+          dry-run: true
+          dry-run-intended: true
+
+      # Only the arm64 Linux leg needs emulation. Both x86_64 Linux legs run
+      # their own binary natively, and the macOS legs are native or Rosetta.
+      - name: Set up QEMU
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      # Opens the archive that is about to be published and runs the binary in
+      # it, asserting that it reports the version being released and the target
+      # the filename claims. Nothing checked either of those before.
+      #
+      # AFI_SMOKE_REQUIRE=execute forbids the script's inspect-only fallback. On
+      # a laptop that fallback is reasonable; in a release it would mean an
+      # archive shipped having never been run, decided by whether the runner
+      # image happened to have Rosetta.
+      #
+      # Called directly rather than through `mise run smoke`, because the mise
+      # lane belongs to the sources checkout and this script belongs to the
+      # tooling one. It takes everything it needs as arguments.
+      - name: Smoke-test the archive
+        env:
+          AFI_SMOKE_REQUIRE: execute
+          ARCHIVE: ${{ steps.build.outputs.tar }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        run: ./.release-tooling/scripts/smoke-archive.sh "${ARCHIVE}" "${TARGET}" "${VERSION}"
+
+      # Only the packaged targets need the mise lane. Provisioning it everywhere
+      # meant three of five legs installed cargo-deb, release-plz, zizmor, and
+      # actionlint in order to run nothing.
+      - name: Install mise
+        if: matrix.deb
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+
+      # Packages the binary the build step already produced, rather than
+      # compiling again, so the .deb and the tarball ship identical bytes. Run
+      # from the sources checkout on purpose: a backfill has to produce the
+      # package that version would have produced, not today's.
+      - name: Build the Debian package
+        if: matrix.deb
+        id: deb
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # build-deb.sh prints the package path and nothing else, but mise may
+          # add a task banner ahead of it, so take the last line.
+          path="$(mise run deb "${TARGET}" | tail -1)"
+          test -f "${path}"
+          echo "path=${path}" >>"${GITHUB_OUTPUT}"
+          echo "Built ${path}"
+
+      - name: Verify the Debian package installs
+        if: matrix.deb
+        env:
+          DEB: ${{ steps.deb.outputs.path }}
+        run: mise run deb:verify "${DEB}"
+
+      # Gathered into one directory first, rather than listed as three paths on
+      # the upload step, because the third is empty for the targets that produce
+      # no .deb.
+      - name: Stage the artifacts
+        env:
+          TAR: ${{ steps.build.outputs.tar }}
+          SHA256: ${{ steps.build.outputs.sha256 }}
+          DEB: ${{ steps.deb.outputs.path }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          mv "${TAR}" "${SHA256}" dist/
+          [[ -z "${DEB}" ]] || mv "${DEB}" dist/
+          ls -l dist
+
+      # One artifact per target. Artifacts uploaded by a called workflow are
+      # visible to the caller's later jobs in the same run, so the collecting
+      # jobs pick these up with a `dist-*` pattern.
+      #
+      # The .deb legs upload a second, narrower artifact as well, so the apt job
+      # can fetch two packages instead of all five tarballs to find them.
+      - name: Upload the built artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload the Debian package on its own
+        if: matrix.deb
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 7

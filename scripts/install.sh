@@ -38,12 +38,33 @@ need mktemp
 
 if command -v curl >/dev/null 2>&1; then
     fetch() { curl -fsSL "$1" -o "$2"; }
-    fetch_stdout() { curl -fsSL "$1"; }
+    resolve_latest_tag() {
+        curl -fsSLI -o /dev/null -w '%{url_effective}' \
+            "https://github.com/$REPO/releases/latest" \
+            | sed 's#.*/tag/##'
+    }
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -qO "$2" "$1"; }
-    fetch_stdout() { wget -qO- "$1"; }
+    resolve_latest_tag() {
+        # wget prints the redirect chain on stderr; the last Location is the tag.
+        wget -qS --spider --max-redirect=5 \
+            "https://github.com/$REPO/releases/latest" 2>&1 \
+            | sed -n 's#.*[Ll]ocation:.*/tag/##p' \
+            | tail -1 \
+            | tr -d '\r'
+    }
 else
     die "neither curl nor wget is available"
+fi
+
+# Settled before anything is downloaded, so a machine that cannot verify the
+# archive is told so instead of finding out after pulling several megabytes.
+if command -v shasum >/dev/null 2>&1; then
+    verify_checksum() { (cd "$work" && shasum -a 256 -c "$checksum" >/dev/null); }
+elif command -v sha256sum >/dev/null 2>&1; then
+    verify_checksum() { (cd "$work" && sha256sum -c "$checksum" >/dev/null); }
+else
+    die "neither shasum nor sha256sum is available to check the download"
 fi
 
 # --- which build ----------------------------------------------------------
@@ -67,14 +88,14 @@ version=${AFI_VERSION:-}
 if [ -n "$version" ]; then
     tag="v${version#v}"
 else
-    # The redirect target of /releases/latest names the tag, which avoids both an
-    # API call and the rate limit that comes with one. Drafts and prereleases are
-    # not "latest", so this cannot pick up a release that is still being built.
-    tag=$(
-        fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" \
-            | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
-            | head -1
-    )
+    # /releases/latest redirects to /releases/tag/<tag>, so the tag is in the
+    # final URL. Read that rather than calling the API: the API costs one of the
+    # 60 unauthenticated requests an hour that everyone behind a shared address
+    # shares, and an installer people pipe into sh should not spend those.
+    #
+    # Drafts and prereleases are not "latest", so this cannot pick up a release
+    # that is still being built.
+    tag=$(resolve_latest_tag)
     [ -n "$tag" ] || die "could not work out the latest release of $REPO"
 fi
 
@@ -94,14 +115,6 @@ fetch "$base/$archive" "$work/$archive" \
     || die "no $archive in release $tag. See https://github.com/$REPO/releases/tag/$tag"
 fetch "$base/$checksum" "$work/$checksum" \
     || die "no checksum for $archive in release $tag"
-
-if command -v shasum >/dev/null 2>&1; then
-    verify_checksum() { (cd "$work" && shasum -a 256 -c "$checksum" >/dev/null); }
-elif command -v sha256sum >/dev/null 2>&1; then
-    verify_checksum() { (cd "$work" && sha256sum -c "$checksum" >/dev/null); }
-else
-    die "neither shasum nor sha256sum is available to check the download"
-fi
 
 verify_checksum || die "$archive does not match its published checksum"
 log "  checksum ok"

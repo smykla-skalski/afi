@@ -43,7 +43,7 @@ TARGETS
 matrix() {
     printf '['
     first=1
-    while IFS='|' read -r target os build_tool deb arch; do
+    targets | while IFS='|' read -r target os build_tool deb arch; do
         [ -n "$target" ] || continue
         [ "$first" -eq 1 ] || printf ','
         first=0
@@ -51,9 +51,7 @@ matrix() {
             "$target" "$os" "$build_tool" "$deb"
         [ -z "$arch" ] || printf ',"arch":"%s"' "$arch"
         printf '}'
-    done <<EOF
-$(targets)
-EOF
+    done
     printf ']\n'
 }
 
@@ -66,25 +64,21 @@ EOF
 # the expected filenames match what cargo-deb actually wrote.
 assets() {
     deb_version=$1
-    while IFS='|' read -r target os build_tool deb arch; do
+    targets | while IFS='|' read -r target os build_tool deb arch; do
         [ -n "$target" ] || continue
         printf 'afi-%s.tar.gz\n' "$target"
         printf 'afi-%s.sha256\n' "$target"
         if [ "$deb" = true ]; then
             printf 'afi_%s_%s.deb\n' "$deb_version" "$arch"
         fi
-    done <<EOF
-$(targets)
-EOF
+    done
 }
 
 deb_arches() {
-    while IFS='|' read -r target os build_tool deb arch; do
+    targets | while IFS='|' read -r target os build_tool deb arch; do
         [ "$deb" = true ] || continue
         printf '%s\n' "$arch"
-    done <<EOF
-$(targets)
-EOF
+    done
 }
 
 [ $# -ge 1 ] || usage

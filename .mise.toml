@@ -34,9 +34,13 @@ run = "./scripts/check-rust-source-size.sh"
 
 [tasks."check:deps"]
 description = "Check the dependency tree for advisories, licenses, bans, and sources"
-# --all-features so the check sees every dependency the manifest can pull in,
-# not only the default set. `deny.toml` holds the policy.
-run = "cargo-deny --all-features check"
+# No flags: `deny.toml` holds the policy, including `all-features` and the target
+# scoping. Passing any of it here too would put the same setting in two places.
+run = "cargo-deny check"
+
+[tasks."check:dist"]
+description = "Assert deny.toml and install.sh agree with the release target list"
+run = "./scripts/check-dist-consistency.sh"
 
 [tasks."check:workflows"]
 description = "Static-analyse the GitHub Actions workflows"
@@ -59,12 +63,12 @@ description = "Aggregate strict validation gate: format, clippy, source size, te
 depends = ["fmt:check", "check:rust", "check:source-size", "test"]
 
 [tasks."check:supply-chain"]
-description = "Aggregate supply-chain gate: dependency policy and workflow analysis"
+description = "Aggregate supply-chain gate: dependency policy, distribution consistency, workflow analysis"
 # Separate from `check` on purpose. `check` answers "is this code correct" and
 # runs on every edit; this one answers "is what we ship trustworthy" and depends
 # on an advisory database that changes without the repository changing, so a
 # green run yesterday says nothing about today.
-depends = ["check:deps", "check:workflows"]
+depends = ["check:deps", "check:dist", "check:workflows"]
 
 [tasks."lint:fix"]
 description = "Format and apply machine-applicable clippy fixes across all targets"
@@ -99,7 +103,9 @@ release-plz = "0.3.160"
 # cargo-deny reads the whole dependency graph and applies `deny.toml`: RustSec
 # advisories, license allow-list, duplicate versions, and registry sources.
 # Pinned like the rest so a gate cannot start failing because upstream shipped.
-"cargo:cargo-deny" = "0.20.2"
+# From aqua rather than `cargo:`, which would build it from source: that took 73
+# seconds, on every job that installs the lane, every time this file changes.
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 # zizmor audits the workflow YAML itself for template injection, overscoped
 # tokens, unpinned actions, and impostor commits.
 zizmor = "1.29.0"

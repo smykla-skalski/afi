@@ -12,8 +12,10 @@
 # currently fire, so a new class of problem in a synced workflow still fails this
 # check and gets reported upstream.
 #
-# ci.yml, release.yml, and apt-credentials-check.yml are this repository's own and
-# are held to the full ruleset.
+# Every workflow not named below is this repository's own and is held to the full
+# ruleset. Written that way round on purpose: an enumeration of the included
+# files would go stale the next time one is added, and it already had by the time
+# this file was first committed.
 
 rules:
   github-app:

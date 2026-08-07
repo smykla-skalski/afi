@@ -23,9 +23,9 @@ adding a target means editing one file.
 ## The order, and why it matters
 
 ```
-plan     work out the version. Nothing outside the runner changes.
+plan     work out the version and commit the bump. No tag, no release.
 build    compile, smoke-test and package all five targets.
-release  commit the bump, tag, open a DRAFT release, attach and attest.
+release  tag, open a DRAFT release, attach and attest, publish the crate.
 apt      push both Debian packages.
 verify   assert the release and the apt repository agree.
 publish  flip the draft.
@@ -34,16 +34,25 @@ publish  flip the draft.
 Nothing is visible to a user until `publish`. That is deliberate, and it is the
 fix for how the first four releases went wrong:
 
-- **v0.4.0** was published carrying one of three platforms and gained the other
-  two seven and a half hours later, because the release was created before the
-  builds ran.
+- **v0.4.0** was published carrying one of the three platforms it shipped and
+  gained the other two seven and a half hours later, because the release was
+  created before the builds ran.
 - **v0.3.0** was tagged and never got a release at all.
 - **v0.2.0** attached an amd64 `.deb` to its release page and never pushed that
   package to apt, so `apt-get install afi=0.2.0-1` failed on amd64 while the
   release page said otherwise.
 
-A failure anywhere before `publish` now leaves a draft release, which nobody
-without push access can see, and a tag. Re-running the workflow resumes.
+A failure anywhere before `publish` now leaves at most a bump commit on `main`,
+and from `release` onwards a tag and a draft release. None of it is visible to
+anyone without push access, and re-running the workflow resumes.
+
+The bump is committed in `plan`, before the build, which is the one thing here
+that writes outside the runner early. The alternative was to build the bumped
+files as an overlay on top of the previous commit, and `build.rs` stamps a
+modified working tree as `(dirty)`: every released binary would have reported
+itself dirty and named a commit that is not the one the tag points at. A version
+bump sitting on `main` is the cheaper of the two, and `plan-release.sh` already
+treats "a manifest version with no tag" as its resume case.
 
 ## Cutting a release
 
@@ -74,6 +83,29 @@ targets, then stops. Everything it proves is real; nothing it does is visible.
 gh workflow run release.yml -f dry_run=true
 ```
 
+A dry run does not commit the version bump, so its build jobs lay the bumped
+files over the previous commit instead. That leaves the working tree modified
+and the binaries stamped `(dirty)`, which is correct for something that ships
+nothing and is why a real release commits first and builds a clean tree.
+
+## Checking an archive without CI
+
+The same build and the same check a release runs, on one target, locally:
+
+```
+mise run dist                                      # build and pack for the host
+mise run smoke target/dist/afi-<target>.tar.gz <target> <version>
+```
+
+`dist` produces the layout `taiki-e/upload-rust-binary-action` produces in CI,
+and `smoke` is the script the release runs against every archive. Worth doing
+before touching anything under `scripts/` that a release depends on.
+
+On a machine that cannot execute the target, `smoke` falls back to asserting the
+object format and architecture from the file header and says so. A release sets
+`AFI_SMOKE_REQUIRE=execute`, which turns that fallback into a failure, so no
+archive is ever published having only been looked at.
+
 ## Prereleases
 
 Ask for one by version:
@@ -92,18 +124,20 @@ prerelease into `0.5.0~rc.1-1`, which dpkg sorts *below* `0.5.0`, so a plain
 
 Find which job stopped, then:
 
-**`plan`** — nothing happened. The gate failed, the supply-chain gate failed, or
-a credential is missing. Fix and re-run.
+**`plan`** — the gate failed, the supply-chain gate failed, or a credential is
+missing, and nothing was written. If it got as far as the bump, `main` carries a
+version with no tag; that is the resume case below, not a problem to clean up.
 
-**`build`** — nothing happened. One target failed to compile, package, or run.
-`fail-fast` is off, so the log shows the state of all five, not just the first.
+**`build`** — a bump commit is on `main` and one target failed to compile,
+package, or run. `fail-fast` is off, so the log shows the state of all five, not
+just the first. Nothing is public.
 
 **`release`, `apt`, or `verify`** — a tag exists and a draft release exists.
-Nothing is public. Fix the cause and re-run the workflow; it resumes:
+Still nothing public. Fix the cause and re-run the workflow; it resumes:
 
 - `plan-release.sh` notices the manifest is at a version with no tag and
   publishes it as it stands rather than recomputing.
-- The commit step notices the bump is already on `main` and skips it.
+- The commit step notices the bump is already on `main` and reuses that commit.
 - The upload step passes `--clobber`, and the apt push passes `--republish`.
 
 Re-run rather than dispatching a fresh run, so the same version is finished

@@ -17,6 +17,15 @@ set -eu
 # earlier build fails the first; a mislabelled archive fails the second.
 #
 # Arguments: <archive.tar.gz> <target-triple> <expected-version>
+#
+# Environment:
+#
+#   AFI_SMOKE_REQUIRE=execute  fail rather than fall back to inspecting the file
+#                              header when the binary cannot be run here
+#
+# A release sets that. Without it the strength of the check would be decided by
+# whether the runner image happened to ship Rosetta, and an archive could be
+# published having never been executed with nothing but a log line saying so.
 
 if [ $# -ne 3 ]; then
     printf 'usage: %s <archive.tar.gz> <target-triple> <expected-version>\n' "$0" >&2
@@ -29,15 +38,13 @@ expected_version=$3
 
 [ -f "$archive" ] || { printf 'no such archive: %s\n' "$archive" >&2; exit 1; }
 
-archive_dir=$(CDPATH='' cd -- "$(dirname -- "$archive")" && pwd)
 archive_file=$(basename "$archive")
-archive_path="$archive_dir/$archive_file"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/afi-smoke.XXXXXX")
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT HUP INT TERM
 
-tar -xzf "$archive_path" -C "$work"
+tar -xzf "$archive" -C "$work"
 
 # The archive is flat: the binary and the documents sit at the top level, because
 # the release workflow builds it with leading-dir off.
@@ -84,28 +91,32 @@ fi
 
 printf 'smoke-testing %s (%s) in %s mode\n' "$archive_file" "$target" "$mode"
 
-run_afi() {
-    case $mode in
-        native) "$binary" "$@" ;;
-        rosetta) arch -x86_64 "$binary" "$@" ;;
-        qemu)
-            platform=linux/amd64
-            [ "$target_arch" != aarch64 ] || platform=linux/arm64
-            # A distroless-free static binary needs nothing from the image, so
-            # the smallest one available will do.
-            docker run --rm --platform "$platform" \
-                -v "$work":/w:ro -e HOME=/tmp -w /tmp \
-                debian:stable-slim /w/afi "$@"
-            ;;
-    esac
-}
-
 if [ "$mode" = inspect ]; then
-    # No way to execute it here. Assert the architecture from the file header
-    # instead, which is weaker than running it but is a real check and is
-    # reported as such.
+    if [ "${AFI_SMOKE_REQUIRE:-}" = execute ]; then
+        printf 'cannot execute a %s binary on %s/%s, and AFI_SMOKE_REQUIRE=execute\n' \
+            "$target" "$host_os" "$host_arch" >&2
+        exit 1
+    fi
+    # No way to execute it here. Assert the object format and the architecture
+    # from the file header instead, which is weaker than running it but is a real
+    # check and is reported as such.
+    #
+    # Both halves, not just the architecture: an arm64 Mach-O and an arm64 ELF
+    # are the same machine and different operating systems, so checking the arch
+    # alone would let a macOS build pass as the Linux one.
     described=$(file -b "$binary")
     printf '  file: %s\n' "$described"
+    case $target_os in
+        linux) want_format=ELF ;;
+        darwin) want_format=Mach-O ;;
+    esac
+    case $described in
+        *"$want_format"*) ;;
+        *)
+            printf 'binary is not %s: %s\n' "$want_format" "$described" >&2
+            exit 1
+            ;;
+    esac
     case "$target_arch:$described" in
         x86_64:*x86_64*) ;;
         aarch64:*arm64*) ;;
@@ -119,7 +130,39 @@ if [ "$mode" = inspect ]; then
     exit 0
 fi
 
-version_output=$(run_afi --version)
+# Runs `afi sessions` and then `afi --version`, and prints only the latter.
+#
+# Both in one invocation rather than two, because under QEMU each one is a
+# container start on the release critical path. `afi sessions` is the one
+# subcommand that prints and returns without a model endpoint or a terminal, so
+# it proves the binary loads and runs rather than merely reporting its own
+# metadata; `--version` goes last so stdout carries the block to assert against.
+#
+# ubuntu:24.04 because verify-deb.sh already pulls it for this architecture, and
+# its comment explains why an extra image is worth avoiding: GitHub runners share
+# outbound addresses and Docker Hub rate-limits anonymous pulls per address.
+run_afi_checks() {
+    case $mode in
+        native)
+            "$binary" sessions >/dev/null
+            "$binary" --version
+            ;;
+        rosetta)
+            arch -x86_64 "$binary" sessions >/dev/null
+            arch -x86_64 "$binary" --version
+            ;;
+        qemu)
+            platform=linux/amd64
+            [ "$target_arch" != aarch64 ] || platform=linux/arm64
+            docker run --rm --platform "$platform" \
+                -v "$work":/w:ro -e HOME=/tmp -w /tmp \
+                ubuntu:24.04 \
+                sh -c '/w/afi sessions >/dev/null && /w/afi --version'
+            ;;
+    esac
+}
+
+version_output=$(run_afi_checks)
 printf '%s\n' "$version_output" | sed 's/^/  /'
 
 reported_version=$(printf '%s\n' "$version_output" | head -1 | awk '{print $2}')
@@ -138,11 +181,6 @@ if [ "$reported_target" != "$target" ]; then
         "$reported_target" "$target" >&2
     exit 1
 fi
-
-# `afi sessions` is the one subcommand that prints and returns without a model
-# endpoint or a terminal, so it proves the binary loads and runs rather than
-# merely reporting its own metadata.
-run_afi sessions >/dev/null
 
 printf 'PASSED: %s runs and reports %s for %s\n' \
     "$archive_file" "$reported_version" "$reported_target"

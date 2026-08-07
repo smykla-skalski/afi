@@ -106,6 +106,14 @@ zizmor = "1.29.0"
 # actionlint type-checks the workflow expressions and the shell inside `run:`.
 actionlint = "1.7.7"
 
+[tasks.dist]
+description = "Build and pack a release archive the way a release does (arg: target triple)"
+run = "./scripts/build-archive.sh"
+
+[tasks.smoke]
+description = "Unpack a release archive and prove the binary in it runs and self-reports correctly (args: archive, target, version)"
+run = "./scripts/smoke-archive.sh"
+
 [tasks."deb:version"]
 description = "Print the Debian package version derived from Cargo.toml"
 run = "./scripts/deb-version.sh"

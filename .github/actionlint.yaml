@@ -1,0 +1,25 @@
+# actionlint configuration, read by `mise run check:workflows`.
+
+# Declared so a typo in a `vars.` name is an error rather than an empty string at
+# run time. An unset variable still reads as empty; what this catches is asking
+# for CLOUDSMITH_WORKSPACE and writing CLOUDSMITH_WORKPSACE, which would silently
+# skip the guard that exists to stop exactly that.
+config-variables:
+  - RUNNER_LABEL
+  - MACOS_RUNNER_LABEL
+  - CLOUDSMITH_WORKSPACE
+  - CLOUDSMITH_REPOSITORY
+  - CLOUDSMITH_SERVICE_SLUG
+  # Read by the org-synced smyklot workflows rather than by anything here.
+  - SMYKLOT_CLIENT_ID
+  - SMYKLOT_CONFIG
+
+paths:
+  # Pushed in by the smykla-skalski/.github org sync and headed "do not edit
+  # manually". The shellcheck note is about a glob range in a bash conditional
+  # and is informational; it cannot be fixed here, because the next sync would
+  # overwrite the fix. Narrowed to that one message so anything else actionlint
+  # finds in this file still fails and gets reported upstream.
+  .github/workflows/sync-trigger.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2102'

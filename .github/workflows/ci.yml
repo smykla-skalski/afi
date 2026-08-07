@@ -28,8 +28,13 @@ jobs:
     name: gate
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     steps:
+      # Nothing here pushes, so the checkout keeps no credentials. Left in place
+      # they would be readable by anything the build runs, including a build
+      # script from a dependency a pull request just added.
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Rust comes from rust-toolchain.toml via rustup, which the runner already
       # has; mise supplies the task lane, not the toolchain.
@@ -45,3 +50,9 @@ jobs:
       # so the gate here is the gate a contributor ran.
       - name: Run the repository gate
         run: mise run check
+
+      # Dependency advisories, the license allow-list, and the workflow analysis.
+      # A pull request that adds a crate, or edits a workflow, is the moment to
+      # ask, rather than leaving it to whoever cuts the next release.
+      - name: Run the supply-chain gate
+        run: mise run check:supply-chain

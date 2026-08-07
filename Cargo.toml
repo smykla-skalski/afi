@@ -1,11 +1,23 @@
 [package]
-name = "afi"
+# `afi` on crates.io belongs to an unrelated audio/video crate published in 2017,
+# so the package takes the next name available and the binary keeps the one users
+# type. Cargo lets those differ: `cargo install afi-cli` puts `afi` on your PATH.
+# Nothing inside the tree depends on the package name -- the library target is
+# still `afi`, so `use afi::...` in the tests is unchanged -- and the Debian
+# package pins its own name below so the apt upgrade path is not disturbed.
+name = "afi-cli"
 version = "0.5.0"
 edition = "2024"
 authors = ["Sentdex", "smykla-skalski"]
 license = "MIT"
 description = "A deliberately tiny coding agent for self-hosted or remote models."
 repository = "https://github.com/smykla-skalski/afi"
+readme = "README.md"
+keywords = ["agent", "llm", "cli", "coding", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+# Scaffolding that is meaningful in the repository and noise in a published
+# crate. The sources, the tests, and the documents the package installs all stay.
+exclude = [".github/", ".orca/", ".klaudiush/", "deny.toml", "release-plz.toml"]
 
 [[bin]]
 name = "afi"
@@ -26,6 +38,12 @@ path = "src/lib.rs"
 # probe has no shared objects to inspect and an inferred glibc floor would only
 # refuse installs that would in fact work.
 [package.metadata.deb]
+# Pinned, because cargo-deb otherwise takes the Cargo package name and would
+# start producing `afi-cli` packages the moment the crate was renamed for
+# crates.io. Every installed machine has `afi`, and a rename mid-stream would
+# leave the old package installed and orphaned while apt offered a new one
+# alongside it.
+name = "afi"
 maintainer = "Bart Smykla <bartek@smykla.com>"
 copyright = "2025 Smykla Skalski"
 license-file = ["LICENSE", "0"]

@@ -37,6 +37,19 @@ fn a_longer_key_tolerates_more() {
 }
 
 #[test]
+fn a_key_is_measured_in_characters_rather_than_bytes() {
+    // "éé" is four bytes and two characters. Measured in bytes it clears the
+    // three-character floor the abbreviation rule stands on, and a two-character
+    // key would claim every candidate it prefixes - which is what the floor is
+    // there to stop.
+    assert_eq!(nearest("éé", &["ééxxxxxx"]), None);
+    assert_eq!(nearest("ééé", &["éééxxxxxx"]), Some("éééxxxxxx"));
+    // The tie-break is characters too, so a candidate is not counted as longer
+    // than it reads.
+    assert_eq!(nearest("aa", &["ééé", "aab"]), Some("aab"));
+}
+
+#[test]
 fn the_same_typo_always_gets_the_same_answer() {
     // Ties go to the alphabetically first candidate rather than to whichever the
     // table happens to list first.

@@ -176,9 +176,9 @@ fn set_required(
 ///
 /// Blank stays permitted for the matching variables, where an exported but unset
 /// variable is how a workflow turns the feature off - see `summary_path`,
-/// `ConfigFiles::discover`, and `super::system_prompt::resolve`. The tool-policy flags keep the looser rule
-/// too, because a blank list there is documented as "every tool" rather than as
-/// a mistake.
+/// `super::file::config_files`, and `super::system_prompt::resolve`. The
+/// tool-policy flags keep the looser rule too, because a blank list there is
+/// documented as "every tool" rather than as a mistake.
 ///
 /// `kind` is what the summary reports, as it is for `set_required`.
 fn set_required_value(

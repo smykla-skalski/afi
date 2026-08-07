@@ -16,13 +16,17 @@ use std::mem;
 /// rather than `source_order` - and then to the alphabetically first, so the same
 /// typo always gets the same answer whatever order the table lists keys in.
 pub(super) fn nearest<'c>(key: &str, candidates: &[&'c str]) -> Option<&'c str> {
-    let limit = 2.max(key.chars().count() / 4);
+    // Characters throughout, never bytes: the distance below counts characters,
+    // and a threshold or a tie-break measured in bytes would disagree with it the
+    // moment a key holds anything outside ASCII.
+    let written = key.chars().count();
+    let limit = 2.max(written / 4);
     candidates
         .iter()
         .copied()
         .map(|candidate| (score(key, candidate), candidate))
         .filter(|(d, _)| *d <= limit)
-        .min_by_key(|(d, candidate)| (*d, candidate.len().abs_diff(key.len()), *candidate))
+        .min_by_key(|(d, candidate)| (*d, candidate.chars().count().abs_diff(written), *candidate))
         .map(|(_, candidate)| candidate)
 }
 
@@ -35,7 +39,7 @@ pub(super) fn nearest<'c>(key: &str, candidates: &[&'c str]) -> Option<&'c str> 
 /// ending in one.
 fn score(key: &str, candidate: &str) -> usize {
     let abbreviated = key.starts_with(candidate) || candidate.starts_with(key);
-    if key.len() >= 3 && abbreviated {
+    if key.chars().count() >= 3 && abbreviated {
         return 1;
     }
     distance(key, candidate)

@@ -31,11 +31,14 @@ pub type ChatCompletionStream =
 
 mod anthropic;
 mod bedrock;
+mod expiry;
+mod identity;
 mod openai;
 mod redact;
 mod sse;
 use anthropic::TokenCache;
 use anthropic::thinking::strip_history;
+use bedrock::sts::CredentialCache;
 use redact::{Credential, Redactor};
 
 pub(crate) use anthropic::thinking::{THINKING_HISTORY_KEY, thinking_disabled};
@@ -262,6 +265,11 @@ pub struct ReqwestClient {
     client: reqwest::Client,
     /// Federated Anthropic access tokens, cached until they near expiry.
     tokens: TokenCache,
+    /// Assumed-role AWS credentials, cached the same way and for the same
+    /// reason. Separate caches because the two hold different things - a bearer
+    /// token and a three-part signing credential - and a source is only ever in
+    /// one of the two modes.
+    aws: CredentialCache,
 }
 
 impl Default for ReqwestClient {
@@ -283,7 +291,21 @@ impl ReqwestClient {
                 .build()
                 .expect("failed to build reqwest client"),
             tokens: TokenCache::default(),
+            aws: CredentialCache::default(),
         }
+    }
+
+    /// The AWS credential a request to `source` signs with, `None` for every
+    /// other protocol.
+    ///
+    /// Resolved here rather than inside [`openai`] because minting one can mean
+    /// a round trip to STS, and this is the layer that owns the caches those
+    /// round trips fill. The protocol module is then handed a credential rather
+    /// than the machinery for obtaining one, which is the same shape the
+    /// Anthropic path has - `anthropic::stream` takes the token cache only
+    /// because its bearer is resolved after the request body is built.
+    async fn signing(&self, source: &Source) -> Result<Option<bedrock::Signing>, ClientError> {
+        bedrock::signing(&self.client, &self.aws, source).await
     }
 
     fn build_headers(source: &Source) -> Option<HeaderMap> {
@@ -308,7 +330,8 @@ impl ChatClient for ReqwestClient {
         if stream_req.source.is_anthropic() {
             return anthropic::stream(&self.client, &self.tokens, stream_req).await;
         }
-        openai::stream(&self.client, stream_req).await
+        let signing = self.signing(stream_req.source).await?;
+        openai::stream(&self.client, signing.as_ref(), stream_req).await
     }
 
     async fn chat_completions(
@@ -331,7 +354,17 @@ impl ChatClient for ReqwestClient {
             )
             .await;
         }
-        openai::complete(&self.client, source, model, messages, timeout, extra_body).await
+        let signing = self.signing(source).await?;
+        openai::complete(
+            &self.client,
+            signing.as_ref(),
+            source,
+            model,
+            messages,
+            timeout,
+            extra_body,
+        )
+        .await
     }
 
     async fn list_models(&self, source: &Source) -> Result<Value, ClientError> {
@@ -352,7 +385,8 @@ impl ChatClient for ReqwestClient {
         if source.is_anthropic() {
             return Err(unsupported(source, "the context-overrun probe"));
         }
-        openai::overrun_probe(&self.client, source, model).await
+        let signing = self.signing(source).await?;
+        openai::overrun_probe(&self.client, signing.as_ref(), source, model).await
     }
 }
 

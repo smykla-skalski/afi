@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use afi::config::{Federation, IdentitySource, NOOP_KEY, Protocol, parse_extra_body};
+use afi::config::{
+    ANTHROPIC_IDENTITY, AWS_IDENTITY, Federation, Identity, IdentitySource, NOOP_KEY, Protocol,
+    parse_extra_body,
+};
 use afi::{ApprovalKind, Source};
 
 // parse_extra_body edge cases (empty object, non-object, empty string)
@@ -228,7 +231,7 @@ fn literal_identity_token_wins() {
         ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "req"),
     ]);
     assert_eq!(
-        IdentitySource::from_env(&env),
+        IdentitySource::from_env(&env, ANTHROPIC_IDENTITY),
         Some(IdentitySource::Literal("jwt-literal".to_string()))
     );
 }
@@ -241,7 +244,7 @@ fn token_file_beats_github_actions() {
         ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "req"),
     ]);
     assert_eq!(
-        IdentitySource::from_env(&env),
+        IdentitySource::from_env(&env, ANTHROPIC_IDENTITY),
         Some(IdentitySource::File(PathBuf::from("/tmp/token")))
     );
 }
@@ -253,7 +256,7 @@ fn github_actions_is_the_fallback() {
         ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "req-token"),
     ]);
     assert_eq!(
-        IdentitySource::from_env(&env),
+        IdentitySource::from_env(&env, ANTHROPIC_IDENTITY),
         Some(IdentitySource::GithubActions {
             url: "https://actions/token".to_string(),
             request_token: "req-token".to_string(),
@@ -264,14 +267,14 @@ fn github_actions_is_the_fallback() {
 #[test]
 fn github_actions_needs_both_variables() {
     let url_only = env_map(&[("ACTIONS_ID_TOKEN_REQUEST_URL", "https://actions")]);
-    assert!(IdentitySource::from_env(&url_only).is_none());
+    assert!(IdentitySource::from_env(&url_only, ANTHROPIC_IDENTITY).is_none());
     let token_only = env_map(&[("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "req")]);
-    assert!(IdentitySource::from_env(&token_only).is_none());
+    assert!(IdentitySource::from_env(&token_only, ANTHROPIC_IDENTITY).is_none());
 }
 
 #[test]
 fn no_identity_configuration_is_none() {
-    assert!(IdentitySource::from_env(&env_map(&[])).is_none());
+    assert!(IdentitySource::from_env(&env_map(&[]), ANTHROPIC_IDENTITY).is_none());
 }
 
 #[test]
@@ -280,7 +283,56 @@ fn empty_identity_values_count_as_unset() {
         ("ANTHROPIC_IDENTITY_TOKEN", ""),
         ("ANTHROPIC_IDENTITY_TOKEN_FILE", ""),
     ]);
-    assert!(IdentitySource::from_env(&env).is_none());
+    assert!(IdentitySource::from_env(&env, ANTHROPIC_IDENTITY).is_none());
+}
+
+/// Each protocol reads its own pair. The Anthropic variables must not resolve an
+/// AWS identity, or a shell configured for one would silently federate the
+/// other with a token minted for the wrong audience.
+#[test]
+fn each_protocol_reads_only_its_own_variables() {
+    let anthropic = env_map(&[("ANTHROPIC_IDENTITY_TOKEN", "jwt")]);
+    assert!(IdentitySource::from_env(&anthropic, AWS_IDENTITY).is_none());
+
+    let aws = env_map(&[("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/token")]);
+    assert!(IdentitySource::from_env(&aws, ANTHROPIC_IDENTITY).is_none());
+    assert_eq!(
+        IdentitySource::from_env(&aws, AWS_IDENTITY),
+        Some(IdentitySource::File(PathBuf::from(
+            "/var/run/secrets/token"
+        )))
+    );
+}
+
+/// One Actions workflow can reach both, so the endpoint fallback is shared even
+/// though nothing else about the two paths is.
+#[test]
+fn github_actions_serves_both_protocols() {
+    let env = env_map(&[
+        ("ACTIONS_ID_TOKEN_REQUEST_URL", "https://actions/token"),
+        ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "req-token"),
+    ]);
+    for vars in [ANTHROPIC_IDENTITY, AWS_IDENTITY] {
+        assert!(matches!(
+            IdentitySource::from_env(&env, vars),
+            Some(IdentitySource::GithubActions { .. })
+        ));
+    }
+}
+
+/// The token is a bearer credential, and `Source`, `Runtime`, and `Protocol` all
+/// derive `Debug`, so anything printed from one carries it.
+#[test]
+fn debug_output_holds_no_identity_token() {
+    let literal = IdentitySource::Literal("eyJhbGciOi.secret-assertion".to_string());
+    assert!(!format!("{literal:?}").contains("secret-assertion"));
+    let actions = IdentitySource::GithubActions {
+        url: "https://actions/token".to_string(),
+        request_token: "runtime-request-token".to_string(),
+    };
+    let rendered = format!("{actions:?}");
+    assert!(!rendered.contains("runtime-request-token"), "{rendered}");
+    assert!(rendered.contains("https://actions/token"), "{rendered}");
 }
 
 #[test]
@@ -296,7 +348,10 @@ fn federation_carries_its_identity_source() {
     let federation = Federation::from_env(&env).unwrap();
     assert_eq!(
         federation.identity,
-        Some(IdentitySource::File(PathBuf::from("/run/secrets/token")))
+        Some(Identity {
+            vars: ANTHROPIC_IDENTITY,
+            source: IdentitySource::File(PathBuf::from("/run/secrets/token")),
+        })
     );
 }
 

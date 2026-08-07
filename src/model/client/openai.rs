@@ -24,12 +24,13 @@ use tokio_util::io::StreamReader;
 use std::io;
 use std::time::Duration;
 
+use super::bedrock::Signing;
 use super::sse::{OpenAiDecoder, decoded_stream};
 use super::{
     ChatCompletionStream, ClientError, Redactor, ReqwestClient, StreamRequest, bedrock,
     limited_error_body, strip_history, transport_error,
 };
-use crate::config::{Protocol, Source};
+use crate::config::Source;
 use crate::model::stream::{Usage, normalize_usage};
 use crate::model::usage_totals;
 
@@ -63,23 +64,24 @@ fn merge_extra_body(body: &mut Value, extra_body: Option<&Value>) {
 /// Build a POST with the source's credential, then its own headers so
 /// user-configured values still win.
 ///
-/// The Bedrock arm serializes the body itself: a `SigV4` signature covers exact
-/// bytes, so it signs and sends one `String` rather than letting anything
-/// downstream re-serialize. Every other source goes through
-/// `RequestBuilder::json`. The extra headers stay last for both and cannot
-/// collide with a signed one - the only two `build_headers` ever produces are
-/// `HTTP-Referer` and `X-Title`.
+/// `signing` is `Some` exactly for a Bedrock source - it is what
+/// [`bedrock::signing`] resolved for this request - so the two arms cannot
+/// disagree about which credential a source takes. That arm serializes the body
+/// itself: a `SigV4` signature covers exact bytes, so it signs and sends one
+/// `String` rather than letting anything downstream re-serialize. Every other
+/// source goes through `RequestBuilder::json`. The extra headers stay last for
+/// both and cannot collide with a signed one - the only two `build_headers`
+/// ever produces are `HTTP-Referer` and `X-Title`.
 fn authed_post(
     http: &Client,
     source: &Source,
+    signing: Option<&Signing>,
     url: String,
     body: &Value,
 ) -> Result<reqwest::RequestBuilder, ClientError> {
-    let mut request = match &source.protocol {
-        Protocol::Bedrock(bedrock) => {
-            bedrock::signed_post(http, bedrock, &source.name, &url, body.to_string())?
-        }
-        _ => http
+    let mut request = match signing {
+        Some(signing) => bedrock::signed_post(http, signing, &url, body.to_string())?,
+        None => http
             .post(url)
             .header("Authorization", format!("Bearer {}", source.api_key))
             .json(body),
@@ -200,12 +202,13 @@ fn completion_body(model: &str, messages: &[Value], extra_body: Option<&Value>) 
 /// stream.
 pub(super) async fn stream(
     http: &Client,
+    signing: Option<&Signing>,
     request: StreamRequest<'_>,
 ) -> Result<ChatCompletionStream, ClientError> {
     let source = request.source;
     let body = stream_body(&request);
-    let redact = Redactor::for_source(source);
-    let response = authed_post(http, source, chat_url(source), &body)?
+    let redact = bedrock::redactor(source, signing);
+    let response = authed_post(http, source, signing, chat_url(source), &body)?
         .send()
         .await
         .map_err(|e| transport_error(&e))?;
@@ -230,6 +233,7 @@ pub(super) async fn stream(
 /// `POST /chat/completions` without streaming, used by `/compress`.
 pub(super) async fn complete(
     http: &Client,
+    signing: Option<&Signing>,
     source: &Source,
     model: &str,
     messages: &[Value],
@@ -237,7 +241,7 @@ pub(super) async fn complete(
     extra_body: Option<&Value>,
 ) -> Result<String, ClientError> {
     let body = completion_body(model, messages, extra_body);
-    let response = authed_post(http, source, chat_url(source), &body)?
+    let response = authed_post(http, source, signing, chat_url(source), &body)?
         .timeout(Duration::from_secs(timeout))
         .send()
         .await
@@ -250,7 +254,7 @@ pub(super) async fn complete(
             model,
             false,
             response,
-            &Redactor::for_source(source),
+            &bedrock::redactor(source, signing),
         )
         .await);
     }
@@ -333,6 +337,7 @@ async fn json_response(
 /// make the server name its context limit in the error.
 pub(super) async fn overrun_probe(
     http: &Client,
+    signing: Option<&Signing>,
     source: &Source,
     model: &str,
 ) -> Result<String, ClientError> {
@@ -344,7 +349,7 @@ pub(super) async fn overrun_probe(
     // Same spelling the real request uses, or the probe reads back a complaint
     // about the parameter instead of the limit it went looking for.
     body[max_tokens_key(source)] = Value::from(10_000_000);
-    let response = authed_post(http, source, chat_url(source), &body)?
+    let response = authed_post(http, source, signing, chat_url(source), &body)?
         .timeout(Duration::from_secs(30))
         .send()
         .await
@@ -352,7 +357,7 @@ pub(super) async fn overrun_probe(
     // The probe expects a 400 with the context limit in the error, so the body
     // is returned either way for the caller to parse - which makes it another
     // error body a caller may report, and it is cleaned like one.
-    Ok(Redactor::for_source(source).clean(&response.text().await.unwrap_or_default()))
+    Ok(bedrock::redactor(source, signing).clean(&response.text().await.unwrap_or_default()))
 }
 
 #[cfg(test)]

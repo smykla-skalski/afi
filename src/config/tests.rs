@@ -107,17 +107,38 @@ fn a_source_holding_the_placeholder_reports_no_credential() {
     }
 }
 
+/// A Bedrock source signing with the keys it was given.
+fn static_bedrock() -> Bedrock {
+    Bedrock {
+        region: Some("us-east-1".to_string()),
+        access_key_id: Some("AKIDEXAMPLE".to_string()),
+        secret_access_key: Some("wJalrXUtnFEMI".to_string()),
+        session_token: Some("session".to_string()),
+        web_identity: None,
+    }
+}
+
+/// The same source with no keys at all, assuming a role instead.
+fn federated_bedrock() -> Bedrock {
+    Bedrock {
+        region: Some("us-east-1".to_string()),
+        access_key_id: None,
+        secret_access_key: None,
+        session_token: None,
+        web_identity: Some(WebIdentity {
+            role_arn: "arn:aws:iam::123456789012:role/afi-ci".to_string(),
+            session_name: "afi".to_string(),
+            identity: None,
+        }),
+    }
+}
+
 /// Bedrock keeps no static key, so `api_key` holds the placeholder while the run
 /// is fully credentialed. Reporting `none` for it would attribute a billed run to
 /// nobody.
 #[test]
 fn a_bedrock_source_reports_the_signature_it_billed() {
-    let source = keyless_source(Protocol::Bedrock(Box::new(Bedrock {
-        region: Some("us-east-1".to_string()),
-        access_key_id: Some("AKIDEXAMPLE".to_string()),
-        secret_access_key: Some("wJalrXUtnFEMI".to_string()),
-        session_token: Some("session".to_string()),
-    })));
+    let source = keyless_source(Protocol::Bedrock(Box::new(static_bedrock())));
     assert_eq!(
         source.run_auth(),
         RunAuth::SigV4 {
@@ -130,6 +151,31 @@ fn a_bedrock_source_reports_the_signature_it_billed() {
     assert!(!rendered.contains("wJalrXUtnFEMI"), "{rendered}");
     assert!(!rendered.contains("session"), "{rendered}");
     assert!(rendered.contains("\"mode\":\"sigv4\""), "{rendered}");
+}
+
+/// A run that assumed a role has no stored key to name, and the key it minted
+/// is re-minted as the run outlives it. The role is the stable answer to whose
+/// budget paid, and the mode is what says which of the two questions to ask.
+#[test]
+fn a_federated_bedrock_source_reports_the_role_it_assumed() {
+    let source = keyless_source(Protocol::Bedrock(Box::new(federated_bedrock())));
+    assert_eq!(
+        source.run_auth(),
+        RunAuth::WebIdentity {
+            region: "us-east-1",
+            role_arn: "arn:aws:iam::123456789012:role/afi-ci",
+            session_name: "afi",
+        }
+    );
+    let rendered = RunAuth::json(Some(source.run_auth())).to_string();
+    assert!(
+        rendered.contains("\"mode\":\"sigv4_web_identity\""),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("access_key_id"),
+        "a minted key names a session, not the identity that opened it: {rendered}"
+    );
 }
 
 #[test]

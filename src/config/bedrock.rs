@@ -4,10 +4,19 @@
 //! `Source::api_key`. The four values below stand in for it, and unlike a key
 //! they are all needed at once - a signature is scoped to a Region, and an
 //! access key without its secret signs nothing.
+//!
+//! Those four can also be produced rather than configured. [`WebIdentity`]
+//! names a role to assume from an OIDC identity token, which is how a CI job
+//! reaches Bedrock with no AWS key stored anywhere; what comes back is the same
+//! three-part credential, so everything downstream of the exchange is unchanged.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::BuildHasher;
+
+use crate::summary::RunAuth;
+
+use super::{AWS_IDENTITY, Identity};
 
 /// Bedrock's `OpenAI`-compatible endpoint, one host per Region.
 ///
@@ -15,6 +24,11 @@ use std::hash::BuildHasher;
 /// AWS documents a `SigV4` request against, and the one whose examples use the
 /// unversioned model ids (`zai.glm-5`). Override with `AFI_BEDROCK_BASE_URL`.
 const ENDPOINT: &str = "https://bedrock-runtime.{region}.amazonaws.com/v1";
+
+/// The role session name when `AWS_ROLE_SESSION_NAME` names none. It reaches
+/// `CloudTrail` as the tail of the assumed-role identity, so a call afi made is
+/// attributable past the role every job in the account shares.
+const SESSION_NAME: &str = "afi";
 
 /// Where a Bedrock source's Region and signing credentials come from.
 ///
@@ -40,6 +54,53 @@ pub struct Bedrock {
     /// credentials; absent for a long-lived IAM user, which is why it is not
     /// required.
     pub session_token: Option<String>,
+    /// The role to assume when the three fields above hold no usable static
+    /// credential. `None` when `AWS_ROLE_ARN` names none.
+    pub web_identity: Option<WebIdentity>,
+}
+
+/// Assuming an AWS role from an OIDC identity token, in place of a static key.
+///
+/// AWS federates differently from Anthropic, which is why this is a second type
+/// rather than a second [`Federation`](super::Federation). There is no token
+/// endpoint handing back a bearer: `sts:AssumeRoleWithWebIdentity` answers with
+/// an access key, a secret, and a session token, and those then sign requests
+/// exactly as a long-lived pair would. So this configures where the credential
+/// comes from, and the three fields above are what it produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebIdentity {
+    /// `AWS_ROLE_ARN` - the role to assume.
+    pub role_arn: String,
+    /// `AWS_ROLE_SESSION_NAME`, else [`SESSION_NAME`].
+    pub session_name: String,
+    /// Where the identity token to exchange comes from. `None` when nothing is
+    /// configured, which [`Bedrock::incomplete`] refuses the run over rather
+    /// than letting it reach STS with an empty assertion.
+    pub identity: Option<Identity>,
+}
+
+impl WebIdentity {
+    /// The identity token this role is assumed from, or why it cannot be.
+    ///
+    /// One accessor rather than a check followed by a later unwrap. The startup
+    /// refusal and the exchange itself need to know the same thing, and the
+    /// exchange also needs the token - so handing it back is what stops the
+    /// exchange from re-deriving a value this already had and then calling the
+    /// failure it cannot handle unreachable.
+    ///
+    /// # Errors
+    /// The role ARN is not one, or no identity token is configured.
+    pub fn assumable(&self) -> Result<&Identity, String> {
+        if !is_role_arn(&self.role_arn) {
+            return Err(format!(
+                "AWS_ROLE_ARN={:?} is not a role ARN",
+                self.role_arn
+            ));
+        }
+        self.identity
+            .as_ref()
+            .ok_or_else(|| Identity::absent(AWS_IDENTITY))
+    }
 }
 
 impl Bedrock {
@@ -59,6 +120,12 @@ impl Bedrock {
             access_key_id: get("AWS_ACCESS_KEY_ID"),
             secret_access_key: get("AWS_SECRET_ACCESS_KEY"),
             session_token: get("AWS_SESSION_TOKEN"),
+            web_identity: get("AWS_ROLE_ARN").map(|role_arn| WebIdentity {
+                role_arn,
+                session_name: get("AWS_ROLE_SESSION_NAME")
+                    .unwrap_or_else(|| SESSION_NAME.to_string()),
+                identity: Identity::from_env(env, AWS_IDENTITY),
+            }),
         }
     }
 
@@ -67,24 +134,61 @@ impl Bedrock {
     /// The built-in source registers on this rather than on a complete set: an
     /// incomplete one has to exist as a source to be refused by name, and a
     /// source that never registered names nothing.
+    ///
+    /// A role ARN counts. It is the whole of the configuration a federated run
+    /// has - the point of that mode is that no key is stored anywhere - so
+    /// without it the one shape this feature exists for would register nothing.
     #[must_use]
     pub fn has_any_credential(&self) -> bool {
-        self.access_key_id.is_some() || self.secret_access_key.is_some()
+        self.access_key_id.is_some()
+            || self.secret_access_key.is_some()
+            || self.web_identity.is_some()
     }
 
-    /// The required variables that are not set, in the order listed here. A
-    /// session token is deliberately absent: a long-lived IAM user has none.
+    /// The role to assume for a signing credential, or `None` when this source
+    /// signs with the static key it was given.
+    ///
+    /// A complete static pair wins. Every AWS SDK's default credential chain
+    /// resolves environment keys ahead of a web identity, and afi's own
+    /// `anthropic` built-in already orders its three modes the same way. Which
+    /// one a run actually took is in the summary's `auth` block, so a job that
+    /// meant to federate and found a stray key in the environment can see that
+    /// it did.
+    ///
+    /// Half a pair does not win. The SDK chain moves on from an incomplete
+    /// environment credential, and so does this: otherwise a misspelled
+    /// `AWS_SECRET_ACCESS_KEY` would take down a run that had a perfectly good
+    /// role to assume, and the refusal would name the variable that was never
+    /// meant to be set.
+    #[must_use]
+    pub fn federating(&self) -> Option<&WebIdentity> {
+        if self.access_key_id.is_some() && self.secret_access_key.is_some() {
+            return None;
+        }
+        self.web_identity.as_ref()
+    }
+
+    /// The required variables that are not set, in the order listed here.
+    ///
+    /// A session token is deliberately absent: a long-lived IAM user has none.
+    /// The static key pair is absent too when the source federates, since the
+    /// exchange is what produces it.
     #[must_use]
     pub fn missing(&self) -> Vec<&'static str> {
-        [
-            ("AWS_REGION", &self.region),
-            ("AWS_ACCESS_KEY_ID", &self.access_key_id),
-            ("AWS_SECRET_ACCESS_KEY", &self.secret_access_key),
-        ]
-        .into_iter()
-        .filter(|(_, value)| value.is_none())
-        .map(|(name, _)| name)
-        .collect()
+        let mut missing = Vec::new();
+        if self.region.is_none() {
+            missing.push("AWS_REGION");
+        }
+        if self.federating().is_some() {
+            return missing;
+        }
+        if self.access_key_id.is_none() {
+            missing.push("AWS_ACCESS_KEY_ID");
+        }
+        if self.secret_access_key.is_none() {
+            missing.push("AWS_SECRET_ACCESS_KEY");
+        }
+        missing
     }
 
     /// Why a source on this configuration cannot sign, naming the variables
@@ -99,13 +203,41 @@ impl Bedrock {
             ));
         }
         let region = self.region.as_deref()?;
-        if is_region(region) {
-            return None;
+        if !is_region(region) {
+            return Some(format!(
+                "source {source_name} signs for Bedrock but AWS_REGION={region:?} \
+                 is not a Region name"
+            ));
         }
-        Some(format!(
-            "source {source_name} signs for Bedrock but AWS_REGION={region:?} \
-             is not a Region name"
-        ))
+        // Checked here rather than on the first request for the reason every
+        // other case in this function is: a run refused before it starts costs
+        // nothing, and one that discovers a missing token file three turns in
+        // has already been paid for.
+        self.federating()
+            .and_then(|web| web.assumable().err())
+            .map(|why| format!("source {source_name} assumes an AWS role but {why}"))
+    }
+
+    /// Which credential this source authenticates with, for the run summary.
+    ///
+    /// Sits here rather than in `Source::run_auth` because the choice between
+    /// the two modes is [`Self::federating`]'s, and reporting one while signing
+    /// with the other is exactly the mistake the `auth` block exists to make
+    /// visible.
+    #[must_use]
+    pub fn run_auth(&self) -> RunAuth<'_> {
+        let region = self.region.as_deref().unwrap_or_default();
+        match self.federating() {
+            Some(web) => RunAuth::WebIdentity {
+                region,
+                role_arn: &web.role_arn,
+                session_name: &web.session_name,
+            },
+            None => RunAuth::SigV4 {
+                region,
+                access_key_id: self.access_key_id.as_deref().unwrap_or_default(),
+            },
+        }
     }
 
     /// The endpoint for this Region, or `None` when no Region is configured.
@@ -129,6 +261,20 @@ fn is_region(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// The shape of a role ARN: `arn:<partition>:iam::<account>:role/<name>`.
+///
+/// Checked for the reason [`is_region`] is - a typo answered with the
+/// variable's name beats one answered by AWS, after a network round trip, with
+/// a `ValidationError` about a request the operator never wrote. The mistake
+/// this actually catches is pasting the role's *name* where its ARN goes.
+///
+/// Loose on purpose. Partitions differ (`aws`, `aws-us-gov`, `aws-cn`), a role
+/// may carry a path, and account ids are not afi's to police, so only the two
+/// parts every role ARN has are required.
+fn is_role_arn(value: &str) -> bool {
+    value.starts_with("arn:") && value.contains(":role/")
 }
 
 /// "A is" / "A and B are" / "A, B, and C are" - the tail of the refusal, so it
@@ -162,6 +308,9 @@ impl fmt::Debug for Bedrock {
                 &hidden(self.secret_access_key.as_ref()),
             )
             .field("session_token", &hidden(self.session_token.as_ref()))
+            // Safe to print whole: the role and the session name are
+            // identifiers, and `IdentitySource` redacts the token it holds.
+            .field("web_identity", &self.web_identity)
             .finish()
     }
 }

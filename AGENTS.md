@@ -40,7 +40,7 @@ Run validation in the session worktree. Do not run unrelated gates. Unit tests b
 - **REPL:** main loop, slash commands, banner, one-shot mode, and automatic session saves.
 - **Model:** asynchronous HTTP client, SSE parsing, context-window probing, recovery samplers, context compression, and the tool-dispatch turn loop.
 - **Anthropic protocol:** message and tool translation at the client boundary, a stateful SSE decoder normalizing events into the shared chunk type, and the workload-identity-federation token exchange.
-- **Bedrock:** AWS SigV4 request signing, credentials and Region read from the standard `AWS_*` variables, and classification of AWS rejections. Rides the OpenAI-compatible request and SSE paths otherwise.
+- **Bedrock:** AWS SigV4 request signing, credentials and Region read from the standard `AWS_*` variables or assumed from an OIDC identity token through `sts:AssumeRoleWithWebIdentity`, and classification of AWS rejections. Rides the OpenAI-compatible request and SSE paths otherwise.
 - **Tools:** file operations, directory listing, detached Bash execution through `setsid`, background waits, protocol parsing, tool-result sanitization, and the allow/deny tool policy enforced both in the request and at dispatch.
 - **Sessions:** atomic writes, modification-time ordering, short-ID resolution, and schema versioning.
 - **Risk:** command classification, approval gates, Esc-to-chat control flow, and project-root detection.

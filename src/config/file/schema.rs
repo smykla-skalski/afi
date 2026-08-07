@@ -291,6 +291,13 @@ pub(super) const ANTHROPIC: &[Setting] = &[
 /// secrets, and all four keep the un-prefixed names every AWS SDK reads, so a
 /// key for them would be a second place a credential could live - see
 /// [`REFUSED`].
+///
+/// The role-assumption variables - `AWS_ROLE_ARN`, `AWS_ROLE_SESSION_NAME`, and
+/// the two naming the identity token - have none for the same reason, even
+/// though the first two are not secrets. They are AWS SDK names like the rest
+/// of that set, and a file spelling half of a credential chain while the
+/// environment spells the other half is how the two disagree about which
+/// identity a run billed.
 pub(super) const BEDROCK: &[Setting] = &[
     mine("base_url", "AFI_BEDROCK_BASE_URL", text),
     row("model", "AFI_BEDROCK_MODEL", text),

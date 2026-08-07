@@ -43,6 +43,10 @@ pub(crate) enum Credential {
     IdentityToken,
     /// The Actions runtime token that buys the assertion.
     RequestToken,
+    /// The AWS session token a signed request carries in
+    /// `x-amz-security-token`. Minted by afi itself on the federated path, so
+    /// nothing upstream masks it.
+    SessionToken,
 }
 
 impl Credential {
@@ -52,6 +56,7 @@ impl Credential {
             Self::BearerToken => "[redacted bearer token]",
             Self::IdentityToken => "[redacted OIDC identity token]",
             Self::RequestToken => "[redacted Actions request token]",
+            Self::SessionToken => "[redacted AWS session token]",
         }
     }
 }

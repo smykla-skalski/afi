@@ -60,6 +60,37 @@ fn a_run_with_no_source_reports_no_credential() {
     assert_eq!(RunAuth::json(None), Value::Null);
 }
 
+// --- the two AWS modes --------------------------------------------------------
+
+#[test]
+fn a_signed_run_names_the_region_and_the_key_that_paid() {
+    let auth = RunAuth::json(Some(RunAuth::SigV4 {
+        region: "us-east-1",
+        access_key_id: "AKIDEXAMPLE",
+    }));
+    assert_eq!(auth["mode"], "sigv4");
+    assert_eq!(sorted_keys(&auth), ["access_key_id", "mode", "region"]);
+}
+
+/// The two AWS modes are separate values of `mode` rather than one value with
+/// an extra field, so a consumer reads which credential a run used off the
+/// field it already reads instead of probing for the one the other mode omits.
+#[test]
+fn an_assumed_role_run_names_the_role_rather_than_the_key_it_minted() {
+    let auth = RunAuth::json(Some(RunAuth::WebIdentity {
+        region: "us-east-1",
+        role_arn: "arn:aws:iam::123456789012:role/afi-ci",
+        session_name: "afi",
+    }));
+    assert_eq!(auth["mode"], "sigv4_web_identity");
+    assert_eq!(auth["role_arn"], "arn:aws:iam::123456789012:role/afi-ci");
+    assert_eq!(auth["session_name"], "afi");
+    assert_eq!(
+        sorted_keys(&auth),
+        ["mode", "region", "role_arn", "session_name"]
+    );
+}
+
 #[test]
 fn the_block_carries_nothing_but_identifiers() {
     // The whole summary is uploaded as a build artifact, where nothing is
@@ -75,5 +106,35 @@ fn the_block_carries_nothing_but_identifiers() {
             "service_account_id",
             "workspace_id"
         ]
+    );
+}
+
+/// Every mode the summary can report, so one added without a rendered shape
+/// fails here rather than in whatever reads the artifact.
+#[test]
+fn every_mode_is_named_once() {
+    let modes = [
+        RunAuth::ApiKey,
+        RunAuth::OAuth,
+        RunAuth::NoCredential,
+        RunAuth::SigV4 {
+            region: "us-east-1",
+            access_key_id: "AKIDEXAMPLE",
+        },
+        RunAuth::WebIdentity {
+            region: "us-east-1",
+            role_arn: "arn:aws:iam::123456789012:role/afi-ci",
+            session_name: "afi",
+        },
+        federated(),
+    ]
+    .map(|auth| auth.mode());
+    let mut sorted = modes.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        modes.len(),
+        "two modes share a name: {modes:?}"
     );
 }

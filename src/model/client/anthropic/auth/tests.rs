@@ -130,77 +130,21 @@ async fn a_bearer_for_a_non_bearer_source_is_an_internal_error() {
     assert!(matches!(err, ClientError::Internal(_)), "got {err:?}");
 }
 
-// --- identity token -----------------------------------------------------------
-
-#[tokio::test]
-async fn a_blank_identity_token_file_names_the_file() {
-    // Whitespace-only reads back as an empty assertion. Sending it earns a 400
-    // about the grant, which says nothing about the file actually being empty.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("oidc");
-    fs::write(&path, "   \n\t\n").unwrap();
-
-    let err = fetch_identity_token(&Client::new(), &IdentitySource::File(path.clone()))
-        .await
-        .expect_err("an empty token file must not reach the exchange");
-    let text = err.to_string();
-    assert!(matches!(err, ClientError::Auth(_)), "wrong variant");
-    assert!(text.contains("is empty"), "{text}");
-    assert!(text.contains(&path.display().to_string()), "{text}");
-}
-
-#[tokio::test]
-async fn a_blank_literal_identity_token_is_rejected() {
-    // `IdentitySource::from_env` filters empties, so this guards the type itself
-    // rather than that one path.
-    let err = fetch_identity_token(&Client::new(), &IdentitySource::Literal("  ".to_string()))
-        .await
-        .expect_err("a blank literal token must not reach the exchange");
-    assert!(matches!(err, ClientError::Auth(_)), "got {err:?}");
-}
-
-#[tokio::test]
-async fn a_token_file_is_read_and_trimmed() {
-    // A file written by a shell redirect almost always ends in a newline, which
-    // would be rejected as an invalid header character downstream.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("oidc");
-    fs::write(&path, "  eyJhbGciOi.token\n").unwrap();
-
-    let token = fetch_identity_token(&Client::new(), &IdentitySource::File(path))
-        .await
-        .unwrap();
-    assert_eq!(token, "eyJhbGciOi.token");
-}
-
-#[tokio::test]
-async fn a_missing_token_file_names_the_variable() {
-    let err = fetch_identity_token(
-        &Client::new(),
-        &IdentitySource::File("/nonexistent/oidc-token".into()),
-    )
-    .await
-    .expect_err("a missing file is a config error");
-    assert!(
-        err.to_string().contains("ANTHROPIC_IDENTITY_TOKEN_FILE"),
-        "{err}"
-    );
-}
-
 // --- exchange response parsing ------------------------------------------------
 
 #[test]
 fn minted_token_is_parsed_with_its_lifetime() {
-    let token = parse_minted(r#"{"access_token":"oat_123","expires_in":3600}"#).unwrap();
-    assert_eq!(token.value, "oat_123");
-    assert!(token.expires_at > Instant::now(), "should not be expired");
+    let (token, expires_at) =
+        parse_minted(r#"{"access_token":"oat_123","expires_in":3600}"#).unwrap();
+    assert_eq!(token, "oat_123");
+    assert!(expires_at > Instant::now(), "should not be expired");
 }
 
 #[test]
 fn a_short_lifetime_yields_an_already_stale_token_rather_than_panicking() {
     // expires_in below the skew must not underflow; it just re-mints next time.
-    let token = parse_minted(r#"{"access_token":"oat_123","expires_in":5}"#).unwrap();
-    assert!(token.expires_at <= Instant::now());
+    let (_, expires_at) = parse_minted(r#"{"access_token":"oat_123","expires_in":5}"#).unwrap();
+    assert!(expires_at <= Instant::now());
 }
 
 #[test]
@@ -216,109 +160,4 @@ fn the_federation_beta_header_requests_both_betas() {
     // The exchange endpoint needs the oidc-federation beta in addition to oauth.
     assert!(FEDERATION_BETA.contains("oauth-2025-04-20"));
     assert!(FEDERATION_BETA.contains("oidc-federation-2026-04-01"));
-}
-
-#[test]
-fn a_refused_identity_exchange_is_an_auth_failure_not_a_transport_one() {
-    // The one auth failure that arrives as an HTTP status. A federation rule that
-    // turns the claims down - an unprotected ref, most often - answers 400 or 401,
-    // and classifying that as the provider's trouble would make a caller retry
-    // until the schedule ran out to be refused in the same words.
-    for status in [StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED] {
-        let error = refused_credential(
-            "the exchange refused it",
-            status,
-            "{\"error\":\"x\"}",
-            &Redactor::default(),
-        );
-        assert!(matches!(error, ClientError::Auth(_)), "got {error:?}");
-        assert_eq!(error.kind(), ErrorKind::Auth);
-    }
-}
-
-#[test]
-fn a_busy_credential_endpoint_stays_retryable() {
-    // Capacity, not the credential. This one is worth trying again, so it keeps
-    // the status it arrived with.
-    for status in [
-        StatusCode::TOO_MANY_REQUESTS,
-        StatusCode::SERVICE_UNAVAILABLE,
-    ] {
-        let error = refused_credential("busy", status, "slow down", &Redactor::default());
-        assert_eq!(error.kind(), ErrorKind::ProviderHttp, "{status}");
-    }
-}
-
-#[test]
-fn a_refusal_body_is_quoted_but_bounded() {
-    let error = refused_credential(
-        "refused",
-        StatusCode::FORBIDDEN,
-        &"x".repeat(1000),
-        &Redactor::default(),
-    );
-    let text = error.to_string();
-    assert!(text.contains("refused (HTTP 403)"), "{text}");
-    assert!(
-        text.matches('x').count() == BODY_PREVIEW_CHARS,
-        "the body must be trimmed to the preview length: {}",
-        text.len()
-    );
-}
-
-// --- credentials in the reported body -----------------------------------------
-
-/// Stands in for the OIDC assertion the exchange is posted.
-const ASSERTION: &str = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyZXBvOmFjbWUvYWZpIn0.signature";
-
-/// A refusal that quotes the request it turned down, credential and all.
-fn echoed_refusal(assertion: &str) -> String {
-    format!(
-        r#"{{"error":{{"type":"invalid_request_error","message":"unprotected ref"}},"request":{{"assertion":"{assertion}"}}}}"#
-    )
-}
-
-/// One refusal of the assertion, as the exchange reports it.
-fn refused(status: StatusCode, body: &str) -> ClientError {
-    let redact = Redactor::default().with(ASSERTION, Credential::IdentityToken);
-    refused_credential("the exchange refused it", status, body, &redact)
-}
-
-#[test]
-fn a_refused_exchange_does_not_report_the_assertion_it_posted() {
-    // The endpoint echoes the request it turned down, so the body it returns
-    // holds the credential afi just sent. That sentence goes to stderr and to the
-    // run summary, and afi fetched the token outside the toolkit that would have
-    // masked it, so nothing further down catches it.
-    let text = refused(StatusCode::BAD_REQUEST, &echoed_refusal(ASSERTION)).to_string();
-    assert!(!text.contains(ASSERTION), "{text}");
-    assert!(text.contains("[redacted OIDC identity token]"), "{text}");
-}
-
-#[test]
-fn a_refusal_still_says_why_it_was_refused() {
-    // A rejected credential has to stay distinguishable from a rate limit, so
-    // only the credential goes.
-    let text = refused(StatusCode::BAD_REQUEST, &echoed_refusal(ASSERTION)).to_string();
-    assert!(text.contains("invalid_request_error"), "{text}");
-    assert!(text.contains("unprotected ref"), "{text}");
-}
-
-#[test]
-fn the_preview_cannot_reveal_what_redaction_removed() {
-    // The 200-character window is applied after cleaning. Cutting first would
-    // leave whichever half of the credential fell inside it.
-    let padding = "p".repeat(BODY_PREVIEW_CHARS * 2);
-    let text = refused(StatusCode::UNAUTHORIZED, &format!("{ASSERTION}{padding}")).to_string();
-    assert!(!text.contains(&ASSERTION[..20]), "{text}");
-}
-
-#[test]
-fn a_busy_endpoint_reports_a_clean_body_too() {
-    // The retryable branch keeps its status and its whole body, which is exactly
-    // the body the echo was in.
-    let error = refused(StatusCode::SERVICE_UNAVAILABLE, &echoed_refusal(ASSERTION));
-    let text = error.to_string();
-    assert_eq!(error.kind(), ErrorKind::ProviderHttp);
-    assert!(!text.contains(ASSERTION), "{text}");
 }

@@ -15,6 +15,7 @@ use std::process::Output;
 use std::thread;
 
 use afi::Runtime;
+use afi::config::{Bedrock, Protocol};
 use serde_json::Value;
 
 /// The answer a context-window probe gets. afi asks on the side and falls back
@@ -38,6 +39,20 @@ pub fn build(args: &[&str], env: &[(&str, &str)]) -> Runtime {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     Runtime::build(&args, env_map, None)
+}
+
+/// The credentials of a Bedrock source, or a panic naming what it is instead.
+///
+/// Here rather than in one of the two Bedrock test files because both need it:
+/// the static-key cases and the role-assuming ones are separate binaries only
+/// to stay under the per-file line cap, and unwrapping `Protocol::Bedrock`
+/// twice is how they would drift.
+#[allow(dead_code)]
+pub fn bedrock_of(rt: &Runtime, name: &str) -> Bedrock {
+    match &rt.sources[name].protocol {
+        Protocol::Bedrock(bedrock) => (**bedrock).clone(),
+        other => panic!("source {name} is on {other:?}, not Bedrock"),
+    }
 }
 
 /// Build a runtime with an env file (the `~/.env` path).

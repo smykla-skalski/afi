@@ -1,8 +1,10 @@
-//! Reading the AWS variables, and naming the ones that are absent.
+//! Reading the AWS variables, choosing between the two credential modes, and
+//! naming what is absent from whichever one applies.
 
 use std::collections::HashMap;
 
 use super::Bedrock;
+use crate::config::IdentitySource;
 
 fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs
@@ -14,6 +16,12 @@ fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
 const KEY: (&str, &str) = ("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE");
 const SECRET: (&str, &str) = ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI");
 const REGION: (&str, &str) = ("AWS_REGION", "us-east-1");
+const ROLE: (&str, &str) = ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/afi-ci");
+/// What a workflow granting `permissions: id-token: write` exports.
+const ACTIONS: [(&str, &str); 2] = [
+    ("ACTIONS_ID_TOKEN_REQUEST_URL", "https://actions/token"),
+    ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "runtime-token"),
+];
 
 #[test]
 fn reads_the_standard_variables() {
@@ -121,11 +129,161 @@ fn debug_output_holds_no_secret() {
         SECRET,
         REGION,
         ("AWS_SESSION_TOKEN", "session-token-value"),
+        ("AWS_WEB_IDENTITY_TOKEN", "eyJhbGciOi.secret-assertion"),
+        ROLE,
     ]));
     let rendered = format!("{bedrock:?}");
     assert!(!rendered.contains("wJalrXUtnFEMI"), "got {rendered}");
     assert!(!rendered.contains("session-token-value"), "got {rendered}");
-    // The two that are not secret stay readable, or the dump is useless.
+    assert!(!rendered.contains("secret-assertion"), "got {rendered}");
+    // The three that are not secret stay readable, or the dump is useless.
     assert!(rendered.contains("AKIDEXAMPLE"), "got {rendered}");
     assert!(rendered.contains("us-east-1"), "got {rendered}");
+    assert!(rendered.contains("role/afi-ci"), "got {rendered}");
+}
+
+// --- assuming a role instead of holding a key ---------------------------------
+
+/// The shape this feature exists for: a workflow with `id-token: write`, a role
+/// ARN, and a Region. No key is stored anywhere.
+#[test]
+fn a_role_and_a_workflow_identity_are_a_whole_credential() {
+    let bedrock = Bedrock::from_env(&env(&[REGION, ROLE, ACTIONS[0], ACTIONS[1]]));
+    assert!(bedrock.has_any_credential(), "the source has to register");
+    assert!(bedrock.incomplete("bedrock").is_none());
+    let web = bedrock.federating().expect("with no key, the role is used");
+    assert_eq!(web.role_arn, "arn:aws:iam::123456789012:role/afi-ci");
+    assert_eq!(web.session_name, "afi");
+    assert!(matches!(
+        web.identity.as_ref().map(|identity| &identity.source),
+        Some(IdentitySource::GithubActions { .. })
+    ));
+}
+
+#[test]
+fn the_session_name_is_overridable() {
+    let bedrock = Bedrock::from_env(&env(&[
+        REGION,
+        ROLE,
+        ("AWS_ROLE_SESSION_NAME", "afi-pr-review"),
+        ACTIONS[0],
+        ACTIONS[1],
+    ]));
+    assert_eq!(
+        bedrock.web_identity.as_ref().unwrap().session_name,
+        "afi-pr-review"
+    );
+}
+
+/// The variable every AWS SDK reads, which an EKS pod identity and
+/// `configure-aws-credentials` both set.
+#[test]
+fn a_web_identity_token_file_is_read_as_the_identity() {
+    let bedrock = Bedrock::from_env(&env(&[
+        REGION,
+        ROLE,
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/token"),
+    ]));
+    assert!(bedrock.incomplete("bedrock").is_none());
+    assert!(matches!(
+        bedrock
+            .federating()
+            .and_then(|web| web.identity.as_ref())
+            .map(|identity| &identity.source),
+        Some(IdentitySource::File(_))
+    ));
+}
+
+/// Every AWS SDK's default chain resolves environment keys ahead of a web
+/// identity, and so does afi's own `anthropic` built-in across its three modes.
+#[test]
+fn a_complete_static_pair_wins_over_a_role() {
+    let bedrock = Bedrock::from_env(&env(&[KEY, SECRET, REGION, ROLE, ACTIONS[0], ACTIONS[1]]));
+    assert!(bedrock.web_identity.is_some(), "the role is still read");
+    assert!(
+        bedrock.federating().is_none(),
+        "but the static pair is what signs"
+    );
+    assert_eq!(bedrock.run_auth().mode(), "sigv4");
+}
+
+/// A misspelled `AWS_SECRET_ACCESS_KEY` must not take down a run that had a
+/// perfectly good role to assume - the SDK chain moves on from half a pair too.
+#[test]
+fn half_a_static_pair_does_not_win() {
+    let bedrock = Bedrock::from_env(&env(&[KEY, REGION, ROLE, ACTIONS[0], ACTIONS[1]]));
+    assert!(bedrock.federating().is_some());
+    assert!(
+        bedrock.incomplete("bedrock").is_none(),
+        "the dangling key is not required of a federating source"
+    );
+    assert_eq!(bedrock.run_auth().mode(), "sigv4_web_identity");
+}
+
+/// A role ARN alone is a credential in the making, and the source has to exist
+/// for the refusal below to name it.
+#[test]
+fn a_role_arn_alone_registers_the_source() {
+    assert!(Bedrock::from_env(&env(&[ROLE])).has_any_credential());
+}
+
+// --- refusals on the federated path -------------------------------------------
+
+#[test]
+fn a_role_with_no_identity_token_refuses_and_says_where_one_comes_from() {
+    let bedrock = Bedrock::from_env(&env(&[REGION, ROLE]));
+    let refusal = bedrock.incomplete("bedrock").unwrap();
+    assert!(
+        refusal.starts_with("source bedrock assumes an AWS role but"),
+        "got {refusal}"
+    );
+    assert!(refusal.contains("AWS_WEB_IDENTITY_TOKEN_FILE"), "{refusal}");
+    assert!(refusal.contains("id-token: write"), "{refusal}");
+}
+
+/// A role name where its ARN belongs is the mistake worth catching: STS answers
+/// it with a `ValidationError` about a request the operator never wrote.
+#[test]
+fn a_role_that_is_not_an_arn_refuses_and_names_the_variable() {
+    let bedrock = Bedrock::from_env(&env(&[
+        REGION,
+        ("AWS_ROLE_ARN", "afi-ci"),
+        ACTIONS[0],
+        ACTIONS[1],
+    ]));
+    assert_eq!(
+        bedrock.incomplete("bedrock").unwrap(),
+        "source bedrock assumes an AWS role but AWS_ROLE_ARN=\"afi-ci\" is not a role ARN"
+    );
+}
+
+/// Every partition, and a role kept under a path.
+#[test]
+fn the_other_role_arn_shapes_are_accepted() {
+    for arn in [
+        "arn:aws:iam::123456789012:role/afi-ci",
+        "arn:aws-us-gov:iam::123456789012:role/afi-ci",
+        "arn:aws-cn:iam::123456789012:role/afi-ci",
+        "arn:aws:iam::123456789012:role/team/ci/afi",
+    ] {
+        let bedrock = Bedrock::from_env(&env(&[
+            REGION,
+            ("AWS_ROLE_ARN", arn),
+            ACTIONS[0],
+            ACTIONS[1],
+        ]));
+        assert!(bedrock.incomplete("bedrock").is_none(), "{arn}");
+    }
+}
+
+/// The signature is still scoped to a Region, however the credential was
+/// obtained - but the static pair is not, so it must not be named.
+#[test]
+fn a_federating_source_still_needs_a_region_and_nothing_else() {
+    let bedrock = Bedrock::from_env(&env(&[ROLE, ACTIONS[0], ACTIONS[1]]));
+    assert_eq!(bedrock.missing(), ["AWS_REGION"]);
+    assert_eq!(
+        bedrock.incomplete("bedrock").unwrap(),
+        "source bedrock signs for Bedrock but AWS_REGION is not set"
+    );
 }

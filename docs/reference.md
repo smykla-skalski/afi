@@ -64,6 +64,7 @@ Every field except the version and the profile is best-effort. A build with no g
 | `ANTHROPIC_API_KEY`                          | auto-registers a built-in `anthropic` source ([details](#anthropic)) |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | auto-registers a built-in `bedrock` source ([details](#bedrock))    |
 | `AWS_REGION` / `AWS_SESSION_TOKEN`           | the Region that source signs for, and an STS token ([details](#bedrock)) |
+| `AWS_ROLE_ARN`                               | registers the same source with no key at all ([details](#bedrock-without-a-key)) |
 | `AFI_BACKEND`                                | set to `vllm` to disable llama.cpp-only recovery knobs               |
 | `AFI_HOME` / `AFI_SESSIONS_DIR`              | where session JSON files are stored                                  |
 | `AFI_AUTOCOMPRESS_PERCENT`                   | auto-compress threshold (default 85, 0=off)                          |
@@ -328,7 +329,7 @@ The policy count also covers calls thrown away before dispatch could rule on the
 
 **These are attempts, not distinct intentions.** Every blocked call in a discarded batch counts, including one whose own arguments parsed, and a retried batch counts again - so a persistently truncated stream carrying two blocked calls reports six with the default two recoveries, for what a human would call one thing the model wanted. Read the count as "how many times was this run told no", and alert on whether it is zero rather than on how large it is. `AFI_MALFORMED_STREAM_RETRIES` bounds the multiplier.
 
-`auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, `federated` for one afi minted itself, `sigv4` for an AWS signature ([details](#bedrock)), and `none` for a source with no credential configured, which is the local llama.cpp case. `federated` and `sigv4` each carry the non-secret identifiers their credential has: the federation ids for one, `region` and `access_key_id` for the other. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
+`auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, `federated` for one afi minted itself, `sigv4` for an AWS signature over a stored key ([details](#bedrock)), `sigv4_web_identity` for one over a role afi assumed ([details](#bedrock-without-a-key)), and `none` for a source with no credential configured, which is the local llama.cpp case. The three that have identifiers carry them: the federation ids for `federated`, `region` and `access_key_id` for `sigv4`, and `region`, `role_arn`, and `session_name` for `sigv4_web_identity`. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
 
 It names the credential the tokens were **billed** to, not the one that happens to be active when the run ends. Those differ in a piped session that `/source`-switches after spending: `source` and `model` report where the session finished, while `auth` stays with whoever paid. A session that spent on two sources gets `"auth": null`, since no single credential paid for it - as does a run with no source at all. A run that billed nothing reports the credential it tried, which is what a failed run has to show.
 
@@ -394,7 +395,7 @@ A rate limit is `provider_http` rather than a kind of its own, since what a call
 
 **`no_answer` is the one failure where the request worked.** The model streamed, the tokens were billed, and nothing usable came out: it looped in its own reasoning until the rescue gave up, the forced final answered with a tool call or an empty string, or its tool arguments stayed unparseable. afi has already spent its own retries by then - the nudges, the recovery sampling, and the forced final are all upstream of this - so another identical attempt is a fresh roll of the dice rather than a fix. It reported `ok: true` before, and `answer` on one of these holds whatever the run last managed to say, which can be an earlier turn's text: `ok` is the gate for posting an answer, not `answer` being non-empty.
 
-**A federated identity exchange refused by its own rule is `auth`, not `provider_http`,** even though it arrives as an HTTP status - most often a 400 or 401 saying the OIDC claims did not satisfy the [federation rule](#anthropic), typically an unprotected ref. Retrying that spends the schedule to be refused in the same words. A 429 or a 5xx from the same endpoint stays retryable: that one is the endpoint having a bad minute rather than a verdict on the credential.
+**A federated identity exchange refused by its own rule is `auth`, not `provider_http`,** even though it arrives as an HTTP status - most often a 400 or 401 saying the OIDC claims did not satisfy the [federation rule](#anthropic), typically an unprotected ref. An AWS [role assumption](#bedrock-without-a-key) turned down by a trust policy is the same failure and classifies the same way. Retrying either spends the schedule to be refused in the same words. A 429 or a 5xx from the same endpoint stays retryable: that one is the endpoint having a bad minute rather than a verdict on the credential.
 
 `ok: false` always comes with both fields, so a consumer never has to fall back to reading the sentence. A session that failed more than once reports the first kind, since an auth failure repeats on every later turn and the first thing that went wrong is the reason the run did.
 
@@ -509,9 +510,12 @@ Set AWS credentials and a Region and a `bedrock` source registers itself, defaul
 
 | env var                                        | what it does                                                    |
 | ------------------------------------------------ | --------------------------------------------------------------- |
-| `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | the signing credential; both required                           |
-| `AWS_REGION`, else `AWS_DEFAULT_REGION`       | names the endpoint host and scopes the signature; required      |
+| `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | the signing credential; both required unless a role is assumed  |
+| `AWS_REGION`, else `AWS_DEFAULT_REGION`       | names the endpoint host and scopes the signature; always required |
 | `AWS_SESSION_TOKEN`                           | sent and signed when set; absent for a long-lived IAM user      |
+| `AWS_ROLE_ARN`                                | a role to assume instead of holding a key ([details](#bedrock-without-a-key)) |
+| `AWS_ROLE_SESSION_NAME`                       | names that session in CloudTrail, instead of `afi`              |
+| `AWS_WEB_IDENTITY_TOKEN_FILE` / `AWS_WEB_IDENTITY_TOKEN` | where the OIDC token to exchange comes from          |
 | `AFI_BEDROCK_MODEL`                           | the default model, instead of `zai.glm-5`                       |
 | `AFI_BEDROCK_BASE_URL`                        | the endpoint, instead of the one the Region derives             |
 | `AFI_BEDROCK_EXTRA_BODY`                      | request-body keys this source should send                       |
@@ -568,6 +572,66 @@ AFI_SOURCE_AWS_MODEL=openai.gpt-oss-20b-1:0
 Bedrock takes `max_completion_tokens` rather than the older `max_tokens`, and afi writes that spelling for this protocol, so `AFI_MAX_TOKENS` and `AFI_BEDROCK_EXTRA_BODY` both reach it under the name Bedrock documents.
 
 Requests are signed for service `bedrock` against `bedrock-runtime`, scoped to `AWS_REGION`. A base url pointed at a differently-named AWS endpoint will not authenticate, and neither will one naming a Region other than the one being signed for.
+
+## Bedrock without a key
+
+A static key pair in the environment is a long-lived credential in every repository that wants to reach Bedrock. Set `AWS_ROLE_ARN` instead and afi assumes that role from an OIDC identity token, the way it already does for [Anthropic](#anthropic): a workflow granting `id-token: write` stores no AWS key at all.
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+steps:
+  - uses: actions/checkout@v7
+  - run: afi --read-only -f prompt.txt
+    env:
+      AFI_ACTIVE: bedrock
+      AWS_REGION: us-east-1
+      AWS_ROLE_ARN: arn:aws:iam::123456789012:role/afi-ci
+```
+
+The role's trust policy is what decides whether the workflow may assume it. Register `token.actions.githubusercontent.com` as an IAM OIDC identity provider with `sts.amazonaws.com` as its audience, then condition the role on the `sub` claim - `repo:acme/afi:ref:refs/heads/main`, or whatever the job should be limited to - as AWS's own GitHub Actions documentation describes. afi supplies the token; the account decides what it is worth.
+
+**AWS federates differently from Anthropic, and afi hides the difference.** Anthropic's exchange returns a bearer token that goes in a header. AWS's `sts:AssumeRoleWithWebIdentity` returns a temporary access key, secret, and session token, and those sign requests exactly as a long-lived pair would - so every Bedrock request is SigV4 either way, and only where the credential came from differs.
+
+**The identity token comes from `AWS_WEB_IDENTITY_TOKEN`, else `AWS_WEB_IDENTITY_TOKEN_FILE`, else GitHub Actions' OIDC endpoint,** so a workflow mints nothing itself. The second is the variable every AWS SDK reads, which means a job that already ran `aws-actions/configure-aws-credentials`, or a pod given an EKS service-account identity, needs nothing further. The audience afi asks Actions for is `sts.amazonaws.com`, which is what AWS's setup instructions register. An identity provider created with a different audience is reached by minting the token yourself and passing it in one of those two variables, which skips the Actions endpoint entirely.
+
+**Credentials are re-exchanged before they expire.** STS credentials last an hour by default, and as little as fifteen minutes on a role configured that way, so a session outliving one carries on rather than stopping mid-turn with a 403 that reads like a broken trust policy.
+
+**A static key pair wins over a role.** That is the order every AWS SDK's default credential chain resolves in, and the order afi's own `anthropic` source already uses across its three modes. *Complete* pair: half of one is skipped the same way an SDK skips it, so a misspelled `AWS_SECRET_ACCESS_KEY` does not take down a run that had a perfectly good role to assume. Which one a run actually used is in the [summary](#run-summary): `auth.mode` is `sigv4` for a stored key and `sigv4_web_identity` for an assumed role, so a job that meant to federate and found a stray key in the environment can see that it did.
+
+The assumed-role block reports the role and the session name rather than an access key id. The minted key is re-minted as the run outlives it, so naming one would name whichever session happened to be current when the run ended; the role is the stable answer to whose budget paid.
+
+```json
+{"mode": "sigv4_web_identity", "region": "us-east-1",
+ "role_arn": "arn:aws:iam::123456789012:role/afi-ci", "session_name": "afi"}
+```
+
+**A role that cannot be used refuses the run before it starts,** the same as a half-set of keys:
+
+```
+✗ source bedrock assumes an AWS role but no OIDC identity token is available.
+  Set AWS_WEB_IDENTITY_TOKEN or AWS_WEB_IDENTITY_TOKEN_FILE, or run inside
+  GitHub Actions with `permissions: id-token: write`
+✗ source bedrock assumes an AWS role but AWS_ROLE_ARN="afi-ci" is not a role ARN
+```
+
+**A refused exchange says which refusal it was, and quotes AWS.** Each of these is an `auth` failure with a non-zero exit, never retried: no second attempt writes a trust policy.
+
+| STS code                                     | how it reads                                          |
+| ---------------------------------------------- | ------------------------------------------------------- |
+| `AccessDenied`                               | `AWS refused the role assumption: the role's trust policy did not accept the token's claims, or the role does not exist - STS answers both the same way` |
+| `InvalidIdentityToken`                       | `AWS would not read the OIDC identity token: no matching identity provider is registered in the account, or the token names an audience other than sts.amazonaws.com` |
+| `ExpiredTokenException`                      | `the OIDC identity token expired before it was exchanged` |
+| `IDPRejectedClaim`                           | `the identity provider registered on the role rejected the token's claims` |
+| `IDPCommunicationError`                      | `AWS could not reach the identity provider registered on the role` |
+| `ValidationError`                            | `AWS refused the role-assumption request itself (check AWS_ROLE_ARN and AWS_ROLE_SESSION_NAME)` |
+
+`AccessDenied` names two causes because STS gives one answer to both, deliberately: telling them apart would let anyone holding a GitHub token enumerate an account's roles. Anything else is reported by its code, and AWS's own `<Message>` follows the sentence in every case, so nothing afi failed to classify is lost. A body carrying no code did not come from the STS API layer - a proxy or a VPC endpoint refusing on the way - and stays unclassified for the same reason a headerless Bedrock rejection does. A 429 or a 5xx keeps its status and stays retryable.
+
+**The identity token never reaches a reported error.** It is posted in the exchange's form body, so a rejection that echoes the request back carries it, and afi fetched it from the Actions endpoint itself rather than through the toolkit that would have registered it for masking. It is struck as `[redacted OIDC identity token]`, as on the Anthropic path. The AWS session token is struck the same way, since it rides `x-amz-security-token` on every signed request.
+
+The exchange goes to `https://sts.<region>.amazonaws.com/`, derived from `AWS_REGION`; there is no override for it. A VPC-only account with no route to public STS has to mint the token elsewhere and pass it in.
 
 ## Subcommands
 

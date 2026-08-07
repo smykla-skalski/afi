@@ -140,8 +140,7 @@ pub(super) fn rejection(rejected: &Rejection<'_>) -> ClientError {
     if unexplained {
         let _ = write!(
             body,
-            " (if {} cannot call tools, an agent turn has nothing to dispatch \
-             without them - try a model that can)",
+            " (if {} cannot call tools, an agent turn has nothing to dispatch)",
             rejected.model
         );
     }
@@ -152,24 +151,35 @@ pub(super) fn rejection(rejected: &Rejection<'_>) -> ClientError {
 }
 
 /// Which of the three failures a Bedrock run keeps hitting this is, or `None`
-/// when it is something else and the AWS message stands on its own.
+/// when nothing trustworthy says which.
+///
+/// Read from `x-amzn-errortype` and the status, never from the body. AWS echoes
+/// the request into a validation message, so a conversation about throttling
+/// would otherwise classify itself, and a wrong `Some` costs twice: it leads
+/// with the wrong fix and it suppresses the tool hint, which appears only when
+/// nothing else explains the rejection.
+///
+/// A response carrying no header did not come from Bedrock's own API layer - a
+/// proxy or a VPC endpoint refusing on the way - and reading a kind out of its
+/// error page is the same mistake. Those stay unclassified, so the body speaks
+/// for itself rather than sending the operator to the Bedrock console for a
+/// network fault.
 fn classify(rejected: &Rejection<'_>) -> Option<String> {
-    // The header alone when AWS set one. The body is searched only in its
-    // absence, because AWS echoes the request back in a validation message and
-    // a prompt that says "explain AWS throttling" would otherwise outvote the
-    // exception AWS named correctly.
-    let haystack = match rejected
+    // Unambiguous whoever sent it, so it does not need the header.
+    if rejected.status == 429 {
+        return Some(THROTTLED.to_string());
+    }
+    let exception = rejected
         .error_type
         .as_deref()
-        .filter(|kind| !kind.is_empty())
-    {
-        Some(kind) => kind.to_lowercase(),
-        None => rejected.body.to_lowercase(),
-    };
-    let names = |needles: &[&str]| needles.iter().any(|needle| haystack.contains(needle));
+        .filter(|kind| !kind.is_empty())?
+        .to_lowercase();
+    let names = |needles: &[&str]| needles.iter().any(|needle| exception.contains(needle));
 
     // Credentials first: an expired session token is a 403 like a denial is,
-    // and the fix is the opposite one.
+    // and the fix is the opposite one. The restart is named because the
+    // credentials are read once at startup, so re-selecting the source with
+    // `/source` hands back the same expired struct.
     if names(&[
         "expiredtoken",
         "invalidsignature",
@@ -178,12 +188,16 @@ fn classify(rejected: &Rejection<'_>) -> Option<String> {
         "incompletesignature",
         "missingauthenticationtoken",
     ]) {
-        return Some("AWS rejected the credentials (expired or wrong)".to_string());
+        return Some(
+            "AWS rejected the credentials (expired or wrong; afi reads them at \
+             startup, so a refresh needs a restart)"
+                .to_string(),
+        );
     }
-    if rejected.status == 429 || names(&["throttling", "toomanyrequests", "servicequotaexceeded"]) {
-        return Some("AWS throttled the request".to_string());
+    if names(&["throttling", "toomanyrequests", "servicequotaexceeded"]) {
+        return Some(THROTTLED.to_string());
     }
-    if rejected.status == 403 || names(&["accessdenied"]) {
+    if names(&["accessdenied"]) {
         return Some(format!(
             "the account is not entitled to {} in this Region",
             rejected.model
@@ -191,6 +205,8 @@ fn classify(rejected: &Rejection<'_>) -> Option<String> {
     }
     None
 }
+
+const THROTTLED: &str = "AWS throttled the request";
 
 /// What AWS said, unwrapped from whichever envelope it used. Falls back to the
 /// raw body so nothing is ever swallowed.

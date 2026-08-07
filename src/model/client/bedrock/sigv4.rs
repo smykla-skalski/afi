@@ -8,6 +8,13 @@
 //!
 //! Only the header-authorization form is implemented, which is what a POST with
 //! a body needs; presigned query-string URLs have no caller here.
+//!
+//! One documented deviation: `SigV4` encodes path segments twice for services
+//! other than S3, and this encodes once. Every path afi signs
+//! (`/v1/chat/completions`, `/openai/v1/chat/completions`) is unreserved
+//! throughout, where the two readings agree, and no model id ever reaches the
+//! path on this surface. The `curl` vectors cannot catch the difference either,
+//! being plain ASCII, so it is written down rather than left to be rediscovered.
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -119,6 +126,11 @@ fn signed_headers<'a>(
     if let Some(token) = credentials.session_token {
         headers.push(("x-amz-security-token", token));
     }
+    // Sorted rather than trusted to be written in order. `SignedHeaders` is
+    // derived from this list, so a header added out of order would invalidate
+    // every signature at once, and `classify` would report that as a credential
+    // problem. A no-op on the four above, which is the point.
+    headers.sort_unstable();
     headers
 }
 

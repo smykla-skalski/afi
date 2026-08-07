@@ -117,18 +117,72 @@ fn a_body_echoing_the_prompt_does_not_outvote_the_error_type() {
     );
 }
 
-/// With no `x-amzn-errortype` there is nothing but the body to go on, so it is
-/// still searched - a gateway in front of Bedrock may drop the header.
+/// The body is never classified, whatever the header says or does not. AWS
+/// echoes the request into a validation message, so a conversation about
+/// throttling would otherwise classify itself - and the wrong `Some` also
+/// suppresses the tool hint, which only appears when nothing else explains the
+/// rejection.
 #[test]
-fn the_body_is_still_classified_when_aws_named_no_error_type() {
+fn a_body_echoing_the_prompt_is_never_classified() {
+    let echoed = json!({
+        "message": "Malformed input request: #/messages/0/content. Input started: \
+                    'explain AWS throttling and access denied to me'",
+    })
+    .to_string();
     let error = rejection(&Rejection {
         model: "zai.glm-5",
         tools_sent: true,
         status: 400,
         error_type: None,
-        body: r#"{"message":"ThrottlingException: rate exceeded"}"#.to_string(),
+        body: echoed,
     });
-    assert!(error.to_string().contains("throttled"), "got {error}");
+    let message = error.to_string();
+    assert!(!message.contains("throttled"), "got {message}");
+    assert!(!message.contains("not entitled"), "got {message}");
+    assert!(
+        message.contains("cannot call tools"),
+        "an unexplained rejection must keep its hint: {message}"
+    );
+}
+
+/// A 403 with no header did not come from Bedrock's API layer - a proxy or a
+/// VPC endpoint refusing on the way - so leading with an entitlement verdict
+/// would send the operator to the Bedrock console for a network fault.
+#[test]
+fn a_headerless_403_is_not_called_an_entitlement_problem() {
+    let error = rejection(&Rejection {
+        model: "zai.glm-5",
+        tools_sent: true,
+        status: 403,
+        error_type: None,
+        body: "<html>403 Forbidden</html>".to_string(),
+    });
+    assert_eq!(error.to_string(), "HTTP 403: <html>403 Forbidden</html>");
+}
+
+/// A 429 needs no header: it means the same thing whoever sent it.
+#[test]
+fn a_headerless_429_is_still_a_throttle() {
+    let error = rejection(&Rejection {
+        model: "zai.glm-5",
+        tools_sent: false,
+        status: 429,
+        error_type: None,
+        body: String::new(),
+    });
+    assert_eq!(error.to_string(), "HTTP 429: AWS throttled the request");
+}
+
+/// The credentials are read once at startup, so re-selecting the source hands
+/// back the same expired struct. The message has to say so.
+#[test]
+fn the_credential_message_names_the_restart() {
+    let error = reject(
+        403,
+        "ExpiredTokenException",
+        r#"{"message":"The security token included in the request is expired"}"#,
+    );
+    assert!(error.to_string().contains("needs a restart"), "got {error}");
 }
 
 /// AWS returns a bodyless 4xx on some denials.

@@ -495,6 +495,8 @@ Disabled stays the default because it is the one value every current model accep
 
 Three cases lose a block rather than risk the turn: a stream cut before the signature arrived, a `/compress` that sliced away the tool result the reasoning was aimed at, and a request that turns thinking back off. Anthropic validates the whole request, so one unusable block would fail the turn instead of being ignored.
 
+**Reasoning under either spelling now counts toward the cut.** afi reads `reasoning_content` and, when that carries no string, `reasoning`. Only the first was read before, so a source that emits the second - `OpenRouter`, and Bedrock's open-weight models - could never reach `AFI_REASONING_ONLY_CHARS` however long it reasoned. It can now, which is the intended behaviour and a change from previous releases: a turn that reasons past the limit without emitting text is cut and retried. Set `AFI_REASONING_ONLY_CHARS=0` to turn the cut off.
+
 **The reasoning-only cut is off while thinking is on.** `AFI_REASONING_ONLY_CHARS` exists for local models that loop in their scratchpad forever; Anthropic's thinking is server-side and already bounded by `max_tokens`, so cutting one of those turns short would fire on a healthy turn that was about to emit its tool call.
 
 **Other endpoints.** `AFI_SOURCE_<NAME>_PROTOCOL` takes `anthropic`, `anthropic-oauth`, or `aws-bedrock-openai` ([details](#bedrock)). It defaults to `openai`, so existing sources keep working.

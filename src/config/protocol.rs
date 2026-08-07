@@ -136,6 +136,17 @@ impl Protocol {
         matches!(self, Self::AnthropicOAuth | Self::AnthropicFederated(_))
     }
 
+    /// The values [`Self::from_env_value`] understands, so a caller that has to
+    /// refuse anything else - the config file - and the warning below both read
+    /// the same list.
+    pub const NAMES: [&str; 5] = [
+        "openai",
+        "openai-compat",
+        "anthropic",
+        "anthropic-api-key",
+        "anthropic-oauth",
+    ];
+
     /// Parse an `AFI_SOURCE_<NAME>_PROTOCOL` value. Unknown values warn to
     /// stderr and fall back to `OpenAiCompat` so a typo never silently
     /// reroutes a source. Federated auth is not reachable from this knob - it
@@ -149,7 +160,8 @@ impl Protocol {
             other => {
                 eprintln!(
                     "afi: unknown AFI_SOURCE_*_PROTOCOL {other:?}, using openai; \
-                     expected one of openai, anthropic, anthropic-oauth"
+                     expected one of {}",
+                    Self::NAMES.join(", ")
                 );
                 Self::OpenAiCompat
             }

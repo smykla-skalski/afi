@@ -184,6 +184,12 @@ fn report_duplicate(model: &str) {
     );
 }
 
+/// The rate classes [`RawRates`] accepts, for a caller that has to check the
+/// same shape without deserializing it - the config file, which names the key it
+/// refuses. Kept here so one list answers for both.
+pub(crate) const RATE_CLASSES: [&str; 5] =
+    ["input", "output", "cache_read", "cache_write", "reasoning"];
+
 /// The table as written, before the rates are checked. Unknown keys are an
 /// error rather than a silent drop, so a misspelled `cache_reads` is heard
 /// about instead of being priced at nothing.

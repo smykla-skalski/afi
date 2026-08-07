@@ -74,7 +74,7 @@ If `AFI_MODEL` is unset, afi asks the server what it's serving.
 
 ## Configuration
 
-afi reads configuration from environment variables and loads `~/.env` automatically at startup, so you don't need to export variables in every terminal.
+afi reads configuration from environment variables and loads `~/.env` automatically at startup, so you don't need to export variables in every terminal. A [config file](#config-file) can hold the same settings with structure.
 
 ### Single source (simple)
 
@@ -100,6 +100,25 @@ AFI_SOURCE_ZAI_MODEL=glm-x-preview
 ```
 
 See [`sources.example.env`](sources.example.env) for a full annotated example. Switch at runtime with `/source [name]`.
+
+### Config file
+
+The same settings can live in `~/.afi/config.json`, and a project can keep its own `.afi/config.json`, where a source is an object rather than a set of variables whose names encode its name:
+
+```json
+{
+  "active": "zai",
+  "sources": {
+    "local": { "base_url": "http://localhost:8080/v1" },
+    "zai": {
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "model": "glm-x-preview"
+    }
+  }
+}
+```
+
+A flag beats a variable, a variable beats the file, and a key nothing reads refuses the run rather than being ignored. No credential goes in a config file - keys stay in the environment or `~/.env`. A project's file sets what a repository has a say in, like which model to use or a narrower tool policy, and not where requests go or whether you are asked before a tool runs. See [the reference](docs/reference.md#config-file) for the key names and the rest of the rules.
 
 ## Reference
 

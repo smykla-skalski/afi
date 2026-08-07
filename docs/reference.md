@@ -6,6 +6,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 
 | flag                                        | what it does                                                |
 | ------------------------------------------- | ----------------------------------------------------------- |
+| `--config <path>`                           | read settings from this file instead of the default ([details](#config-file)) |
 | `--yolo`                                    | start in never-prompt mode (auto-approve everything)        |
 | `--approval <all\|low\|medium\|high\|yolo>` | start with a non-default approval mode                      |
 | `--source <name>`                           | start on a specific source                                  |
@@ -24,6 +25,10 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--help` / `-h`                             | print usage and exit                                        |
 
 `--help` and `--version` are answered before anything else, so neither depends on an env file loading or a source resolving, and both work as the last word of a command you were already typing. `--help` wins when both are given.
+
+**A long flag takes its value either way**, so `--source zai` and `--source=zai` are the same flag, and `--source=` goes without a value exactly as the spaced form does. A flag that is a statement by itself refuses a value written into one: `--read-only=false` reads as "off" to whoever typed it, and taking it as a bare `--read-only` would turn the posture on instead.
+
+**An argument afi does not have refuses the run**, naming it. Every one of them used to be ignored, so `--red-only` left a run with writes enabled while the command line said otherwise, and a flag that went without its value was dropped just as quietly. afi reads its prompt from `-f`, never from a bare word, so a stray one is refused too.
 
 ## Version and build metadata
 
@@ -71,6 +76,111 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
 | `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
 | `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
+| `AFI_CONFIG`                                 | read settings from this file instead of the defaults ([details](#config-file)) |
+
+Most of these can be written in a [config file](#config-file) instead, where a variable beats the file. No credential can: that section says where they go and which other names are absent.
+
+## Config file
+
+Everything above is a flat string, so anything with structure has to be flattened into one: a source becomes a set of variables whose names encode its name, and the price table and the Anthropic extra body become JSON squeezed onto one line of shell. A misspelled variable is skipped in silence, so the run starts with the setting you thought you had set simply absent.
+
+A config file is a second way in for the same settings. afi reads two, lowest precedence first:
+
+| file                                                             | written by                                    |
+| ---------------------------------------------------------------- | --------------------------------------------- |
+| `$AFI_HOME/config.json`, `~/.afi/config.json` unless you moved it | you, so it sets anything                     |
+| the nearest `.afi/config.json` at or above the working directory  | the repository, so it sets less - see below   |
+
+The project walk stops at the directory holding `.git`, so a file above the repository belongs to whatever is up there rather than to this project. Outside a repository only the working directory is checked.
+
+```json
+{
+  "active": "zai",
+  "effort": "high",
+  "read_only": true,
+  "sources": {
+    "zai": {
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "model": "glm-4.6"
+    },
+    "local": { "base_url": "http://localhost:8080/v1" }
+  },
+  "source_order": ["zai", "local"],
+  "prices": {
+    "glm-4.6": { "input": 0.6, "output": 2.2 }
+  },
+  "anthropic": {
+    "model": "claude-opus-5",
+    "extra_body": { "thinking": { "type": "adaptive", "display": "summarized" } }
+  }
+}
+```
+
+**A flag beats a variable, a variable beats the file, and the file beats the built-in default.** An entry in the env file counts as the variable, since nothing downstream can tell the two apart, so a half-migrated setup keeps working rather than changing the moment a config file appears. A variable exported with no value still counts as set, because for several of these a blank is how you turn the setting off - `AFI_SUMMARY_FILE=` names no file, and filling it from the file would write one you suppressed. A run with no config file behaves exactly as it did before there was one.
+
+**No config file holds a credential.** A config file is a thing people commit, paste into an issue, and copy between machines, and the one kind of value that must not travel that way is the kind that authenticates. `api_key`, `oauth_token`, `together_api_key`, `openrouter_api_key`, and `anthropic.federation.identity_token_file` are refused by name, with the variable to set instead:
+
+```
+  ✗ config.json: sources.zai.api_key a credential does not go in a config file - set AFI_SOURCE_<NAME>_API_KEY, in the environment or in the env file
+```
+
+Credentials stay in the environment or the [env file](#environment-variables), which is where the tooling around secrets already looks. A source with no `api_key` anywhere sends none, which is what a local llama.cpp wants.
+
+**A project file sets what a repository has a say in, and no more.** It is written by whoever wrote the repository rather than by whoever is running afi, so `cd`-ing into a clone must not reconfigure the run. Given the whole keyspace it could: one key redirecting a source's `base_url` is enough for the clone to receive whatever credential your environment holds, and `approval` in the same file switches off the gate that would have asked.
+
+So a project file may say **what to work with** - `active`, `source_order`, a source's `model`, `effort`, `backend`, `max_tokens` and the other sizing and tuning knobs, `summary`, `prices`, a source's `extra_body`, `app_name`, and `app_url`. It may not say where requests go, whose instructions the model follows, or whether you are asked:
+
+| refused in a project file                                        | why                                              |
+| ---------------------------------------------------------------- | ------------------------------------------------ |
+| `sources.*.base_url`, `sources.*.protocol`, `anthropic.base_url`  | where requests go, and what credential goes with them |
+| `anthropic.federation.*`                                          | whose credential is exchanged                   |
+| `approval`                                                        | whether you are asked before a tool runs        |
+| `system_prompt_file`, `system_prompt_mode`                         | whose instructions the model follows            |
+| `summary_file`, `home`, `sessions_dir`                             | where afi writes                                |
+
+Reaching for one of those from a project file refuses the run and says so, naming the key.
+
+**The tool policy is the exception, and it may only tighten.** A repository saying "this project is read-only", or naming fewer tools than you allowed, is a thing it should be able to say - so `read_only`, `allowed_tools`, and `disallowed_tools` are permitted from a project file, and the three combine rather than replace when both files set them. Deny lists add up, allow lists keep only what both agree on, and `read_only` stays on once either asks for it. So a project file can take a tool away and cannot hand one back:
+
+| your file                          | the project's                | the run gets              |
+| ---------------------------------- | ---------------------------- | ------------------------- |
+| `"allowed_tools": ["read_file"]`    | `["read_file", "run_bash"]`  | `read_file`               |
+| `"disallowed_tools": ["run_bash"]`  | `[]`                         | `run_bash` still denied   |
+| `"read_only": true`                 | `false`                      | read-only                 |
+
+Two allow lists with nothing in common are a conflict between the files rather than a value either got wrong, so the run exits 2 saying which tools each one permits. It cannot be answered with an empty list: that reads as "every tool" by the time it reaches the policy, so the run would end up with every tool precisely because two files agreed on none.
+
+`prices` and a source's `extra_body` combine key by key too, the later file winning per key. A project file pricing one model leaves your rates for the others standing, where replacing would have dropped them and taken `cost_usd` quiet with them.
+
+`--config <path>` reads a file with your full trust, whatever directory it sits in, because naming a path is the act of trust - so `afi --config ./.afi/config.json` opts into a repository's file whole.
+
+**Every key is its variable, minus the `AFI_` prefix and lowercased.** `AFI_MAX_TOKENS` is `max_tokens`, `AFI_READ_ONLY` is `read_only`, and so on through the table above and the tuning variables that are not in it. A test reads the source for `AFI_*` names and fails when one has neither a key nor a stated reason, so this stays true as settings are added. Four groups have structure instead:
+
+| key             | what it replaces                                                              |
+| --------------- | ----------------------------------------------------------------------------- |
+| `sources`       | the `AFI_SOURCE_<NAME>_*` variables, one object per source, keyed by its name  |
+| `source_order`  | `AFI_SOURCES`                                                                 |
+| `prices`        | `AFI_PRICES`, as an object rather than as JSON inside a string                 |
+| `anthropic`     | `AFI_ANTHROPIC_*`, with `anthropic.federation` holding the `ANTHROPIC_*` federation ids |
+
+A source takes `base_url`, `model`, `protocol`, `app_name`, `app_url`, and `extra_body` - no `api_key`, which is the one above. `extra_body` is a JSON object here, not a string of one. Object key order is not preserved, so name the order you want in `source_order` rather than relying on the order you wrote the sources in. A source's name has to be lowercase, with digits, `-`, and `_` allowed: the name becomes part of a variable name, which is uppercased on the way in and lowercased on the way back out, so a source written `Zai` would register as `zai` and `"active": "Zai"` would then match nothing.
+
+`home` and `sessions_dir` move what afi writes, not where this file is read from - the file has to be found before it can say anything. Point `AFI_HOME` at the directory to move both together.
+
+**An unknown key or a value of the wrong shape exits 2, naming the file and the key**, before the run is paid for:
+
+```
+  ✗ /home/you/.afi/config.json: unknown key "activ" (did you mean "active"?)
+  ✗ /home/you/.afi/config.json: max_tokens must be a whole number from 0 to 4294967295 (got string)
+```
+
+Every problem is reported, not just the first, and a file with anything wrong in it applies nothing at all - including the keys that were fine. [`afi sessions`](#subcommands) is refused too, since a file that would not read is also a file that cannot say which sessions there are to list; only `--help` and `--version` still answer. Ignoring what it did not recognize would reproduce the silence the file exists to end, which is also why `"max_tokens": "16000"` is refused rather than read: every reader of that variable parses an integer and keeps its default on anything else. A file that is entirely blank sets nothing and is not an error.
+
+Value checks that already existed still apply. `effort`, `summary`, and a source's `protocol` are closed sets and are refused here. An unusable `approval` still warns and prompts for everything, and a price table with a negative rate still warns and disables cost reporting for the run, both as they do from a variable.
+
+**`--config <path>` or `AFI_CONFIG` reads that file instead of both defaults.** A path that holds no file exits 2, where a default location that holds no file is just a run configured by environment and flags. A blank `AFI_CONFIG` names no file and leaves the defaults alone, since that is what an exported-but-unset shell variable looks like. A `--config` given wrongly - no value, a blank one, or another flag - refuses the run and reads no file at all, so the report names the flag rather than a default file you did not point at.
+
+Three more names have no key, for reasons other than being credentials. `AFI_ENV_FILE` is read before the config file is located, so a key naming it could not take effect. The legacy `AFI_BASE_URL`, `AFI_MODEL`, and `AFI_API_KEY` trio is the flat spelling of one source, and `sources` is the structured one. `AFI_BUILD_*` are set by whoever builds afi, not by whoever runs it.
 
 ## System prompt
 
@@ -393,6 +503,10 @@ Three cases lose a block rather than risk the turn: a stream cut before the sign
 | ---------------------- | ----------------------------------------------------------------------------- |
 | `afi`                  | start the REPL                                                                |
 | `afi sessions [query]` | list saved sessions, 10 per page (prints + exits) - optional substring filter |
+
+`afi sessions` reads `AFI_SESSIONS_DIR` and `AFI_HOME` from the same resolved settings a run does, so the env file and the [config file](#config-file) move the listing and the runs that saved into it together.
+
+It takes `--page`/`-p` and `--limit`/`-n`, in either spelling, and everything else is the search query. Everything else that is not a `--` word, that is: `afi sessions --config x` used to look for sessions titled `--config x` and find none, while the flag itself quietly did not apply, so a long flag the listing does not have exits 2 naming it. A single dash stays query text, because a title may well start with one.
 
 ## Commands
 

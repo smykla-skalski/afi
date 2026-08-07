@@ -21,8 +21,10 @@ use serde_json::{Map, Value};
 
 use super::{Runtime, Source};
 
-/// The level names, in order, for the flag's error message.
-const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// The level names, in order, for the flag's error message. Shared with the
+/// config file's schema so one list answers for the flag, the variable, and the
+/// file.
+pub(super) const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// How hard the model is asked to think, and how freely it may spend tokens
 /// getting there.

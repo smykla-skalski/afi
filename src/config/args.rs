@@ -25,6 +25,7 @@ pub struct ParsedArgs {
     pub allowed_tools: Option<String>,
     pub disallowed_tools: Option<String>,
     pub effort: Option<String>,
+    pub config: Option<String>,
     /// Flags that were given wrongly. Only the flags whose silent fallback
     /// loses something the caller asked for record here - see `set_required`.
     ///
@@ -51,7 +52,10 @@ pub fn parse_args(args: &[String]) -> ParsedArgs {
             saw_sessions = true;
         } else if saw_sessions {
             query.push(a.to_string());
-        } else if apply_flag(&mut out, a, args.get(i + 1).map(String::as_str)) {
+        } else if let Some((flag, inline)) = split_inline(a) {
+            // The value is in the token, so the next word is the next argument.
+            apply_flag(&mut out, flag, Some(inline), true);
+        } else if apply_flag(&mut out, a, args.get(i + 1).map(String::as_str), false) {
             i += 1;
         }
         i += 1;
@@ -62,44 +66,50 @@ pub fn parse_args(args: &[String]) -> ParsedArgs {
     out
 }
 
+/// `--flag=value` split into its halves, when it was written that way.
+///
+/// Both spellings reach the same place afterwards, so a flag that refuses a
+/// missing value refuses `--flag=` too. Long flags only: `-f=x` would make the
+/// value `=x`, and nobody writes a short flag that way.
+fn split_inline(arg: &str) -> Option<(&str, &str)> {
+    let (name, value) = arg.strip_prefix("--")?.split_once('=')?;
+    if name.is_empty() {
+        return None;
+    }
+    // Rebuild the flag with its dashes so every message names it as it was typed.
+    let end = 2 + name.len();
+    Some((&arg[..end], value))
+}
+
+/// Flags that are a statement by themselves, so a value written into one is a
+/// mistake rather than a setting.
+const VALUELESS: [&str; 6] = ["--yolo", "--read-only", "--help", "-h", "--version", "-V"];
+
 /// Apply one flag to `out`. Returns `true` when it consumed the following
 /// argument as its value.
-fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
+///
+/// `inline` says the value came from `--flag=value` rather than from the next
+/// word, which is the only thing the two spellings differ by: a flag that takes
+/// no value has to refuse one written into it. `--read-only=false` reads as "off"
+/// to whoever typed it, and taking the token as a bare `--read-only` would turn
+/// the posture on instead.
+fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>, inline: bool) -> bool {
+    if inline && VALUELESS.contains(&flag) {
+        out.flag_errors.push(RunError::new(
+            format!("{flag} takes no value"),
+            ErrorKind::Input,
+        ));
+        return false;
+    }
+    if let Some(consumed) = apply_value_flag(out, flag, value) {
+        return consumed;
+    }
     match flag {
         "--yolo" => out.yolo = true,
         "--read-only" => out.read_only = true,
-        "--approval" => return set_opt(&mut out.approval, value),
-        "--source" => return set_opt(&mut out.source, value),
-        "--session" => return set_opt(&mut out.session, value),
-        "--prompt-file" | "-f" => return set_opt(&mut out.prompt_file, value),
-        "--summary" => return set_opt(&mut out.summary, value),
-        "--summary-file" => {
-            return set_required_value(
-                &mut out.flag_errors,
-                &mut out.summary_file,
-                flag,
-                value,
-                ErrorKind::Input,
-            );
-        }
-        "--system-prompt-file" => {
-            return set_required_value(
-                &mut out.flag_errors,
-                &mut out.system_prompt_file,
-                flag,
-                value,
-                ErrorKind::Input,
-            );
-        }
-        "--system-prompt-mode" => {
-            return set_required_value(
-                &mut out.flag_errors,
-                &mut out.system_prompt_mode,
-                flag,
-                value,
-                ErrorKind::Input,
-            );
-        }
+        // Answered by `cli_meta` long before this, and here only so that writing
+        // one wrongly is not reported as a flag afi has never heard of.
+        "--help" | "-h" | "--version" | "-V" => {}
         "--allowed-tools" | "--disallowed-tools" => return set_tool_flag(out, flag, value),
         "--effort" => return set_effort(out, value),
         "--resume" | "-r" => {
@@ -111,9 +121,61 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
             }
             out.resume = Some(None);
         }
-        _ => {}
+        // A flag afi does not have is a typo, and every one of them used to be
+        // ignored: `--red-only` left a run with writes enabled while the command
+        // line said otherwise. A bare word is the same mistake - afi reads its
+        // prompt from `-f`, never from a positional.
+        other => {
+            out.flag_errors.push(RunError::new(
+                format!("unknown argument {other:?}"),
+                ErrorKind::Input,
+            ));
+        }
     }
     false
+}
+
+/// Fill the field a value-taking flag names, or `None` when `flag` names none.
+///
+/// These arms differ only in which field they write, so they sit together rather
+/// than eight at a time in [`apply_flag`]. Each borrows `flag_errors` and its own
+/// field, which are disjoint - routing the field through a helper would borrow the
+/// whole of `out` twice.
+fn apply_value_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> Option<bool> {
+    Some(match flag {
+        "--approval" => set_required_value(&mut out.flag_errors, &mut out.approval, flag, value),
+        "--source" => set_required_value(&mut out.flag_errors, &mut out.source, flag, value),
+        "--session" => set_required_value(&mut out.flag_errors, &mut out.session, flag, value),
+        "--summary" => set_required_value(&mut out.flag_errors, &mut out.summary, flag, value),
+        "--summary-file" => {
+            set_required_value(&mut out.flag_errors, &mut out.summary_file, flag, value)
+        }
+        "--config" => set_required_value(&mut out.flag_errors, &mut out.config, flag, value),
+        "--system-prompt-file" => set_required_value(
+            &mut out.flag_errors,
+            &mut out.system_prompt_file,
+            flag,
+            value,
+        ),
+        "--system-prompt-mode" => set_required_value(
+            &mut out.flag_errors,
+            &mut out.system_prompt_mode,
+            flag,
+            value,
+        ),
+        "--prompt-file" | "-f" => set_prompt_file(out, flag, value),
+        _ => return None,
+    })
+}
+
+/// Set `--prompt-file`, which alone among the required-value flags takes a bare
+/// `-` - its documented "read the prompt from stdin".
+fn set_prompt_file(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
+    if value == Some("-") {
+        out.prompt_file = Some("-".to_string());
+        return true;
+    }
+    set_required_value(&mut out.flag_errors, &mut out.prompt_file, flag, value)
 }
 
 /// The value of a flag that must have one, recording a refusal when it has none.
@@ -160,26 +222,36 @@ fn set_required(
 /// argument entirely and was already refused; both spellings now fail the same
 /// way.
 ///
-/// Blank stays permitted for the matching variables, where an exported but unset
-/// variable is how a workflow turns the feature off - see `summary_path` and
-/// `super::system_prompt::resolve`. The tool-policy flags keep the looser rule
-/// too, because a blank list there is documented as "every tool" rather than as
-/// a mistake.
+/// `--config` refuses both for the same reason: a run that silently forgets the
+/// file it was pointed at is configured by something other than what the command
+/// line says.
 ///
-/// `kind` is what the summary reports, as it is for `set_required`.
+/// Blank stays permitted for the matching variables, where an exported but unset
+/// variable is how a workflow turns the feature off - see `summary_path`,
+/// `super::file::config_files`, and `super::system_prompt::resolve`. The
+/// tool-policy flags keep the looser rule too, because a blank list there is
+/// documented as "every tool" rather than as a mistake.
+///
+/// Every flag here reports `Input`: each one is the invocation naming something
+/// this run cannot use, and retrying it lands in the same place.
 fn set_required_value(
     flag_errors: &mut Vec<RunError>,
     slot: &mut Option<String>,
     flag: &str,
     value: Option<&str>,
-    kind: ErrorKind,
 ) -> bool {
     let Some(given) = value.filter(|v| !v.starts_with('-')) else {
-        flag_errors.push(RunError::new(format!("{flag} needs a value"), kind));
+        flag_errors.push(RunError::new(
+            format!("{flag} needs a value"),
+            ErrorKind::Input,
+        ));
         return false;
     };
     if given.trim().is_empty() {
-        flag_errors.push(RunError::new(format!("{flag} needs a value"), kind));
+        flag_errors.push(RunError::new(
+            format!("{flag} needs a value"),
+            ErrorKind::Input,
+        ));
         // Consumed all the same: the argument was there, it just said nothing.
         return true;
     }
@@ -212,31 +284,4 @@ fn set_tool_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool 
         out.disallowed_tools = Some(v);
     }
     true
-}
-
-/// Set `slot` to `value` when there is one; returns whether a value was
-/// consumed.
-///
-/// A flag-shaped token is left alone rather than swallowed. Taking it loses two
-/// settings at once: `afi --summary --effort xhigh` set `summary` to
-/// `"--effort"` and then dropped `xhigh` as a stray positional, so the run
-/// produced no summary *and* ran at an effort nobody asked for - the silent
-/// failure `--effort` exists to prevent, reached through a flag that has
-/// nothing to do with it. Not consuming costs a missing value here, which every
-/// flag on this path already tolerates.
-fn set_opt(slot: &mut Option<String>, value: Option<&str>) -> bool {
-    let Some(v) = value.filter(|v| !is_another_flag(v)) else {
-        return false;
-    };
-    *slot = Some(v.to_string());
-    true
-}
-
-/// True for a token that is the next flag rather than this one's value.
-///
-/// A bare `-` is not one: it is `--prompt-file`'s documented "read the prompt
-/// from stdin". `set_required` is stricter and refuses it, because none of the
-/// flags on that path takes a dash for a value.
-fn is_another_flag(value: &str) -> bool {
-    value.starts_with('-') && value != "-"
 }

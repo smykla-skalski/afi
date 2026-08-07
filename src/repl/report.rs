@@ -56,6 +56,7 @@ fn build<'a>(
     // One read of the accumulator, folded for the counts and priced for the
     // cost. Reading it twice would let the two describe different instants.
     let by_model = usage_totals::snapshot_by_model();
+    let billed = usage_totals::billed_sources();
     RunSummary {
         ok: error.is_none(),
         error: error.map(|error| error.message.as_str()),
@@ -76,5 +77,27 @@ fn build<'a>(
         // the requests carried - including a level `EXTRA_BODY` set by hand.
         effort: rt.active_source().and_then(Source::resolved_effort),
         refused_tool_calls: usage_totals::refused_tool_calls(),
+        auth: billing_source(rt, &billed).map(Source::run_auth),
+    }
+}
+
+/// The source whose credential paid for the run, if exactly one did.
+///
+/// Not `active_source`. A piped session can `/source` its way onto a second
+/// endpoint after spending, and the summary would then attest to a credential
+/// that bought nothing - naming a service account for tokens a personal key
+/// paid for. `source` and `model` still report where the session ended up;
+/// `auth` reports who was billed, and the two differ exactly when a switch
+/// happened.
+///
+/// Two sources that both spent are not attributable to one credential, so
+/// neither is reported. Nothing billed at all falls back to the active source:
+/// no spend can be misattributed when there was none, and a failed run still
+/// shows which credential it tried.
+fn billing_source<'a>(rt: &'a Runtime, billed: &[String]) -> Option<&'a Source> {
+    match billed {
+        [] => rt.active_source(),
+        [only] => rt.sources.get(only),
+        _ => None,
     }
 }

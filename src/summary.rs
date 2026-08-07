@@ -31,6 +31,9 @@ use serde_json::{Number, Value, json};
 use crate::atomic;
 use crate::model::usage_totals::{RefusedToolCalls, UsageTotals};
 
+mod auth;
+pub use auth::RunAuth;
+
 /// How to report the run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SummaryFormat {
@@ -263,6 +266,9 @@ pub struct RunSummary<'a> {
     /// refusals". A tool that ran and failed is not counted - that is an error, and
     /// folding the two together would lose the signal.
     pub refused_tool_calls: RefusedToolCalls,
+    /// The credential the run billed. `None` when no single one can be named:
+    /// a run with no source at all, or a session that spent on two of them.
+    pub auth: Option<RunAuth<'a>>,
 }
 
 impl<'a> RunSummary<'a> {
@@ -297,6 +303,9 @@ impl<'a> RunSummary<'a> {
             // run that never started stays distinguishable from one that ran and was
             // refused nothing.
             refused_tool_calls: RefusedToolCalls::default(),
+            // No credential to name, for the reason `source` is none: the run was
+            // refused before it resolved one.
+            auth: None,
         }
     }
 
@@ -319,6 +328,7 @@ impl<'a> RunSummary<'a> {
             "elapsed_secs": round_millis(self.elapsed_secs),
             "tools": self.tools,
             "effort": self.effort,
+            "auth": RunAuth::json(self.auth),
         })
     }
 

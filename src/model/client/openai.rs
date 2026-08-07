@@ -172,7 +172,7 @@ pub(super) async fn complete(
         return Err(ClientError::Http { status, body });
     }
     let text = response.text().await.map_err(|e| transport_error(&e))?;
-    record_completion_usage(model, &text);
+    record_completion_usage(&source.name, model, &text);
     Ok(text)
 }
 
@@ -181,7 +181,7 @@ pub(super) async fn complete(
 /// The streaming path records through `finalize_turn`, which this never reaches,
 /// so without this a `/compress` request is billed but missing from the run
 /// summary. Best effort: a body with no usage object is simply not counted.
-fn record_completion_usage(model: &str, body: &str) {
+fn record_completion_usage(source: &str, model: &str, body: &str) {
     let Ok(parsed) = serde_json::from_str::<CompletionUsage>(body) else {
         return;
     };
@@ -189,7 +189,7 @@ fn record_completion_usage(model: &str, body: &str) {
         return;
     };
     if let Some(normalized) = normalize_usage(Some(&usage), None, 0) {
-        usage_totals::record(model, &normalized);
+        usage_totals::record(source, model, &normalized);
     }
 }
 

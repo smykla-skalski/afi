@@ -1,7 +1,7 @@
 use super::*;
 use crate::model::stream::{Usage, normalize_usage};
 use crate::model::usage_totals::{RefusedToolCalls, UsageTotals};
-use crate::summary::RunSummary;
+use crate::summary::{RunAuth, RunSummary};
 use crate::tools::known_tool_names;
 
 /// Decode one event payload, expecting a chunk.
@@ -385,6 +385,7 @@ fn the_run_summary_reports_those_writes_separately() {
         tools: known_tool_names().to_vec(),
         effort: None,
         refused_tool_calls: RefusedToolCalls::default(),
+        auth: Some(RunAuth::ApiKey),
     }
     .to_json();
     assert_eq!(json["usage"]["cache_write_tokens"], 2279);

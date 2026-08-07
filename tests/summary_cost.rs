@@ -9,16 +9,15 @@
 mod common;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::Write;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::thread::{self, JoinHandle};
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::{NOT_FOUND, read_request_body, sse_response, summary_of};
+use common::{billing_server, summary_of};
 
 /// Usage the fake endpoint reports, chosen so the arithmetic is checkable by
 /// eye: a million tokens of each kind bills at exactly the per-million rate.
@@ -33,43 +32,11 @@ const RATES: &str = r#"{"test-model": {"input": 3, "output": 15, "cache_read": 0
 /// 1M x $3 + 1M x $15 + 2M x $0.30.
 const EXPECTED_USD: f64 = 18.6;
 
-fn sse_body() -> String {
-    let usage = format!(
+/// Usage the fake endpoint reports for every completion.
+fn billed_usage() -> String {
+    format!(
         r#"{{"prompt_tokens":{PROMPT_TOKENS},"completion_tokens":{COMPLETION_TOKENS},"prompt_tokens_details":{{"cached_tokens":{CACHED_TOKENS}}}}}"#
-    );
-    sse_response([
-        r#"{"choices":[{"delta":{"content":"done"}}]}"#.to_string(),
-        format!(r#"{{"choices":[{{"delta":{{}},"finish_reason":"stop"}}],"usage":{usage}}}"#),
-    ])
-}
-
-/// Serve `count` requests, then stop. Anything that is not a chat completion
-/// gets a 404, which is how a probe afi makes on the side is answered.
-fn serve(listener: TcpListener, count: usize) -> JoinHandle<()> {
-    thread::spawn(move || {
-        for _ in 0..count {
-            let Ok((stream, _)) = listener.accept() else {
-                return;
-            };
-            answer(stream);
-        }
-    })
-}
-
-fn answer(mut stream: TcpStream) {
-    let mut reader = BufReader::new(stream.try_clone().expect("the socket must clone"));
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() {
-        return;
-    }
-    read_request_body(&mut reader);
-    let response = if request_line.contains("/chat/completions") {
-        sse_body()
-    } else {
-        NOT_FOUND.to_string()
-    };
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
+    )
 }
 
 fn run_afi(
@@ -107,11 +74,7 @@ fn run_afi(
 
 #[test]
 fn a_priced_run_reports_what_it_cost() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a port must bind");
-    let addr = listener.local_addr().expect("the port must be readable");
-    // Two runs, and a little slack for any probe afi makes alongside them. The
-    // thread is left to the process rather than joined: it is parked in accept.
-    let _server = serve(listener, 8);
+    let addr = billing_server(&billed_usage(), 8);
     let home = TempDir::new().unwrap();
 
     let priced = summary_of(&run_afi(&home, addr, Some(RATES), None));
@@ -139,9 +102,7 @@ fn a_run_that_worked_writes_the_same_object_to_the_summary_file() {
     // leaves the case a workflow actually collects unproven: a run that answered,
     // its answer on the path, and the flag not turning a good run into a bad
     // exit code.
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a port must bind");
-    let addr = listener.local_addr().expect("the port must be readable");
-    let _server = serve(listener, 4);
+    let addr = billing_server(&billed_usage(), 4);
     let home = TempDir::new().unwrap();
     let path = home.path().join("run.json");
 

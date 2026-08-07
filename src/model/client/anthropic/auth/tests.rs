@@ -1,14 +1,19 @@
 use super::*;
+use crate::config::NOOP_KEY;
 use crate::summary::ErrorKind;
 
-fn federated_protocol() -> Protocol {
-    Protocol::AnthropicFederated(Box::new(Federation {
+fn federation() -> Federation {
+    Federation {
         rule_id: "fdrl_1".to_string(),
         organization_id: "org".to_string(),
         service_account_id: "svac".to_string(),
         workspace_id: None,
         identity: None,
-    }))
+    }
+}
+
+fn federated_protocol() -> Protocol {
+    Protocol::AnthropicFederated(Box::new(federation()))
 }
 
 // --- headers ------------------------------------------------------------------

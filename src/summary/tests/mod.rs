@@ -30,6 +30,7 @@ fn summary(ok: bool, answer: &str, usage: UsageTotals) -> RunSummary<'_> {
         tools: known_tool_names().to_vec(),
         effort: None,
         refused_tool_calls: RefusedToolCalls::default(),
+        auth: Some(RunAuth::ApiKey),
     }
 }
 

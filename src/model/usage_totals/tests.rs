@@ -104,14 +104,18 @@ fn saturates_instead_of_overflowing() {
 #[test]
 fn the_process_accumulator_records_and_resets() {
     reset();
-    records_one_model_then_clears();
+    records_one_model();
+    reset_clears_every_ledger();
     keeps_models_apart_while_still_totalling();
+    reset();
+    names_every_source_that_was_billed();
     reset();
 }
 
-fn records_one_model_then_clears() {
+fn records_one_model() {
     assert!(snapshot().is_empty());
     record(
+        "anthropic",
         "claude-sonnet-5",
         &NormalizedUsage {
             input_tokens: 7,
@@ -126,16 +130,24 @@ fn records_one_model_then_clears() {
     assert_eq!((snap.cache_read_tokens, snap.reasoning_tokens), (9, 1));
     assert_eq!(snap.cache_write_tokens, 5);
     assert_eq!(snap.requests, 1);
+    assert_eq!(billed_sources(), vec!["anthropic".to_string()]);
+}
+
+fn reset_clears_every_ledger() {
     reset();
     assert!(snapshot().is_empty(), "reset must clear the accumulator");
+    assert!(
+        billed_sources().is_empty(),
+        "reset must clear the billed sources too, or the next run inherits them"
+    );
 }
 
 /// A piped session can `/source` its way onto a second model, and the two are
 /// not billed alike - so the flat counts stay whole while pricing sees the split.
 fn keeps_models_apart_while_still_totalling() {
-    record("cheap", &usage(100, 20, 0, 0));
-    record("dear", &usage(300, 40, 0, 0));
-    record("cheap", &usage(50, 10, 0, 0));
+    record("local", "cheap", &usage(100, 20, 0, 0));
+    record("local", "dear", &usage(300, 40, 0, 0));
+    record("local", "cheap", &usage(50, 10, 0, 0));
     let by_model: Vec<_> = snapshot_by_model()
         .iter()
         .map(|(model, totals)| (model.clone(), totals.input_tokens, totals.requests))
@@ -148,6 +160,28 @@ fn keeps_models_apart_while_still_totalling() {
     let snap = snapshot();
     assert_eq!((snap.input_tokens, snap.output_tokens), (450, 70));
     assert_eq!(snap.requests, 3);
+    assert_eq!(
+        billed_sources(),
+        vec!["local".to_string()],
+        "three requests on one source is still one credential"
+    );
+}
+
+/// Which credential paid cannot be read off whichever source ended up active, so
+/// the ledger remembers the ones that actually spent, in the order they did.
+fn names_every_source_that_was_billed() {
+    assert!(
+        billed_sources().is_empty(),
+        "a run that billed nothing names no source"
+    );
+    record("local", "cheap", &usage(100, 20, 0, 0));
+    record("anthropic", "claude-sonnet-5", &usage(300, 40, 0, 0));
+    record("local", "cheap", &usage(50, 10, 0, 0));
+    assert_eq!(
+        billed_sources(),
+        vec!["local".to_string(), "anthropic".to_string()],
+        "first-seen order, and a source that spent twice is named once"
+    );
 }
 
 #[test]

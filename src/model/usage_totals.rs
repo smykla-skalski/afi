@@ -21,6 +21,13 @@
 //! token totals because they are the same kind of thing - run-level facts the
 //! summary reports and one `reset` clears - and because the alternative is
 //! threading a counter through the turn loop.
+//!
+//! The same switch is why the ledger also remembers which *sources* spent
+//! anything. Which credential paid cannot be read off whichever source happens
+//! to be active when the run ends: a session that spends on one and then
+//! switches would attest to a credential that bought nothing. Only a request
+//! that reported usage counts, so the list names the sources that were actually
+//! billed - see `billed_sources`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -95,24 +102,54 @@ impl UsageTotals {
     }
 }
 
-/// Per-model totals in first-seen order. A `Vec` rather than a map because a run
-/// touches one or two models and the order is worth keeping.
-fn totals() -> &'static Mutex<Vec<(String, UsageTotals)>> {
-    static TOTALS: OnceLock<Mutex<Vec<(String, UsageTotals)>>> = OnceLock::new();
-    TOTALS.get_or_init(|| Mutex::new(Vec::new()))
+/// What the run has been billed for so far.
+///
+/// Both lists are in first-seen order, and both are `Vec`s rather than maps
+/// because a run touches one or two of each and the order is worth keeping. They
+/// share one mutex because they are one thing - written by the same call and
+/// cleared by the same `reset` - not to give readers an atomic view of the pair:
+/// the summary reads them one after the other, and nothing records once the run
+/// it reports has finished.
+#[derive(Debug, Default)]
+struct Ledger {
+    by_model: Vec<(String, UsageTotals)>,
+    sources: Vec<String>,
 }
 
-/// Record one request's usage against the model that served it. A poisoned lock
-/// recovers rather than panicking: bad accounting must never take down a run.
-pub fn record(model: &str, usage: &NormalizedUsage) {
-    let mut guard = totals().lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((_, totals)) = guard.iter_mut().find(|(name, _)| name == model) {
+fn ledger() -> &'static Mutex<Ledger> {
+    static LEDGER: OnceLock<Mutex<Ledger>> = OnceLock::new();
+    LEDGER.get_or_init(|| Mutex::new(Ledger::default()))
+}
+
+/// Record one request's usage against the model that served it and the source it
+/// was billed to. A poisoned lock recovers rather than panicking: bad accounting
+/// must never take down a run.
+pub fn record(source: &str, model: &str, usage: &NormalizedUsage) {
+    let mut guard = ledger().lock().unwrap_or_else(PoisonError::into_inner);
+    if !guard.sources.iter().any(|name| name == source) {
+        guard.sources.push(source.to_string());
+    }
+    if let Some((_, totals)) = guard.by_model.iter_mut().find(|(name, _)| name == model) {
         totals.add(usage);
         return;
     }
     let mut totals = UsageTotals::default();
     totals.add(usage);
-    guard.push((model.to_string(), totals));
+    guard.by_model.push((model.to_string(), totals));
+}
+
+/// The sources that actually spent tokens, in first-seen order.
+///
+/// Empty when no request reported usage at all, which is a failed or unanswered
+/// run rather than a free one. More than one entry means no single credential
+/// paid for the run, and the summary reports none rather than picking.
+#[must_use]
+pub fn billed_sources() -> Vec<String> {
+    ledger()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .sources
+        .clone()
 }
 
 /// The run's totals so far, every model folded together.
@@ -139,9 +176,10 @@ pub fn total(by_model: &[(String, UsageTotals)]) -> UsageTotals {
 /// The run's totals split by model, for anything that prices them.
 #[must_use]
 pub fn snapshot_by_model() -> Vec<(String, UsageTotals)> {
-    totals()
+    ledger()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
+        .by_model
         .clone()
 }
 
@@ -209,10 +247,9 @@ pub fn refused_tool_calls() -> RefusedToolCalls {
 
 /// Clear the totals. Exists for tests, which share one process.
 pub fn reset() {
-    totals()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
+    let mut guard = ledger().lock().unwrap_or_else(PoisonError::into_inner);
+    guard.by_model.clear();
+    guard.sources.clear();
     REFUSED_BY_POLICY.store(0, Ordering::Relaxed);
     REFUSED_BY_APPROVAL.store(0, Ordering::Relaxed);
 }

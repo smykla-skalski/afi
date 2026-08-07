@@ -11,6 +11,18 @@ use std::path::PathBuf;
 /// outright even when a valid bearer is present.
 pub const NOOP_KEY: &str = "sk-noop";
 
+/// Whether a stored credential is really no credential at all.
+///
+/// `Source::new` substitutes [`NOOP_KEY`] when nothing was configured, so every
+/// reader has to know that a key can be present and still be nothing. One
+/// definition, beside the constant it tests for, keeps the wire path and the run
+/// summary from drifting on what counts as unconfigured - a source afi refuses
+/// to authenticate must not be reported as having a key.
+#[must_use]
+pub fn is_placeholder(credential: &str) -> bool {
+    credential.is_empty() || credential == NOOP_KEY
+}
+
 /// Where the OIDC identity token for a federation exchange comes from.
 ///
 /// Resolved here, from the same merged env map as every other setting, rather

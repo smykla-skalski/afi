@@ -18,7 +18,7 @@ use reqwest::{Client, StatusCode, Url};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use crate::config::{Federation, IdentitySource, NOOP_KEY, Protocol, Source};
+use crate::config::{Federation, IdentitySource, Protocol, Source, is_placeholder};
 use crate::model::client::{BODY_PREVIEW_CHARS, ClientError, transport_error, transport_error_at};
 
 /// Pinned API version. Anthropic requires this on every request.
@@ -63,7 +63,7 @@ pub(super) fn auth_headers(
 
 /// Reject the placeholder and blanks before they reach the wire.
 fn usable(credential: &str, label: &str) -> Result<String, ClientError> {
-    if credential.is_empty() || credential == NOOP_KEY {
+    if is_placeholder(credential) {
         return Err(ClientError::Auth(format!(
             "no Anthropic {label} configured. Set ANTHROPIC_API_KEY, \
              ANTHROPIC_AUTH_TOKEN, or the ANTHROPIC_FEDERATION_* variables."

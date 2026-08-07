@@ -8,10 +8,11 @@
 //! which is the part that stays in the test.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
-use std::net::TcpStream;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Output;
+use std::thread;
 
 use afi::Runtime;
 use serde_json::Value;
@@ -115,4 +116,48 @@ pub fn summary_of(output: &Output) -> Value {
         .find(|line| line.trim_start().starts_with('{'))
         .unwrap_or_else(|| panic!("no JSON summary on stdout: {stdout}"));
     serde_json::from_str(line).expect("the summary must be JSON")
+}
+
+/// Bind a loopback port and answer `count` requests with one completion
+/// reporting `usage`, then stop. Returns the address to point a source at.
+///
+/// Anything that is not a chat completion gets [`NOT_FOUND`], so `count` needs
+/// slack above the completions a test expects - afi probes on the side.
+///
+/// The listener thread is detached rather than returned. It parks in `accept`,
+/// so there is nothing useful to join, and parking does not hold up the test
+/// binary's exit.
+#[allow(dead_code)]
+pub fn billing_server(usage: &str, count: usize) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port must bind");
+    let addr = listener.local_addr().expect("the port must be readable");
+    let body = sse_response([
+        r#"{"choices":[{"delta":{"content":"done"}}]}"#.to_string(),
+        format!(r#"{{"choices":[{{"delta":{{}},"finish_reason":"stop"}}],"usage":{usage}}}"#),
+    ]);
+    thread::spawn(move || {
+        for _ in 0..count {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            answer(stream, &body);
+        }
+    });
+    addr
+}
+
+fn answer(mut stream: TcpStream, body: &str) {
+    let mut reader = BufReader::new(stream.try_clone().expect("the socket must clone"));
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+        return;
+    }
+    read_request_body(&mut reader);
+    let response = if request_line.contains("/chat/completions") {
+        body
+    } else {
+        NOT_FOUND
+    };
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
 }

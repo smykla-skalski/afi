@@ -113,11 +113,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check the apt publishing configuration
+      # Everything a release needs in order to finish, asked for at the only
+      # point where the answer is still free. release-plz publishes the crate in
+      # the same step that creates the tag, and the apt push happens after the
+      # release exists, so a credential missing at either of those points leaves
+      # a half-finished release behind rather than a failed run.
+      - name: Check the publishing configuration
         env:
           CLOUDSMITH_WORKSPACE: ${{ vars.CLOUDSMITH_WORKSPACE }}
           CLOUDSMITH_REPOSITORY: ${{ vars.CLOUDSMITH_REPOSITORY }}
           CLOUDSMITH_SERVICE_SLUG: ${{ vars.CLOUDSMITH_SERVICE_SLUG }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          APP_PRIVATE_KEY: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           missing=()
@@ -126,6 +133,19 @@ jobs:
           [[ -n "${CLOUDSMITH_SERVICE_SLUG}" ]] || missing+=(CLOUDSMITH_SERVICE_SLUG)
           if (( ${#missing[@]} )); then
             echo "::error::missing repository variables: ${missing[*]}. See the apt setup notes in this file's header."
+            exit 1
+          fi
+
+          secrets=()
+          [[ -n "${APP_PRIVATE_KEY}" ]] || secrets+=(SMYKLOT_APP_PRIVATE_KEY)
+          # Only required while release-plz.toml has `publish = true`, so read
+          # that rather than assuming, and let a project that turns publishing
+          # off stop needing the secret without anyone editing this file.
+          if grep -Eq '^publish[[:space:]]*=[[:space:]]*true' release-plz.toml; then
+            [[ -n "${CARGO_REGISTRY_TOKEN}" ]] || secrets+=(CARGO_REGISTRY_TOKEN)
+          fi
+          if (( ${#secrets[@]} )); then
+            echo "::error::missing repository secrets: ${secrets[*]}"
             exit 1
           fi
 
@@ -393,6 +413,9 @@ jobs:
           # GITHUB_TOKEN got as far as the bump commit and then failed with "git
           # release not configured", leaving a version on main with no tag.
           GIT_TOKEN: ${{ steps.token.outputs.token }}
+          # The crate is published from this same step. The plan job has already
+          # refused to get here without the token.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         # --forge is required alongside the token; release-plz infers it only
         # when driven by its own action, and this calls the CLI directly.
         run: mise x -- release-plz release --forge github

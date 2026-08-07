@@ -117,16 +117,25 @@ jobs:
       sha: ${{ steps.commit.outputs.sha || steps.plan.outputs.sha }}
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      # Scoped to contents. Without a `permission-` input the token would carry
-      # every permission the installation holds, which for a release is issues,
-      # pull requests, and workflows it has no use for.
+      # Deliberately unscoped, and zizmor is told so below.
+      #
+      # A `permission-contents: write` input mints a token carrying only that
+      # permission, which reads like the safer choice and is not: the ruleset on
+      # main lists this app as a bypass actor, and a scoped token does not get
+      # the bypass. Measured. v0.4.0 and v0.5.0 were both cut with an unscoped
+      # token; the first release after the input was added died in the plan job
+      # with "protected branch 'main' check failed: Changes must be made through
+      # a pull request", having written nothing, and the ruleset had not been
+      # touched since before either of those releases.
+      #
+      # The exposure is real but small: the token lives for one job, and what it
+      # can reach is bounded by the app's installation, which is this repository.
       - name: Mint an app token
         id: token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 # zizmor: ignore[github-app]
         with:
           client-id: ${{ vars.SMYKLOT_CLIENT_ID || 'Iv23liMyF31aNYay8IXy' }}
           private-key: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
-          permission-contents: write
 
       # Full history and tags: release-plz compares against the last tag to work
       # out what changed, so a shallow clone would make every release look like
@@ -317,16 +326,25 @@ jobs:
       # release-plz pushes the tag, which the branch ruleset would otherwise
       # forbid. This app is a bypass actor on that ruleset. GITHUB_TOKEN is not.
       #
-      # Scoped to contents. Without a `permission-` input the token would carry
-      # every permission the installation holds, which for a release is issues,
-      # pull requests, and workflows it has no use for.
+      # Deliberately unscoped, and zizmor is told so below.
+      #
+      # A `permission-contents: write` input mints a token carrying only that
+      # permission, which reads like the safer choice and is not: the ruleset on
+      # main lists this app as a bypass actor, and a scoped token does not get
+      # the bypass. Measured. v0.4.0 and v0.5.0 were both cut with an unscoped
+      # token; the first release after the input was added died in the plan job
+      # with "protected branch 'main' check failed: Changes must be made through
+      # a pull request", having written nothing, and the ruleset had not been
+      # touched since before either of those releases.
+      #
+      # The exposure is real but small: the token lives for one job, and what it
+      # can reach is bounded by the app's installation, which is this repository.
       - name: Mint an app token
         id: token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0 # zizmor: ignore[github-app]
         with:
           client-id: ${{ vars.SMYKLOT_CLIENT_ID || 'Iv23liMyF31aNYay8IXy' }}
           private-key: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
-          permission-contents: write
 
       # The branch, not the commit. release-plz asks git for the current branch's
       # upstream before it does anything, and a checkout by sha leaves a detached

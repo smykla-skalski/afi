@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::env;
 use std::io::{IsTerminal, stdout};
-use std::path::PathBuf;
 use std::process;
 
 use afi::Runtime;
@@ -16,10 +15,6 @@ use afi::tools::known_tool_names;
 fn main() {
     let args: Vec<String> = env::args().collect();
     let env_map: HashMap<String, String> = env::vars().collect();
-    let env_file = env_map
-        .get("AFI_ENV_FILE")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".env")));
 
     let stdout = stdout();
 
@@ -30,16 +25,28 @@ fn main() {
         return;
     }
 
+    // The env file and the config files, before anything reads a setting. Ahead
+    // of `sessions` because that resolves its directory from `AFI_HOME`, which a
+    // config file can set: reading the files afterwards would list one directory
+    // while runs saved into another.
+    let (env_map, settings) = afi::Runtime::resolve_env(&args, env_map);
+
     // `afi sessions [query]` short-circuits before the REPL - print and exit.
+    // Skipped when a config file would not read: the listing resolves its
+    // directory from the same settings a run does, and a file that set `home` and
+    // then failed would have it quietly list the default one instead. Falling
+    // through reaches the refusal below, which reports itself properly.
     let styled = stdout.is_terminal();
-    if cli_sessions_with_style(&args[1..], &env_map, &mut stdout.lock(), styled) {
+    if settings.refusals().is_empty()
+        && cli_sessions_with_style(&args[1..], &env_map, &mut stdout.lock(), styled)
+    {
         return;
     }
 
-    let mut rt = afi::Runtime::build(&args, env_map, env_file.as_deref());
+    let mut rt = afi::Runtime::build_resolved(&args, env_map, &settings);
 
-    // Anything the run was told to do that it cannot: a tool policy that would
-    // degrade into a wider grant than was asked for (`--disallowed-tools
+    // Anything else the run was told to do that it cannot: a tool policy that
+    // would degrade into a wider grant than was asked for (`--disallowed-tools
     // run_bsah` matches no tool, a bare `--disallowed-tools` sets none at all,
     // and either leaves `run_bash` available while the command line says
     // otherwise), a summary file it could not write, or an effort level nobody

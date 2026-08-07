@@ -26,37 +26,12 @@ use crate::model::usage_totals::{RefusedToolCalls, UsageTotals};
 
 mod auth;
 mod file;
+mod format;
 mod schema;
 pub use auth::RunAuth;
 pub use file::{summary_path, writable, write_file};
+pub use format::SummaryFormat;
 pub use schema::SCHEMA_VERSION;
-
-/// How to report the run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SummaryFormat {
-    /// Print nothing extra. The default, so existing behaviour is unchanged.
-    #[default]
-    None,
-    /// One JSON object on stdout.
-    Json,
-}
-
-impl SummaryFormat {
-    /// Parse `--summary` / `AFI_SUMMARY`. An unrecognized value is `None` rather
-    /// than an error: a typo must not lose a completed run's output.
-    #[must_use]
-    pub fn from_value(raw: Option<&str>) -> Self {
-        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-            Some("json") => Self::Json,
-            _ => Self::None,
-        }
-    }
-
-    #[must_use]
-    pub fn is_json(self) -> bool {
-        self == Self::Json
-    }
-}
 
 /// Why a run failed, as a closed set a caller can branch on.
 ///

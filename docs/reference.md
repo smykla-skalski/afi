@@ -6,6 +6,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 
 | flag                                        | what it does                                                |
 | ------------------------------------------- | ----------------------------------------------------------- |
+| `--config <path>`                           | read settings from this file instead of the default ([details](#config-file)) |
 | `--yolo`                                    | start in never-prompt mode (auto-approve everything)        |
 | `--approval <all\|low\|medium\|high\|yolo>` | start with a non-default approval mode                      |
 | `--source <name>`                           | start on a specific source                                  |
@@ -71,6 +72,73 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
 | `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
 | `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
+| `AFI_CONFIG`                                 | read settings from this file instead of the default ([details](#config-file)) |
+
+Almost all of these can be written in a [config file](#config-file) instead, where a variable beats the file. That section lists the four that cannot.
+
+## Config file
+
+Everything above is a flat string, so anything with structure has to be flattened into one: a source becomes a set of variables whose names encode its name, and the price table and the Anthropic extra body become JSON squeezed onto one line of shell. A misspelled variable is skipped in silence, so the run starts with the setting you thought you had set simply absent.
+
+A config file is a second way in for the same settings. afi reads `$AFI_HOME/config.json`, which is `~/.afi/config.json` unless you moved it.
+
+```json
+{
+  "active": "zai",
+  "effort": "high",
+  "read_only": true,
+  "sources": {
+    "zai": {
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "api_key": "$ZAI_API_KEY",
+      "model": "glm-4.6"
+    },
+    "local": { "base_url": "http://localhost:8080/v1" }
+  },
+  "source_order": ["zai", "local"],
+  "prices": {
+    "glm-4.6": { "input": 0.6, "output": 2.2 }
+  },
+  "anthropic": {
+    "model": "claude-opus-5",
+    "extra_body": { "thinking": { "type": "adaptive", "display": "summarized" } }
+  }
+}
+```
+
+**A flag beats a variable, a variable beats the file, and the file beats the built-in default.** An entry in the env file counts as the variable, since nothing downstream can tell the two apart, so a half-migrated setup keeps working rather than changing the moment a config file appears. A run with no config file behaves exactly as it did before there was one.
+
+**Nothing in the working directory is read.** A per-project `.afi/config.json` was built and taken back out before release, because it made every repository a configuration input: one key redirecting a source's `base_url` was enough for a clone to receive whatever credential `$NAME` resolves out of your environment or env file, and `approval` in the same file switched off the gate that would have asked. Nothing else in afi reads configuration out of the working tree. Point `--config` at a file in a repository to opt into one by hand.
+
+**Every key is its variable, minus the `AFI_` prefix and lowercased.** `AFI_MAX_TOKENS` is `max_tokens`, `AFI_READ_ONLY` is `read_only`, and so on through the table above and the tuning variables that are not in it. Four groups have structure instead:
+
+| key             | what it replaces                                                              |
+| --------------- | ----------------------------------------------------------------------------- |
+| `sources`       | the `AFI_SOURCE_<NAME>_*` variables, one object per source, keyed by its name  |
+| `source_order`  | `AFI_SOURCES`                                                                 |
+| `prices`        | `AFI_PRICES`, as an object rather than as JSON inside a string                 |
+| `anthropic`     | `AFI_ANTHROPIC_*`, with `anthropic.federation` holding the `ANTHROPIC_*` federation ids |
+
+A source takes `base_url`, `api_key`, `model`, `protocol`, `app_name`, `app_url`, and `extra_body`. `extra_body` is a JSON object here, not a string of one. Object key order is not preserved, so name the order you want in `source_order` rather than relying on the order you wrote the sources in. A source's name has to be lowercase, with digits, `-`, and `_` allowed: the name becomes part of a variable name, which is uppercased on the way in and lowercased on the way back out, so a source written `Zai` would register as `zai` and `"active": "Zai"` would then match nothing.
+
+`home` and `sessions_dir` move what afi writes, not where this file is read from - the file has to be found before it can say anything. Point `AFI_HOME` at the directory to move both together.
+
+**A secret can be named rather than held.** `"api_key": "$ZAI_API_KEY"` reads `ZAI_API_KEY` from the environment or from the [env file](#environment-variables), which is what keeps a file safe to commit. It works for a source's `api_key` and for `anthropic.api_key` and `anthropic.oauth_token`, the same indirection those variables already accept.
+
+**An unknown key or a value of the wrong shape exits 2, naming the file and the key**, before the run is paid for:
+
+```
+  ✗ /home/you/.afi/config.json: unknown key "activ" (did you mean "active"?)
+  ✗ /home/you/.afi/config.json: max_tokens must be a whole number from 0 to 4294967295 (got string)
+```
+
+Every problem is reported, not just the first, and a file with anything wrong in it applies nothing at all - including the keys that were fine. [`afi sessions`](#subcommands) is refused too, since a file that would not read is also a file that cannot say which sessions there are to list; only `--help` and `--version` still answer. Ignoring what it did not recognize would reproduce the silence the file exists to end, which is also why `"max_tokens": "16000"` is refused rather than read: every reader of that variable parses an integer and keeps its default on anything else. A file that is entirely blank sets nothing and is not an error.
+
+Value checks that already existed still apply. `effort`, `summary`, and a source's `protocol` are closed sets and are refused here. An unusable `approval` still warns and prompts for everything, and a price table with a negative rate still warns and disables cost reporting for the run, both as they do from a variable.
+
+**`--config <path>` or `AFI_CONFIG` reads that file instead of the default.** A path that holds no file exits 2, where a default location that holds no file is just a run configured by environment and flags. A blank `AFI_CONFIG` names no file and leaves the default alone, since that is what an exported-but-unset shell variable looks like.
+
+Four variables have no key. `AFI_ENV_FILE` is read before the config file is located, so a key naming it could not take effect. The legacy `AFI_BASE_URL`, `AFI_MODEL`, and `AFI_API_KEY` trio is the flat spelling of one source, and `sources` is the structured one. `ANTHROPIC_IDENTITY_TOKEN` is a secret rather than a name for one, so use `anthropic.federation.identity_token_file`. `AFI_BUILD_*` are set by whoever builds afi, not by whoever runs it.
 
 ## System prompt
 
@@ -393,6 +461,8 @@ Three cases lose a block rather than risk the turn: a stream cut before the sign
 | ---------------------- | ----------------------------------------------------------------------------- |
 | `afi`                  | start the REPL                                                                |
 | `afi sessions [query]` | list saved sessions, 10 per page (prints + exits) - optional substring filter |
+
+`afi sessions` reads `AFI_SESSIONS_DIR` and `AFI_HOME` from the same resolved settings a run does, so the env file and the [config file](#config-file) move the listing and the runs that saved into it together.
 
 ## Commands
 

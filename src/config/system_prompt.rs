@@ -37,13 +37,18 @@ pub enum PromptMode {
 }
 
 impl PromptMode {
+    /// The values [`Self::from_value`] accepts, for a caller that has to name
+    /// them in a refusal - the config file. One list, so the file cannot come to
+    /// accept a mode the variable does not.
+    pub(super) const NAMES: [&str; 2] = ["replace", "append"];
+
     /// Parse a mode, or `None` when it is not one afi has.
     ///
     /// Unlike `--summary`, an unrecognized value is not shrugged off. The two
     /// modes send materially different instructions, so a typo silently taking
     /// the default would produce a complete, plausible run that was told
     /// something other than what was asked for.
-    fn from_value(raw: &str) -> Option<Self> {
+    pub(super) fn from_value(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "replace" => Some(Self::Replace),
             "append" => Some(Self::Append),

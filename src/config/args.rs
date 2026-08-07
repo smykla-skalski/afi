@@ -25,6 +25,7 @@ pub struct ParsedArgs {
     pub allowed_tools: Option<String>,
     pub disallowed_tools: Option<String>,
     pub effort: Option<String>,
+    pub config: Option<String>,
     /// Flags that were given wrongly. Only the flags whose silent fallback
     /// loses something the caller asked for record here - see `set_required`.
     ///
@@ -77,6 +78,15 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
             return set_required_value(
                 &mut out.flag_errors,
                 &mut out.summary_file,
+                flag,
+                value,
+                ErrorKind::Input,
+            );
+        }
+        "--config" => {
+            return set_required_value(
+                &mut out.flag_errors,
+                &mut out.config,
                 flag,
                 value,
                 ErrorKind::Input,
@@ -160,9 +170,13 @@ fn set_required(
 /// argument entirely and was already refused; both spellings now fail the same
 /// way.
 ///
+/// `--config` refuses both for the same reason: a run that silently forgets the
+/// file it was pointed at is configured by something other than what the command
+/// line says.
+///
 /// Blank stays permitted for the matching variables, where an exported but unset
-/// variable is how a workflow turns the feature off - see `summary_path` and
-/// `super::system_prompt::resolve`. The tool-policy flags keep the looser rule
+/// variable is how a workflow turns the feature off - see `summary_path`,
+/// `ConfigFiles::discover`, and `super::system_prompt::resolve`. The tool-policy flags keep the looser rule
 /// too, because a blank list there is documented as "every tool" rather than as
 /// a mistake.
 ///

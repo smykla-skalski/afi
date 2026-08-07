@@ -16,6 +16,7 @@ usage:
   afi sessions [query] [flags]   list saved sessions, then exit
 
 flags:
+  --config <path>                read settings from this file instead of the defaults
   --source <name>                start on a specific source
   --approval <mode>              all | low | medium | high | yolo
   --yolo                         never prompt; auto-approve every tool call

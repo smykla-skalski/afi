@@ -2,7 +2,6 @@
 //! `args`.
 
 use std::collections::HashMap;
-use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
 use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
@@ -11,12 +10,13 @@ use crate::pricing::Pricing;
 use crate::summary::{ErrorKind, RunError, SummaryFormat, summary_path, writable};
 use crate::tools::policy::ToolPolicy;
 
+use super::Source;
 use super::args::{ParsedArgs, parse_args};
-use super::builtins::add_builtin_sources;
 use super::effort;
+use super::file::{ConfigFiles, FileSettings};
+use super::sources::discover_sources;
 use super::system_prompt::{self, SystemPrompt};
 use super::tools::apply_tool_flags;
-use super::{Protocol, Source, build_http_headers, parse_extra_body};
 
 // --- Runtime -----------------------------------------------------------------
 
@@ -48,6 +48,10 @@ pub struct Runtime {
     /// Flags given wrongly on the command line, each with its kind. See
     /// `refusals`.
     pub flag_errors: Vec<RunError>,
+    /// What a config file said that afi cannot honour. Kept apart from
+    /// `flag_errors` because it is reported first: a file nobody could read
+    /// explains every setting that then looks unset.
+    pub config_errors: Vec<RunError>,
     /// Token rates for the summary's cost, `None` when unset or unusable.
     pub pricing: Option<Pricing>,
     /// The system prompt every turn of this run sends, resolved once here so a
@@ -61,7 +65,41 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Build a fresh runtime from argv, an env map, and an optional env file.
+    /// The env a run resolves its settings from, and what a config file said.
+    ///
+    /// The process environment first, then the env file, then the config files -
+    /// each filling only the gaps the last left. The order is what lets a config
+    /// file live under an `AFI_HOME` that only the env file names.
+    ///
+    /// Separate from [`Self::build_resolved`] because the map is wanted before
+    /// there is a runtime: `afi sessions` answers without building one, and it
+    /// resolves its directory from `AFI_SESSIONS_DIR` and `AFI_HOME`, which a
+    /// config file can set. Reading the files after that point would list one
+    /// directory while the run saved into another.
+    ///
+    /// This is the one entry point that reads paths nobody passed in, which is
+    /// why [`Self::build`] is not it - a test that wants a hermetic runtime calls
+    /// that one and gets no file it did not name.
+    #[must_use]
+    pub fn resolve_env(
+        args: &[String],
+        mut env: HashMap<String, String>,
+    ) -> (HashMap<String, String>, FileSettings) {
+        let env_file = env
+            .get("AFI_ENV_FILE")
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".env")));
+        if let Some(path) = &env_file {
+            envfile::load_into(&mut env, path);
+        }
+        let files = ConfigFiles::discover(parse_args(args).config.as_deref(), &env);
+        let settings = FileSettings::load(&files);
+        settings.apply_to(&mut env);
+        (env, settings)
+    }
+
+    /// Build a fresh runtime from argv, an env map, and an optional env file,
+    /// reading no config file.
     ///
     /// `env` is the starting env (typically `std::env::vars()`); `env_file`
     /// is loaded and merged in without clobbering existing keys (matches the
@@ -78,7 +116,25 @@ impl Runtime {
         if let Some(path) = env_file {
             envfile::load_into(&mut env, path);
         }
+        Self::build_resolved(args, env, &FileSettings::default())
+    }
 
+    /// Build from an env and the config settings that belong with it, from
+    /// [`Self::resolve_env`] or from [`FileSettings::load`] directly.
+    ///
+    /// `settings` is carried rather than re-read so the refusals it found are
+    /// reported by [`Self::refusals`] whether or not the caller checked them
+    /// itself. Applying it here rather than in the caller is what makes the order
+    /// flag, then variable, then file: the file only fills gaps, and
+    /// `apply_tool_flags` below overwrites. An env `resolve_env` already applied
+    /// is unchanged by the second pass, so both callers are safe.
+    #[must_use]
+    pub fn build_resolved(
+        args: &[String],
+        mut env: HashMap<String, String>,
+        settings: &FileSettings,
+    ) -> Self {
+        settings.apply_to(&mut env);
         let (sources, source_order) = discover_sources(&env);
         let parsed = parse_args(args);
         let approval = resolve_approval(&env, &parsed);
@@ -124,6 +180,13 @@ impl Runtime {
                 env.get("AFI_READ_ONLY").map(String::as_str),
             ),
             flag_errors,
+            // `Input`: the invocation named settings this run cannot use, and
+            // retrying it lands in the same place.
+            config_errors: settings
+                .refusals()
+                .iter()
+                .map(|why| RunError::new(why.clone(), ErrorKind::Input))
+                .collect(),
             // At startup, so a typo is heard about before the run, not after.
             pricing: Pricing::from_env(&env),
             system_prompt: system_prompt::resolve(
@@ -214,11 +277,15 @@ impl Runtime {
     /// Every case is a setting whose quiet fallback leaves a finished run that
     /// differs from the one the command line asked for, with nothing downstream
     /// to notice: a wider tool grant than was asked for, an effort nobody chose,
-    /// or afi's own prompt in place of the instructions the run was handed. The
+    /// afi's own prompt in place of the instructions the run was handed, or a
+    /// config file whose settings are all absent. The
     /// summary-file case is checked here, by touching the path, rather than left
     /// to the write at the end of the run: a caller that asked for a file is not
     /// watching stdout for the JSON, and a run that has already been paid for is
     /// a poor moment to learn the directory does not exist.
+    ///
+    /// The config file comes first. Every other refusal describes one setting,
+    /// where a file that would not read takes all of them with it.
     ///
     /// Each refusal carries the kind the summary reports, decided here where the
     /// reason is known. Deriving it afterwards from which field was non-empty
@@ -226,7 +293,8 @@ impl Runtime {
     /// being classified, which is what `error_kind` exists to end.
     #[must_use]
     pub fn refusals(&self) -> Vec<RunError> {
-        let mut out = self.flag_errors.clone();
+        let mut out = self.config_errors.clone();
+        out.extend(self.flag_errors.iter().cloned());
         out.extend(
             self.tool_policy
                 .unknown_names_message()
@@ -299,94 +367,4 @@ fn resolve_approval(env: &HashMap<String, String>, parsed: &ParsedArgs) -> Appro
         approval.approve_level = None;
     }
     approval
-}
-
-/// Build the sources map + ordered list from `AFI_SOURCE_*` env vars,
-/// falling back to a single `local` source from the legacy `AFI_*` vars.
-#[must_use]
-pub fn discover_sources<S: BuildHasher>(
-    env: &HashMap<String, String, S>,
-) -> (HashMap<String, Source>, Vec<String>) {
-    let mut sources: HashMap<String, Source> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
-
-    for name in source_names(env) {
-        if let Some(src) = configured_source(env, &name) {
-            sources.insert(name.clone(), src);
-            order.push(name);
-        }
-    }
-    if sources.is_empty() {
-        add_legacy_source(env, &mut sources, &mut order);
-    }
-    add_builtin_sources(env, &mut sources, &mut order);
-
-    (sources, order)
-}
-
-/// The configured source names: an explicit `AFI_SOURCES` list, else
-/// auto-discovered from `AFI_SOURCE_*_BASE_URL` keys (sorted).
-fn source_names<S: BuildHasher>(env: &HashMap<String, String, S>) -> Vec<String> {
-    if let Some(raw) = env.get("AFI_SOURCES").filter(|r| !r.trim().is_empty()) {
-        return raw
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-    }
-    let mut found: Vec<String> = env
-        .keys()
-        .filter_map(|k| {
-            k.strip_prefix("AFI_SOURCE_")
-                .and_then(|rest| rest.strip_suffix("_BASE_URL"))
-                .map(str::to_lowercase)
-        })
-        .collect();
-    found.sort();
-    found
-}
-
-/// Build a `Source` for `name` from its `AFI_SOURCE_<NAME>_*` vars, or `None`
-/// when no `BASE_URL` is set.
-fn configured_source<S: BuildHasher>(
-    env: &HashMap<String, String, S>,
-    name: &str,
-) -> Option<Source> {
-    let p = format!("AFI_SOURCE_{}_", name.to_uppercase());
-    let base_url = env.get(&format!("{p}BASE_URL"))?.clone();
-    let api_key =
-        envfile::resolve_api_key(env, env.get(&format!("{p}API_KEY")).map(String::as_str));
-    let model = env.get(&format!("{p}MODEL")).cloned();
-    let extra_body = parse_extra_body(env.get(&format!("{p}EXTRA_BODY")).map(String::as_str));
-    let http_headers = build_http_headers(
-        env.get(&format!("{p}APP_NAME")).map(String::as_str),
-        env.get(&format!("{p}APP_URL")).map(String::as_str),
-    );
-    let protocol = env
-        .get(&format!("{p}PROTOCOL"))
-        .map_or(Protocol::default(), |raw| Protocol::from_env_value(raw));
-    Some(
-        Source::new(name, base_url, api_key, model, extra_body, http_headers)
-            .with_protocol(protocol),
-    )
-}
-
-/// Legacy single-source fallback from the bare `AFI_*` vars.
-fn add_legacy_source<S: BuildHasher>(
-    env: &HashMap<String, String, S>,
-    sources: &mut HashMap<String, Source>,
-    order: &mut Vec<String>,
-) {
-    let src = Source::new(
-        "local",
-        env.get("AFI_BASE_URL")
-            .cloned()
-            .unwrap_or_else(|| "http://localhost:8080/v1".to_string()),
-        envfile::resolve_api_key(env, env.get("AFI_API_KEY").map(String::as_str)),
-        env.get("AFI_MODEL").cloned(),
-        None,
-        None,
-    );
-    sources.insert("local".to_string(), src);
-    order.push("local".to_string());
 }

@@ -228,6 +228,85 @@ impl FileSettings {
         };
         let lowered = lower::read(path, &text, origin);
         self.refusals.extend(lowered.refusals);
-        self.values.extend(lowered.pairs);
+        for (name, value) in lowered.pairs {
+            self.merge(name, value);
+        }
     }
+
+    /// Take one variable from a file, combining it with what an earlier file said
+    /// rather than replacing it where replacing could grant something.
+    ///
+    /// A later file wins, which for most settings is the whole rule: the project
+    /// picks the model, and the operator's choice of model is what it replaces. The
+    /// tool policy cannot work that way. A project file replacing the operator's
+    /// allow list could add a tool to it, and replacing their deny list could drop
+    /// one - either way the working tree would have widened what the run may do,
+    /// which is the one direction it must never move. So the three that bound a
+    /// run combine instead: deny lists add up, allow lists keep only what both
+    /// agree on, and read-only stays on once anything asks for it.
+    fn merge(&mut self, name: String, value: String) {
+        let combined = match self.values.get(&name) {
+            Some(first) if name == DISALLOWED => Some(union(first, &value)),
+            Some(first) if name == ALLOWED => Some(intersection(first, &value)),
+            Some(first) if name == READ_ONLY => Some(either_on(first, &value)),
+            _ => None,
+        };
+        self.values.insert(name, combined.unwrap_or(value));
+    }
+}
+
+/// The three variables that bound what a run may do, and so combine rather than
+/// replace when two files set them. See `FileSettings::merge`.
+const ALLOWED: &str = "AFI_ALLOWED_TOOLS";
+const DISALLOWED: &str = "AFI_DISALLOWED_TOOLS";
+const READ_ONLY: &str = "AFI_READ_ONLY";
+
+/// Every name in either list. A longer deny list denies more.
+fn union(first: &str, second: &str) -> String {
+    let mut names: Vec<&str> = names(first).chain(names(second)).collect();
+    names.sort_unstable();
+    names.dedup();
+    names.join(",")
+}
+
+/// Only the names in both lists, so neither file can add to what the other
+/// permitted.
+///
+/// An empty list on either side would read as "every tool" downstream, so it
+/// cannot be the answer here: a list that ends up with nothing in common keeps one
+/// name that neither side permitted, which the tool registry then reports as
+/// unknown and the run refuses over. Saying no tools at all is what `read_only`
+/// and a deny list are for.
+fn intersection(first: &str, second: &str) -> String {
+    let mut names: Vec<&str> = names(first)
+        .filter(|name| names(second).any(|other| other.eq_ignore_ascii_case(name)))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return "none-of-the-above".to_string();
+    }
+    names.join(",")
+}
+
+/// On when either file asks for it, since the posture only ever tightens.
+fn either_on(first: &str, second: &str) -> String {
+    let on = |raw: &str| {
+        !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    };
+    if on(first) || on(second) {
+        "1".to_string()
+    } else {
+        "0".to_string()
+    }
+}
+
+/// The names in one list value, however it was separated.
+fn names(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split([',', ' ', '\t', '\n'])
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
 }

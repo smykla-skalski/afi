@@ -60,9 +60,6 @@ fn a_project_file_may_not_say_where_requests_go() {
 fn a_project_file_may_not_switch_off_the_gate_or_widen_the_grant() {
     for body in [
         r#"{"approval": "yolo"}"#,
-        r#"{"read_only": false}"#,
-        r#"{"allowed_tools": ["run_bash"]}"#,
-        r#"{"disallowed_tools": []}"#,
         r#"{"system_prompt_file": "repo/prompt.md"}"#,
         r#"{"summary_file": "/etc/afi.json"}"#,
         r#"{"home": "/tmp/elsewhere"}"#,
@@ -77,11 +74,7 @@ fn a_project_file_may_not_switch_off_the_gate_or_widen_the_grant() {
         );
     }
     // The operator's own file sets every one of them.
-    for body in [
-        r#"{"approval": "yolo"}"#,
-        r#"{"read_only": false}"#,
-        r#"{"home": "/tmp/elsewhere"}"#,
-    ] {
+    for body in [r#"{"approval": "yolo"}"#, r#"{"home": "/tmp/elsewhere"}"#] {
         let read = lower::read(Path::new("config.json"), body, Origin::Operator);
         assert_eq!(read.refusals, Vec::<String>::new(), "{body}");
     }
@@ -132,5 +125,21 @@ fn a_refused_credential_is_never_written_anywhere() {
         !read.refusals.iter().any(|why| why.contains("SECRET")),
         "the refusal quoted the credential: {:?}",
         read.refusals
+    );
+}
+
+#[test]
+fn a_project_file_may_tighten_the_tool_policy_and_not_widen_it() {
+    // A repository saying "this project is read-only", or naming fewer tools than
+    // the operator allowed, is a thing it should be able to say. The opposite is
+    // not, which is why these three combine rather than replace.
+    assert_eq!(project(r#"{"read_only": true}"#), Vec::<String>::new());
+    assert_eq!(
+        project(r#"{"allowed_tools": ["read_file"]}"#),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        project(r#"{"disallowed_tools": ["run_bash"]}"#),
+        Vec::<String>::new()
     );
 }

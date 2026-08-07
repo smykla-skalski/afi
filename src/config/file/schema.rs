@@ -73,6 +73,12 @@ const fn row(key: &'static str, env: &'static str, convert: Convert) -> Setting 
 
 /// A key only the operator's own file may set, or one they named with
 /// `--config`. See [`Scope`].
+///
+/// The tool policy is deliberately not among them. A repository saying "this
+/// project is read-only", or naming fewer tools than the operator allowed, is a
+/// thing it should be able to say - and it cannot say the opposite, because those
+/// three combine rather than replace when two files set them. See
+/// `FileSettings::merge`.
 const fn mine(key: &'static str, env: &'static str, convert: Convert) -> Setting {
     Setting {
         key,
@@ -135,9 +141,9 @@ pub(super) const TOP: &[Setting] = &[
     mine("home", "AFI_HOME", text),
     mine("sessions_dir", "AFI_SESSIONS_DIR", text),
     // What the run may reach.
-    mine("read_only", "AFI_READ_ONLY", flag),
-    mine("allowed_tools", "AFI_ALLOWED_TOOLS", allow_list),
-    mine("disallowed_tools", "AFI_DISALLOWED_TOOLS", list),
+    row("read_only", "AFI_READ_ONLY", flag),
+    row("allowed_tools", "AFI_ALLOWED_TOOLS", allow_list),
+    row("disallowed_tools", "AFI_DISALLOWED_TOOLS", list),
     // What it is told to do, before the conversation starts.
     mine("system_prompt_file", "AFI_SYSTEM_PROMPT_FILE", text),
     mine("system_prompt_mode", "AFI_SYSTEM_PROMPT_MODE", prompt_mode),

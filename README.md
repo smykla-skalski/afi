@@ -118,7 +118,7 @@ The same settings can live in `~/.afi/config.json`, and a project can keep its o
 }
 ```
 
-A flag beats a variable, a variable beats the file, and a key nothing reads refuses the run rather than being ignored. No credential goes in a config file - keys stay in the environment or `~/.env`. A project's file sets what a repository has a say in, like which model to use, and not where requests go or whether you are asked before a tool runs. See [the reference](docs/reference.md#config-file) for the key names and the rest of the rules.
+A flag beats a variable, a variable beats the file, and a key nothing reads refuses the run rather than being ignored. No credential goes in a config file - keys stay in the environment or `~/.env`. A project's file sets what a repository has a say in, like which model to use or a narrower tool policy, and not where requests go or whether you are asked before a tool runs. See [the reference](docs/reference.md#config-file) for the key names and the rest of the rules.
 
 ## Reference
 

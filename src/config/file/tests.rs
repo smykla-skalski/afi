@@ -75,6 +75,86 @@ fn a_variable_set_to_nothing_still_beats_the_file() {
 }
 
 #[test]
+fn a_project_file_cannot_widen_what_the_operator_allowed() {
+    // Replacing would let the working tree add a tool the operator did not
+    // permit, or drop one they denied. These combine instead.
+    let dir = TempDir::new().unwrap();
+    let user = write(
+        dir.path(),
+        "user/config.json",
+        r#"{"allowed_tools": ["read_file", "list_dir"],
+             "disallowed_tools": ["run_bash"],
+             "read_only": true}"#,
+    );
+    let project = write(
+        dir.path(),
+        "repo/config.json",
+        r#"{"allowed_tools": ["read_file", "run_bash"],
+             "disallowed_tools": [],
+             "read_only": false}"#,
+    );
+    let out = applied(
+        &[(user, Origin::Operator), (project, Origin::WorkingTree)],
+        &[],
+    );
+    // Only what both agree on, so `run_bash` is not permitted by asking twice.
+    assert_eq!(out.get("AFI_ALLOWED_TOOLS").unwrap(), "read_file");
+    // The denial stands even though the project file named none.
+    assert_eq!(out.get("AFI_DISALLOWED_TOOLS").unwrap(), "run_bash");
+    // And the posture does not come back off.
+    assert_eq!(out.get("AFI_READ_ONLY").unwrap(), "1");
+}
+
+#[test]
+fn a_project_file_may_tighten_what_the_operator_allowed() {
+    let dir = TempDir::new().unwrap();
+    let user = write(
+        dir.path(),
+        "user/config.json",
+        r#"{"allowed_tools": ["read_file", "list_dir", "run_bash"]}"#,
+    );
+    let project = write(
+        dir.path(),
+        "repo/config.json",
+        r#"{"disallowed_tools": ["run_bash"], "read_only": true}"#,
+    );
+    let out = applied(
+        &[(user, Origin::Operator), (project, Origin::WorkingTree)],
+        &[],
+    );
+    assert_eq!(out.get("AFI_DISALLOWED_TOOLS").unwrap(), "run_bash");
+    assert_eq!(out.get("AFI_READ_ONLY").unwrap(), "1");
+}
+
+#[test]
+fn two_allow_lists_with_nothing_in_common_permit_nothing() {
+    // An empty list reads as "every tool" downstream, so it cannot be the answer
+    // to "these two agreed on nothing" - the run refuses over the name instead.
+    let dir = TempDir::new().unwrap();
+    let user = write(
+        dir.path(),
+        "user/config.json",
+        r#"{"allowed_tools": ["read_file"]}"#,
+    );
+    let project = write(
+        dir.path(),
+        "repo/config.json",
+        r#"{"allowed_tools": ["run_bash"]}"#,
+    );
+    let out = applied(
+        &[(user, Origin::Operator), (project, Origin::WorkingTree)],
+        &[],
+    );
+    let allowed = out.get("AFI_ALLOWED_TOOLS").unwrap();
+    assert!(
+        !allowed.trim().is_empty(),
+        "an empty list would grant every tool"
+    );
+    assert!(!allowed.contains("read_file"), "{allowed}");
+    assert!(!allowed.contains("run_bash"), "{allowed}");
+}
+
+#[test]
 fn a_file_with_anything_wrong_in_it_applies_nothing() {
     let dir = TempDir::new().unwrap();
     let path = write(

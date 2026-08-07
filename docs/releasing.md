@@ -295,13 +295,20 @@ ordering above is what makes them possible: a published immutable release can
 never gain another asset, so a pipeline that uploads after publishing cannot use
 them.
 
-Turn it on once this pipeline is on `main`:
+Already on, as of 2026-08-07. It is a bare toggle with no request body -- passing
+`-f enabled=true` is rejected with a 422 and the unhelpful `"enabled" is not a
+permitted key`:
 
 ```
-gh api -X PUT repos/smykla-skalski/afi/immutable-releases -f enabled=true
+gh api -X PUT repos/smykla-skalski/afi/immutable-releases     # enable
+gh api repos/smykla-skalski/afi/immutable-releases            # check
+gh api -X DELETE repos/smykla-skalski/afi/immutable-releases  # disable
 ```
 
-Existing releases stay mutable. Every new one is locked.
+Existing releases stay mutable. Every new one is locked, which means a release
+that turns out to need another asset cannot get one: cut the next version
+instead. A draft is still mutable, so the pipeline's upload-then-publish
+ordering is unaffected.
 
 ## Verifying a release
 

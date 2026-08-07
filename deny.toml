@@ -1,0 +1,80 @@
+# Dependency policy, enforced by `mise run check:deps`.
+#
+# Four questions, all of which used to go unasked: does the tree contain a known
+# advisory, does every crate carry a license afi may ship, are there duplicate
+# versions of the same crate, and does anything come from a registry other than
+# crates.io.
+
+[graph]
+# Scoped to the triples afi actually publishes, not to every target Cargo knows
+# about. That is the honest question -- the policy should describe what ships --
+# and it is also what keeps `r-efi` out of the answer. r-efi is LGPL-2.1-or-later
+# and reachable only through getrandom's UEFI backend, so an unscoped check
+# reports a copyleft dependency that is never compiled, never linked, and never
+# distributed. Add a triple here when the release matrix gains one.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]
+# Build and proc-macro dependencies are compiled on the release runner even when
+# nothing of them reaches the binary, so they stay in scope for advisories.
+all-features = true
+
+[advisories]
+# RustSec, refreshed on every run. `version = 2` makes unmaintained, unsound, and
+# notice advisories errors by default rather than warnings.
+version = 2
+# A yanked dependency is a release hazard on its own: the version resolves today
+# from the local cache and stops resolving for anyone building fresh.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses only, plus the two special cases noted below. Anything not
+# on this list fails the gate rather than being waved through, so a new
+# dependency that changes afi's own distribution terms has to be looked at.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  # webpki-root-certs. Mozilla's CA bundle, redistributable as data.
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  # option-ext, reached through dirs -> dirs-sys, and the only copyleft license
+  # in the shipped graph. MPL-2.0 is per-file: it obliges anyone distributing a
+  # modified version of those files to publish them, and afi modifies nothing.
+  # Linking it into a statically-linked MIT binary is what the license is written
+  # to permit, so this is an allow rather than an exception.
+  "MPL-2.0",
+  # The ICU crates that url and idna pull in.
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicates are a warning, not an error. They arrive through transitive
+# dependencies afi does not control, and the cost is binary size rather than
+# correctness, so failing a release over one would be a gate nobody could clear.
+multiple-versions = "warn"
+wildcards = "deny"
+# Nothing here is banned outright yet. Add a crate with a `reason` when there is
+# a specific one to keep out, not pre-emptively.
+deny = []
+
+[sources]
+# Every crate has to come from crates.io. A git dependency or a private registry
+# would be a supply-chain change that no review currently forces anyone to see.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

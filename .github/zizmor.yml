@@ -1,0 +1,32 @@
+# zizmor configuration, read by `mise run check:workflows`.
+#
+# Three of the workflows in this repository are not written here. smyklot-poll,
+# smyklot-pr-commands, and sync-trigger are pushed in by the smykla-skalski/.github
+# org sync and carry a "do not edit manually - changes will be overwritten" header,
+# so a finding against them cannot be fixed in this repository: the next sync would
+# undo it. They are excluded rather than left failing, because a gate that can only
+# be made green somewhere else is a gate everyone learns to skip.
+#
+# What is excluded is the *finding*, not the file. Anything zizmor learns to detect
+# in future still applies to them, and the exclusions below name the two audits that
+# currently fire, so a new class of problem in a synced workflow still fails this
+# check and gets reported upstream.
+#
+# ci.yml, release.yml, and apt-credentials-check.yml are this repository's own and
+# are held to the full ruleset.
+
+rules:
+  github-app:
+    ignore:
+      # Each mints an installation token with no `permission-` inputs, so the
+      # token carries every permission the app installation holds. Fixing it
+      # means adding scopes in the org sync template.
+      - smyklot-poll.yml
+      - smyklot-pr-commands.yml
+      - sync-trigger.yml
+  artipacked:
+    ignore:
+      # Checkout without `persist-credentials: false`.
+      - smyklot-poll.yml
+      - smyklot-pr-commands.yml
+      - sync-trigger.yml

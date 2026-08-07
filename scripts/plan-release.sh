@@ -39,6 +39,12 @@ released() {
     git -C "$repo_root" rev-parse -q --verify "refs/tags/v$1" >/dev/null 2>&1
 }
 
+# Whether CHANGELOG.md carries a section for a version. Used to catch
+# `set-version` moving a heading instead of adding one - see below.
+changelog_has() {
+    grep -q "^## \[$1\]" "$repo_root/CHANGELOG.md"
+}
+
 before=$("$repo_root/scripts/cargo-version.sh")
 
 if [ -n "$requested" ]; then
@@ -55,9 +61,45 @@ if [ -n "$requested" ]; then
         exit 1
     fi
     if [ "$requested" != "$before" ]; then
+        had_previous=false
+        if changelog_has "$before"; then
+            had_previous=true
+        fi
+
         # release-plz reports what it did on stdout, and this script's stdout is
         # the version alone, so its chatter goes to stderr with everything else.
         release-plz set-version "$requested" >&2
+
+        # `set-version` does not add a changelog section. It renames the topmost
+        # one. That is right when `release-plz update` has already written a
+        # section for this release and the number is only being forced to
+        # something else, and wrong when it has not: the section it renames is
+        # then the *previous release's*, which ships under the new number and
+        # vanishes from the file.
+        #
+        # Measured on a tree at 0.5.0 with no pending bump: `set-version 0.6.0`
+        # rewrote `## [0.5.0]` to `## [0.6.0]`, so the release would have carried
+        # 0.5.0's notes and 0.5.0 would have been gone from the changelog. Both
+        # silently.
+        if ! changelog_has "$requested"; then
+            printf 'set-version left no "## [%s]" section in CHANGELOG.md\n' \
+                "$requested" >&2
+            exit 1
+        fi
+        if [ "$had_previous" = true ] && ! changelog_has "$before"; then
+            printf 'set-version renamed the %s changelog section to %s rather than adding one.\n' \
+                "$before" "$requested" >&2
+            printf 'Publishing that would give %s the release notes of %s and drop %s from\n' \
+                "$requested" "$before" "$before" >&2
+            printf 'CHANGELOG.md. Land the version and its changelog section on the default\n' >&2
+            printf 'branch instead; a release publishes the manifest as it stands.\n' >&2
+            # set-version already wrote before this check could run. A release
+            # runner is thrown away, so this only matters to someone running the
+            # script by hand -- say so rather than guess which of their changes
+            # to discard.
+            printf 'CHANGELOG.md, Cargo.toml and Cargo.lock have been modified in place.\n' >&2
+            exit 1
+        fi
     fi
     printf '%s\n' "$requested"
     exit 0

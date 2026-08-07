@@ -3,6 +3,19 @@
 All notable changes to `afi`. Generated from the commit history; maintained by
 release-plz from the conventional-commit messages on `main`.
 
+## [0.5.0] - 2026-08-07
+
+### Added
+
+- **summary** Report the credential a run billed ([#53](https://github.com/smykla-skalski/afi/pull/53))
+- **summary** Report refused tool calls ([#56](https://github.com/smykla-skalski/afi/pull/56))
+- **summary** Classify why a run failed ([#54](https://github.com/smykla-skalski/afi/pull/54))
+- **config** Set reasoning effort with one flag ([#55](https://github.com/smykla-skalski/afi/pull/55))
+
+### Dependencies
+
+- **deps** Lock file maintenance ([#57](https://github.com/smykla-skalski/afi/pull/57))
+
 ## [0.4.0] - 2026-08-06
 
 ### Added

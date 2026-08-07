@@ -156,20 +156,40 @@ gh release edit v0.5.0 --draft=true
 
 ## A tag with no release
 
-The state v0.3.0 was left in. The current pipeline cannot produce it, but a tag
-pushed by hand can.
+The state v0.3.0 was left in. The current pipeline cannot produce it, because it
+builds everything before it tags, but a tag pushed by hand can, and the tags that
+predate this pipeline already have.
 
-Ask for the version explicitly. `plan-release.sh` refuses a version that is
-already tagged, so first check what actually exists:
+`release.yml` cannot fix it: its resume path keys off the manifest version, and
+by the time anyone notices, `main` has moved on.
+[`backfill-release.yml`](../.github/workflows/backfill-release.yml) is the
+recovery.
 
 ```
-gh release view v0.3.0            # "release not found" means tag only
-git ls-remote --tags upstream     # the tag is there
+gh workflow run backfill-release.yml -f tag=v0.3.0
 ```
 
-Build and attach by hand from the tag, or delete the tag if nobody has fetched
-it. There is no automatic recovery, because the workflow's resume path keys off
-the manifest version, and by then the manifest has moved on.
+It checks out the tag, builds and smoke-tests every target from it, attests the
+results, and publishes a release. Guards:
+
+- It refuses a tag that already has a *published* release, so it can only fill a
+  gap and never overwrite bytes someone has already downloaded.
+- It refuses a tag whose manifest disagrees with the tag name.
+- It builds from exactly that commit and does not move the tag, bump anything, or
+  touch the changelog. The release notes are that version's existing changelog
+  section, plus a note saying it was backfilled.
+- The result is not marked latest, and nothing is pushed to apt: a backfilled
+  version is by definition older than what apt already serves.
+
+The packaging comes from the tag's own tree, so the `.deb` is the one that
+version would have produced. Only the target list and the smoke test are taken
+from the default branch, because a tag old enough to need this predates them.
+
+Do a dry run first if the tag is old enough that you are unsure it still builds:
+
+```
+gh workflow run backfill-release.yml -f tag=v0.3.0 -f dry_run=true
+```
 
 ## Setup
 

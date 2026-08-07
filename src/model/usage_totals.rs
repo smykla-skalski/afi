@@ -105,9 +105,11 @@ impl UsageTotals {
 /// What the run has been billed for so far.
 ///
 /// Both lists are in first-seen order, and both are `Vec`s rather than maps
-/// because a run touches one or two of each and the order is worth keeping. One
-/// mutex covers both so a caller reading them cannot see a request counted
-/// against a model but not yet against its source.
+/// because a run touches one or two of each and the order is worth keeping. They
+/// share one mutex because they are one thing - written by the same call and
+/// cleared by the same `reset` - not to give readers an atomic view of the pair:
+/// the summary reads them one after the other, and nothing records once the run
+/// it reports has finished.
 #[derive(Debug, Default)]
 struct Ledger {
     by_model: Vec<(String, UsageTotals)>,

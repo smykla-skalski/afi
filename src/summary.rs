@@ -26,7 +26,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Map, Number, Value, json};
+use serde_json::{Number, Value, json};
 
 use crate::atomic;
 use crate::model::usage_totals::{RefusedToolCalls, UsageTotals};
@@ -234,28 +234,41 @@ impl RunError {
 /// Identifiers only. The minted access token and the OIDC assertion must never
 /// land here: a summary gets uploaded as a build artifact, and artifacts carry
 /// no masking, so a value redacted in a log is plain text there.
+///
+/// One enum rather than a mode string beside four optional ids, for the reason
+/// [`crate::config::Protocol`] gives for folding auth into itself: the two are
+/// not independent. Only federation has identifiers, so only that variant
+/// carries them, and a static key with an organization id is a state nothing has
+/// to test for because nothing can build it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RunAuth<'a> {
-    /// `api_key`, `oauth`, `federated`, or `none`.
-    pub mode: &'static str,
-    pub organization_id: Option<&'a str>,
-    pub service_account_id: Option<&'a str>,
-    /// Only present when the federation rule spans workspaces.
-    pub workspace_id: Option<&'a str>,
-    pub federation_rule_id: Option<&'a str>,
+pub enum RunAuth<'a> {
+    /// A static key out of the environment, whichever header carries it.
+    ApiKey,
+    /// A bearer token minted elsewhere and handed to afi.
+    OAuth,
+    /// No credential was configured at all - a local server that wants none.
+    /// Distinct from `auth: null`, which is afi declining to attribute the run.
+    NoCredential,
+    /// A bearer token afi minted itself, through the workload-identity
+    /// federation exchange. The only mode with identifiers of its own.
+    Federated {
+        organization_id: &'a str,
+        service_account_id: &'a str,
+        /// Only present when the federation rule spans workspaces.
+        workspace_id: Option<&'a str>,
+        federation_rule_id: &'a str,
+    },
 }
 
 impl RunAuth<'_> {
-    /// A mode with nothing behind it to name. A static key identifies no
-    /// organization, service account, or workspace of its own.
+    /// The `mode` the summary reports, naming how the credential was obtained.
     #[must_use]
-    pub fn mode_only(mode: &'static str) -> Self {
-        Self {
-            mode,
-            organization_id: None,
-            service_account_id: None,
-            workspace_id: None,
-            federation_rule_id: None,
+    pub fn mode(&self) -> &'static str {
+        match self {
+            Self::ApiKey => "api_key",
+            Self::OAuth => "oauth",
+            Self::NoCredential => "none",
+            Self::Federated { .. } => "federated",
         }
     }
 }
@@ -368,28 +381,33 @@ impl<'a> RunSummary<'a> {
         })
     }
 
-    /// The `auth` block: the mode, then whichever identifiers that mode has.
+    /// The `auth` block: the mode, plus the identifiers federation carries.
     ///
-    /// An identifier the credential does not carry is left out rather than
-    /// emitted blank, so `auth.workspace_id` is either a workspace or nothing -
-    /// an empty string would read as one afi failed to capture.
+    /// Only that mode has any, so only that arm adds them. An id the credential
+    /// does not carry is left out rather than emitted blank, so
+    /// `auth.workspace_id` is either a workspace or nothing - an empty string
+    /// would read as one afi failed to capture.
     fn auth_json(&self) -> Value {
         let Some(auth) = self.auth else {
             return Value::Null;
         };
-        let mut fields = Map::new();
-        fields.insert("mode".to_string(), Value::from(auth.mode));
-        for (key, id) in [
-            ("organization_id", auth.organization_id),
-            ("service_account_id", auth.service_account_id),
-            ("workspace_id", auth.workspace_id),
-            ("federation_rule_id", auth.federation_rule_id),
-        ] {
-            if let Some(id) = id {
-                fields.insert(key.to_string(), Value::from(id));
+        let mut block = json!({ "mode": auth.mode() });
+        if let RunAuth::Federated {
+            organization_id,
+            service_account_id,
+            workspace_id,
+            federation_rule_id,
+        } = auth
+            && let Some(fields) = block.as_object_mut()
+        {
+            fields.insert("organization_id".to_string(), organization_id.into());
+            fields.insert("service_account_id".to_string(), service_account_id.into());
+            fields.insert("federation_rule_id".to_string(), federation_rule_id.into());
+            if let Some(workspace_id) = workspace_id {
+                fields.insert("workspace_id".to_string(), workspace_id.into());
             }
         }
-        Value::Object(fields)
+        block
     }
 
     fn usage_json(&self) -> Value {

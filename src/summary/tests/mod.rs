@@ -30,17 +30,21 @@ fn summary(ok: bool, answer: &str, usage: UsageTotals) -> RunSummary<'_> {
         tools: known_tool_names().to_vec(),
         effort: None,
         refused_tool_calls: RefusedToolCalls::default(),
-        auth: Some(RunAuth::mode_only("api_key")),
+        auth: Some(RunAuth::ApiKey),
     }
 }
 
 fn federated() -> RunAuth<'static> {
-    RunAuth {
-        mode: "federated",
-        organization_id: Some("org_abc"),
-        service_account_id: Some("svac_ci"),
-        workspace_id: Some("wrkspc_reviews"),
-        federation_rule_id: Some("fdrl_pr"),
+    federated_in(Some("wrkspc_reviews"))
+}
+
+/// The same credential on a rule that may or may not span workspaces.
+fn federated_in(workspace_id: Option<&'static str>) -> RunAuth<'static> {
+    RunAuth::Federated {
+        organization_id: "org_abc",
+        service_account_id: "svac_ci",
+        workspace_id,
+        federation_rule_id: "fdrl_pr",
     }
 }
 
@@ -385,10 +389,7 @@ fn a_static_key_run_names_the_mode_and_stops() {
 #[test]
 fn a_rule_covering_one_workspace_omits_the_workspace_rather_than_blanking_it() {
     let mut run = summary(true, "x", totals(1));
-    run.auth = Some(RunAuth {
-        workspace_id: None,
-        ..federated()
-    });
+    run.auth = Some(federated_in(None));
     let auth = &run.to_json()["auth"];
     assert!(auth.get("workspace_id").is_none());
     assert_eq!(auth["service_account_id"], "svac_ci");

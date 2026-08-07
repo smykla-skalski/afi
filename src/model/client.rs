@@ -33,7 +33,6 @@ mod sse;
 use anthropic::TokenCache;
 use anthropic::thinking::strip_history;
 
-pub(crate) use anthropic::auth::run_auth;
 pub(crate) use anthropic::thinking::{THINKING_HISTORY_KEY, thinking_disabled};
 
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;

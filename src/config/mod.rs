@@ -15,8 +15,10 @@ mod runtime;
 mod tools;
 pub use args::{ParsedArgs, parse_args};
 pub use effort::Effort;
-pub use protocol::{Federation, IdentitySource, NOOP_KEY, Protocol};
+pub use protocol::{Federation, IdentitySource, NOOP_KEY, Protocol, is_placeholder};
 pub use runtime::{Runtime, discover_sources};
+
+use crate::summary::RunAuth;
 
 // --- HTTP headers for aggregators like OpenRouter ---------------------------
 
@@ -138,6 +140,43 @@ impl Source {
     #[must_use]
     pub fn is_anthropic(&self) -> bool {
         self.protocol.is_anthropic()
+    }
+
+    /// Describe the credential this source authenticates with, for the run
+    /// summary.
+    ///
+    /// Sits beside [`Protocol`] and [`Federation`] because those are what it
+    /// reads. The federated arm reports exactly the non-secret fields the token
+    /// exchange puts in its grant, and both draw them from the same struct, so a
+    /// field that leaves the grant cannot be left behind in the report. The
+    /// assertion and the minted token are not among them and never may be - see
+    /// [`RunAuth`].
+    ///
+    /// The ids are what the exchange *sends*, not what the response was scoped
+    /// to. Anthropic returns a token and nothing to attribute it with, so a rule
+    /// that resolves a single workspace server-side reports no `workspace_id`.
+    #[must_use]
+    pub fn run_auth(&self) -> RunAuth<'_> {
+        match &self.protocol {
+            // The one mode whose credential is minted rather than stored, so the
+            // placeholder in `api_key` says nothing about whether it has one.
+            Protocol::AnthropicFederated(federation) => RunAuth::Federated {
+                organization_id: &federation.organization_id,
+                service_account_id: &federation.service_account_id,
+                // Left out of the grant when the rule covers one workspace, and
+                // left out of the report for the same reason.
+                workspace_id: federation.workspace_id.as_deref(),
+                federation_rule_id: &federation.rule_id,
+            },
+            // The llama.cpp case: `Source::new` stores the placeholder when
+            // nothing was configured, so a keyless local server would otherwise
+            // claim a credential it never had.
+            _ if is_placeholder(&self.api_key) => RunAuth::NoCredential,
+            Protocol::AnthropicOAuth => RunAuth::OAuth,
+            // A static key is a static key. `OpenAiCompat` differs from
+            // `AnthropicApiKey` only in which header carries it.
+            Protocol::AnthropicApiKey | Protocol::OpenAiCompat => RunAuth::ApiKey,
+        }
     }
 
     /// True if this source points at a host on the local machine or LAN
@@ -293,3 +332,6 @@ thread_local! {
 pub fn ctx_limit_regex() -> Regex {
     CTX_LIMIT_RE.with(Clone::clone)
 }
+
+#[cfg(test)]
+mod tests;

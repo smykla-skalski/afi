@@ -9,7 +9,6 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::config::{Runtime, Source};
-use crate::model::client::run_auth;
 use crate::model::usage_totals;
 use crate::summary::{self, RunError, RunSummary, final_answer};
 use crate::term::{MessageKind, UserInterface};
@@ -78,7 +77,7 @@ fn build<'a>(
         // the requests carried - including a level `EXTRA_BODY` set by hand.
         effort: rt.active_source().and_then(Source::resolved_effort),
         refused_tool_calls: usage_totals::refused_tool_calls(),
-        auth: billing_source(rt, &billed).map(run_auth),
+        auth: billing_source(rt, &billed).map(Source::run_auth),
     }
 }
 

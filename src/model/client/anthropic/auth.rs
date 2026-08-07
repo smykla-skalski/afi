@@ -18,9 +18,8 @@ use reqwest::{Client, StatusCode, Url};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use crate::config::{Federation, IdentitySource, NOOP_KEY, Protocol, Source};
+use crate::config::{Federation, IdentitySource, Protocol, Source, is_placeholder};
 use crate::model::client::{BODY_PREVIEW_CHARS, ClientError, transport_error, transport_error_at};
-use crate::summary::RunAuth;
 
 /// Pinned API version. Anthropic requires this on every request.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -32,50 +31,6 @@ const FEDERATION_BETA: &str = "oauth-2025-04-20,oidc-federation-2026-04-01";
 const OIDC_AUDIENCE: &str = "https://api.anthropic.com";
 /// Re-mint this long before expiry so a request never races the deadline.
 const EXPIRY_SKEW: Duration = Duration::from_mins(1);
-
-/// A static key out of the environment, whichever header carries it.
-const MODE_API_KEY: &str = "api_key";
-/// A bearer token minted elsewhere and handed to afi.
-const MODE_OAUTH: &str = "oauth";
-/// A bearer token afi minted itself, through [`exchange`].
-const MODE_FEDERATED: &str = "federated";
-/// No credential was configured at all - a local server that wants none.
-const MODE_NONE: &str = "none";
-
-/// Describe the credential this source authenticates with, for the run summary.
-///
-/// Built here rather than in `summary.rs` because the identifiers it reports are
-/// exactly the non-secret ones [`exchange`] puts in the grant: an id that stops
-/// being part of the exchange stops being part of the report. The assertion and
-/// the minted token are not among them and never may be - see [`RunAuth`].
-///
-/// The ids are what the exchange *sent*, not what the response was scoped to.
-/// Anthropic returns a token and nothing to attribute it with, so a rule that
-/// resolves a single workspace server-side leaves `workspace_id` absent here.
-///
-/// A source holding the placeholder reports `none` rather than `api_key`. It is
-/// the llama.cpp case: `Source::new` stores [`NOOP_KEY`] when nothing was
-/// configured, so a keyless local server would otherwise claim a credential it
-/// never had. `OpenAiCompat` with a real key does report `api_key` - a static
-/// key is a static key, and only the header differs from `AnthropicApiKey`.
-pub(crate) fn run_auth(source: &Source) -> RunAuth<'_> {
-    match &source.protocol {
-        // The one mode whose credential is minted rather than stored, so the
-        // placeholder in `api_key` says nothing about whether it has one.
-        Protocol::AnthropicFederated(federation) => RunAuth {
-            mode: MODE_FEDERATED,
-            organization_id: Some(&federation.organization_id),
-            service_account_id: Some(&federation.service_account_id),
-            // Left out of the grant when the rule covers one workspace, and left
-            // out of the report for the same reason.
-            workspace_id: federation.workspace_id.as_deref(),
-            federation_rule_id: Some(&federation.rule_id),
-        },
-        _ if is_placeholder(&source.api_key) => RunAuth::mode_only(MODE_NONE),
-        Protocol::AnthropicOAuth => RunAuth::mode_only(MODE_OAUTH),
-        Protocol::AnthropicApiKey | Protocol::OpenAiCompat => RunAuth::mode_only(MODE_API_KEY),
-    }
-}
 
 /// Build the auth headers for an Anthropic request.
 ///
@@ -104,14 +59,6 @@ pub(super) fn auth_headers(
         }
     }
     into_header_map(pairs)
-}
-
-/// Whether a stored credential is really no credential at all.
-///
-/// One definition, shared by the wire path and the run summary, so a source afi
-/// refuses to authenticate cannot be reported as having a key.
-fn is_placeholder(credential: &str) -> bool {
-    credential.is_empty() || credential == NOOP_KEY
 }
 
 /// Reject the placeholder and blanks before they reach the wire.

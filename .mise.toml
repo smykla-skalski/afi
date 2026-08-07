@@ -110,7 +110,7 @@ release-plz = "0.3.160"
 # tokens, unpinned actions, and impostor commits.
 zizmor = "1.29.0"
 # actionlint type-checks the workflow expressions and the shell inside `run:`.
-actionlint = "1.7.7"
+actionlint = "1.7.12"
 
 [tasks.dist]
 description = "Build and pack a release archive the way a release does (arg: target triple)"

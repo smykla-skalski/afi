@@ -272,17 +272,15 @@ fn apply_choice(chunk: &mut StreamChunk, choice: &Value) {
             .map(String::from);
         // `reasoning_content` is what vLLM, `SGLang`, and `DeepSeek` emit;
         // `reasoning` is the spelling `OpenRouter` and Bedrock's open-weight
-        // models use. The null filter matters: a serializer that emits every
-        // delta field writes `"reasoning_content": null` on the chunks that
-        // carry the other spelling, and a bare `get` would take that as an
-        // answer and never look. Read as a string either way, so a provider
-        // that makes `reasoning` an object is skipped rather than rendered as
-        // JSON.
+        // models use. Each is read as a string before the other is considered,
+        // so anything the first key holds that is not one - a `null` from a
+        // serializer that emits every delta field, or an object from a provider
+        // that reports reasoning structurally - falls through to the second
+        // rather than standing in for it. Neither is ever rendered as JSON.
         chunk.reasoning_content = delta
             .get("reasoning_content")
-            .filter(|c| !c.is_null())
-            .or_else(|| delta.get("reasoning"))
-            .and_then(|c| c.as_str())
+            .and_then(Value::as_str)
+            .or_else(|| delta.get("reasoning").and_then(Value::as_str))
             .map(String::from);
         if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
             chunk.tool_calls = tcs.iter().map(parse_tool_delta).collect();

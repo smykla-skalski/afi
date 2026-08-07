@@ -176,6 +176,16 @@ fn an_explicit_null_does_not_shadow_the_other_spelling() {
     assert_eq!(chunk.reasoning_content, Some("thinking...".to_string()));
 }
 
+/// A non-string under the first key must not shadow a usable second one. Only
+/// the null case was covered before, and an object reached `as_str` the same way
+/// while stopping the fallback, so the reasoning was dropped entirely.
+#[test]
+fn a_non_string_reasoning_content_does_not_shadow_the_other_spelling() {
+    let line = r#"data: {"choices":[{"delta":{"reasoning_content":{"summary":"x"},"reasoning":"thinking..."}}]}"#;
+    let chunk = parse_sse_line(line).unwrap();
+    assert_eq!(chunk.reasoning_content, Some("thinking...".to_string()));
+}
+
 /// A provider that makes `reasoning` an object is skipped, not rendered as JSON.
 #[test]
 fn a_non_string_reasoning_field_is_ignored() {

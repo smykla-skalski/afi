@@ -171,6 +171,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Emitted before anything can decide not to release, because the build
+          # job interpolates it into `strategy.matrix` and `fromJSON` of an empty
+          # string is an error. A job that is skipped should be skipped, not fail
+          # while working out how many copies of itself not to run.
+          echo "matrix={\"include\":$(./scripts/release-targets.sh --matrix)}" >>"${GITHUB_OUTPUT}"
+
           # Exit 3 is "nothing releasable", the ordinary outcome of a quiet day.
           set +e
           version="$(mise x -- ./scripts/plan-release.sh)"
@@ -199,7 +205,6 @@ jobs:
             # that lands mid-release cannot make the build and the tag disagree
             # about what was compiled.
             echo "sha=$(git rev-parse HEAD)"
-            echo "matrix={\"include\":$(./scripts/release-targets.sh --matrix)}"
           } >>"${GITHUB_OUTPUT}"
           echo "Releasing ${version} from $(git rev-parse --short HEAD)."
 

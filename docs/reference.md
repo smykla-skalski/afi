@@ -26,6 +26,10 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 
 `--help` and `--version` are answered before anything else, so neither depends on an env file loading or a source resolving, and both work as the last word of a command you were already typing. `--help` wins when both are given.
 
+**A long flag takes its value either way**, so `--source zai` and `--source=zai` are the same flag, and `--source=` goes without a value exactly as the spaced form does. A flag that is a statement by itself refuses a value written into one: `--read-only=false` reads as "off" to whoever typed it, and taking it as a bare `--read-only` would turn the posture on instead.
+
+**An argument afi does not have refuses the run**, naming it. Every one of them used to be ignored, so `--red-only` left a run with writes enabled while the command line said otherwise, and a flag that went without its value was dropped just as quietly. afi reads its prompt from `-f`, never from a bare word, so a stray one is refused too.
+
 ## Version and build metadata
 
 `afi --version` identifies the exact binary, one `label: value` per line so it can be read with `grep` rather than a JSON parser:
@@ -131,11 +135,20 @@ So a project file may say **what to work with** - `active`, `source_order`, a so
 | `sources.*.base_url`, `sources.*.protocol`, `anthropic.base_url`  | where requests go, and what credential goes with them |
 | `anthropic.federation.*`                                          | whose credential is exchanged                   |
 | `approval`                                                        | whether you are asked before a tool runs        |
-| `read_only`, `allowed_tools`, `disallowed_tools`                   | what the run may reach                          |
 | `system_prompt_file`, `system_prompt_mode`                         | whose instructions the model follows            |
 | `summary_file`, `home`, `sessions_dir`                             | where afi writes                                |
 
-Reaching for one of those from a project file refuses the run and says so, naming the key. `--config <path>` reads a file with your full trust, whatever directory it sits in, because naming a path is the act of trust - so `afi --config ./.afi/config.json` opts into a repository's file whole.
+Reaching for one of those from a project file refuses the run and says so, naming the key.
+
+**The tool policy is the exception, and it may only tighten.** A repository saying "this project is read-only", or naming fewer tools than you allowed, is a thing it should be able to say - so `read_only`, `allowed_tools`, and `disallowed_tools` are permitted from a project file, and the three combine rather than replace when both files set them. Deny lists add up, allow lists keep only what both agree on, and `read_only` stays on once either asks for it. So a project file can take a tool away and cannot hand one back:
+
+| your file                          | the project's                | the run gets              |
+| ---------------------------------- | ---------------------------- | ------------------------- |
+| `"allowed_tools": ["read_file"]`    | `["read_file", "run_bash"]`  | `read_file`               |
+| `"disallowed_tools": ["run_bash"]`  | `[]`                         | `run_bash` still denied   |
+| `"read_only": true`                 | `false`                      | read-only                 |
+
+Two allow lists with nothing in common permit nothing, and the run refuses rather than reading an empty list as "every tool". `--config <path>` reads a file with your full trust, whatever directory it sits in, because naming a path is the act of trust - so `afi --config ./.afi/config.json` opts into a repository's file whole.
 
 **Every key is its variable, minus the `AFI_` prefix and lowercased.** `AFI_MAX_TOKENS` is `max_tokens`, `AFI_READ_ONLY` is `read_only`, and so on through the table above and the tuning variables that are not in it. A test reads the source for `AFI_*` names and fails when one has neither a key nor a stated reason, so this stays true as settings are added. Four groups have structure instead:
 

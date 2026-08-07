@@ -122,14 +122,21 @@ fn a_hand_written_container_is_left_as_written() {
 #[test]
 fn another_flag_cannot_swallow_the_level() {
     // `--summary` used to consume `--effort` as its value and leave `xhigh` as a
-    // stray positional: no summary, and a run at an effort nobody asked for.
+    // stray positional: no summary, and a run at an effort nobody asked for. The
+    // level reaches the source it was meant for, and the summary that went
+    // without a value refuses the run rather than being dropped.
     let rt = common::build(
         &["afi", "--summary", "--effort", "xhigh", "-f", "p.txt"],
         &[LOCAL, ANTHROPIC_KEY],
     );
-    assert!(rt.refusals().is_empty(), "{:?}", rt.refusals());
     assert_eq!(rt.sources["anthropic"].resolved_effort(), Some("xhigh"));
     assert_eq!(rt.prompt_file.as_deref(), Some("p.txt"));
+    let refusals = rt.refusals();
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    assert!(
+        refusals[0].message.contains("--summary needs a value"),
+        "{refusals:?}"
+    );
 }
 
 #[test]

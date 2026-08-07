@@ -4,6 +4,7 @@
 use serde_json::Value;
 
 use super::*;
+use crate::summary::tests::shape::sorted_keys;
 
 fn federated() -> RunAuth<'static> {
     federated_in(Some("wrkspc_reviews"))
@@ -65,15 +66,8 @@ fn the_block_carries_nothing_but_identifiers() {
     // masked, so the key set is asserted exhaustively: a field added to
     // `RunAuth` has to come through this test rather than through an artifact.
     let json = RunAuth::json(Some(federated()));
-    let mut keys: Vec<&str> = json
-        .as_object()
-        .expect("auth must be an object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    keys.sort_unstable();
     assert_eq!(
-        keys,
+        sorted_keys(&json),
         [
             "federation_rule_id",
             "mode",

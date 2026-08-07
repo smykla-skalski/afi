@@ -182,6 +182,10 @@ fn asking_for_both_gets_both_and_they_describe_one_run() {
     // Built once and rendered twice, so the file and the pipe cannot disagree
     // about what the run did.
     assert_eq!(printed, read_summary(&path));
+    // Including which shape they are in. A consumer reading either channel has to
+    // be able to tell a field this afi never wrote from one this run could not
+    // produce, and this run produced very little: it failed on a closed port.
+    assert_eq!(printed["schema_version"], 1);
 }
 
 #[test]
@@ -338,6 +342,10 @@ fn a_refused_policy_reaches_the_file_rather_than_leaving_the_last_run_standing()
     let summary = read_summary(&path);
     assert_eq!(summary["ok"], false);
     assert_eq!(summary["error_kind"], "policy");
+    // A refusal is the emptiest object afi writes, so it is the one a consumer
+    // most needs a version on to read as this afi's refusal rather than as an
+    // older afi's ordinary summary.
+    assert_eq!(summary["schema_version"], 1);
     assert!(
         summary["error"]
             .as_str()

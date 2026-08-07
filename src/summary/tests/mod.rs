@@ -4,6 +4,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod refusals;
+pub(in crate::summary) mod shape;
+mod version;
 
 fn totals(requests: u64) -> UsageTotals {
     UsageTotals {

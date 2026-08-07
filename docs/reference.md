@@ -160,6 +160,7 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
 
 ```json
 {
+  "schema_version": 1,
   "ok": true,
   "error": null,
   "error_kind": null,
@@ -193,13 +194,17 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
 }
 ```
 
+`schema_version` names the shape of the object, so a field a consumer cannot find is a question about the run rather than about the build. Every summary carries it: on stdout and in the file, from a run that finished and from one [refused before it started](#failure-kinds). It moves only when a summary a working consumer could read stops being readable - a key removed, a key renamed, a type changed, or a meaning that moved under a name that stayed. New keys do not move it, so compare it as "at least 1" and ignore fields you do not know; a consumer that demands an exact version breaks on an upgrade that changed nothing it reads.
+
+**No `schema_version` at all means an afi older than the key**, which is the one version-free shape there will ever be. Before it there was nothing to read but the fields themselves, so dating a build meant probing for one some release had added - an inference that reads a renamed field as an absent one, and that has to be rewritten every time the shape grows.
+
 `answer` is the last assistant message with text, so a review flow can post it directly. Turns that only called tools are skipped.
 
 `tools` is what the run was permitted to call, so an audit of a CI log can confirm the [tool policy](#tool-policy) from the output instead of trusting that the workflow passed the flag it claims to.
 
 `effort` is there for the same reason: it is the level the requests actually carried, read back off the source rather than off the flag, so a capped level reads as the capped one and a level set by hand in `EXTRA_BODY` still shows up. `null` means the run took the endpoint's own default - either nobody asked for a level, or that endpoint has no [effort control](#reasoning-effort) afi knows of.
 
-`usage.refused_tool_calls` is what the run tried anyway, and it comes with the split that makes it readable: `refused_by_policy` for calls the [tool policy](#tool-policy) blocked, `refused_by_approval` for calls the approval gate denied, and the total of the two. A run that refused nothing reports `0` in all three rather than omitting them, so a caller can tell that apart from an older afi that never reported them. They live inside `usage`, so a run that never started - one refused over its own [tool policy](#tool-policy) or [summary path](#writing-the-summary-to-a-file) - carries none of them, and `error_kind` is what a caller reads there instead.
+`usage.refused_tool_calls` is what the run tried anyway, and it comes with the split that makes it readable: `refused_by_policy` for calls the [tool policy](#tool-policy) blocked, `refused_by_approval` for calls the approval gate denied, and the total of the two. A run that refused nothing reports `0` in all three rather than omitting them, so a caller can tell that apart from an afi too old to count them - though `schema_version` is the direct check for that. They live inside `usage`, so a run that never started - one refused over its own [tool policy](#tool-policy) or [summary path](#writing-the-summary-to-a-file) - carries none of them, and `error_kind` is what a caller reads there instead.
 
 **Alert on `refused_by_policy`.** That is the one that means the model reached for a tool the caller had ruled out, which is what matters when the input under review came from outside the trust boundary: `--read-only` guarantees an attempted write failed, and this count is what makes the attempt visible, so a run that was probed and a run that was not stop looking alike.
 

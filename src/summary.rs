@@ -33,7 +33,9 @@ use crate::model::usage_totals::{RefusedToolCalls, UsageTotals};
 use crate::util;
 
 mod auth;
+mod schema;
 pub use auth::RunAuth;
+pub use schema::SCHEMA_VERSION;
 
 /// How to report the run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -325,6 +327,9 @@ impl<'a> RunSummary<'a> {
 
     /// Render as JSON.
     ///
+    /// Every object names its own shape - see [`SCHEMA_VERSION`] - so a field a
+    /// consumer cannot find is a question about the run, not about the build.
+    ///
     /// `usage` is null rather than a zeroed object when no request reported any,
     /// so a consumer can tell "the provider sent no usage" from "the run used no
     /// tokens" instead of silently charting zeros. A refusal keeps the object
@@ -332,6 +337,7 @@ impl<'a> RunSummary<'a> {
     #[must_use]
     pub fn to_json(&self) -> Value {
         json!({
+            "schema_version": SCHEMA_VERSION,
             "ok": self.ok,
             "error": self.error,
             "error_kind": self.error_kind.map(ErrorKind::as_str),

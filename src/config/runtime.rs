@@ -13,7 +13,7 @@ use crate::tools::policy::ToolPolicy;
 use super::Source;
 use super::args::{ParsedArgs, parse_args};
 use super::effort;
-use super::file::{FileSettings, config_path};
+use super::file::{FileSettings, config_files};
 use super::sources::discover_sources;
 use super::system_prompt::{self, SystemPrompt};
 use super::tools::apply_tool_flags;
@@ -92,8 +92,17 @@ impl Runtime {
         if let Some(path) = &env_file {
             envfile::load_into(&mut env, path);
         }
-        let file = config_path(parse_args(args).config.as_deref(), &env);
-        let settings = FileSettings::load(file.as_deref());
+        // A command line that is already refused gets no config file. The run
+        // cannot start either way, and reading the default when `--config` was
+        // given wrongly would report a file's problems ahead of the flag that was
+        // typed wrong - describing a file nobody named.
+        let parsed = parse_args(args);
+        let files = if parsed.flag_errors.is_empty() {
+            config_files(parsed.config.as_deref(), &env, None)
+        } else {
+            Vec::new()
+        };
+        let settings = FileSettings::load(&files);
         settings.apply_to(&mut env);
         (env, settings)
     }

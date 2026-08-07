@@ -8,14 +8,25 @@
 //! against the other, and a variable that has no row is a variable the file
 //! cannot set, reported as an unknown key rather than accepted and dropped.
 //!
-//! Four names are absent on purpose. `AFI_ENV_FILE` is read before this file is
-//! located, so a key naming it could not take effect. The legacy
-//! `AFI_BASE_URL`, `AFI_MODEL`, and `AFI_API_KEY` trio is the flat spelling of
-//! one source, and [`SOURCE`] is the structured one - a new file has no legacy
-//! to keep. `ANTHROPIC_IDENTITY_TOKEN` is the identity token itself rather than
-//! a name for one, and nothing that resolves `$NAME` indirection reads it, so a
-//! file holding one would hold the secret. `AFI_BUILD_*` are set by the build,
-//! not by whoever runs it.
+//! Two columns beyond the pairing. [`Scope`] says whether a project file may set
+//! the key, because a file in the working tree is written by whoever wrote the
+//! repository rather than by whoever is running afi. [`REFUSED`] names the keys
+//! no config file may set at all, with the reason each one gets told, so a
+//! credential in a file is answered with where to put it instead of with "unknown
+//! key".
+//!
+//! No credential has a row. A config file is a thing people commit, paste into an
+//! issue, and copy between machines, and the one kind of value that must not
+//! travel that way is the kind that authenticates. `AFI_SOURCE_<NAME>_API_KEY`
+//! and the `ANTHROPIC_*` credentials stay in the environment or the env file,
+//! which is where the tooling around secrets already looks.
+//!
+//! Three more names are absent for their own reasons. `AFI_ENV_FILE` is read
+//! before this file is located, so a key naming it could not take effect. The
+//! legacy `AFI_BASE_URL`, `AFI_MODEL`, and `AFI_API_KEY` trio is the flat
+//! spelling of one source, and [`SOURCE`] is the structured one - a new file has
+//! no legacy to keep. `AFI_BUILD_*` are set by the build, not by whoever runs
+//! it.
 
 use crate::pricing::RATE_CLASSES;
 
@@ -24,18 +35,86 @@ use super::value::{
     protocol_name, summary_format, text, whole, wide_count,
 };
 
+/// Which files may set a key. The other half of the pair is
+/// [`super::Origin`], which says which kind of file is being read.
+///
+/// A repository has a legitimate say in some of this - which model to use, how
+/// hard to think, what a token costs - and none at all in where requests go,
+/// whose instructions the model follows, or whether the operator is asked before
+/// a tool runs. Those are the keys that would turn a checkout into a run nobody
+/// chose, so they carry [`Scope::Operator`] and a file in the working tree cannot
+/// reach them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Scope {
+    /// Any config file, including one in the working tree.
+    Anywhere,
+    /// Only a file the operator keeps or named themselves.
+    Operator,
+}
+
 /// One key and the variable it carries.
 pub(super) struct Setting {
     pub key: &'static str,
     /// The variable, or - in [`SOURCE`] - the part after `AFI_SOURCE_<NAME>_`.
     pub env: &'static str,
     pub convert: Convert,
+    pub scope: Scope,
 }
 
-/// Shorthand so a table row reads as one line.
+/// Shorthand so a table row reads as one line. A key a project may set.
 const fn row(key: &'static str, env: &'static str, convert: Convert) -> Setting {
-    Setting { key, env, convert }
+    Setting {
+        key,
+        env,
+        convert,
+        scope: Scope::Anywhere,
+    }
 }
+
+/// A key only the operator's own file may set, or one they named with
+/// `--config`. See [`Scope`].
+const fn mine(key: &'static str, env: &'static str, convert: Convert) -> Setting {
+    Setting {
+        key,
+        env,
+        convert,
+        scope: Scope::Operator,
+    }
+}
+
+/// Keys no config file may set, and what to tell whoever wrote one.
+///
+/// Every entry is a credential. They are refused by name rather than reported as
+/// unknown, because "unknown key" beside a key that used to work, or that the
+/// matching variable still accepts, reads as a bug in afi rather than as a
+/// decision about where secrets live.
+pub(super) const REFUSED: [(&str, &str); 5] = [
+    (
+        "api_key",
+        "a credential does not go in a config file - set AFI_SOURCE_<NAME>_API_KEY, \
+         in the environment or in the env file",
+    ),
+    (
+        "oauth_token",
+        "a credential does not go in a config file - set AFI_ANTHROPIC_OAUTH_TOKEN, \
+         in the environment or in the env file",
+    ),
+    (
+        "identity_token_file",
+        "the federation identity is a credential and does not go in a config file - \
+         set ANTHROPIC_IDENTITY_TOKEN_FILE in the environment or in the env file",
+    ),
+    (
+        "together_api_key",
+        "a credential does not go in a config file - set AFI_TOGETHER_API_KEY in the \
+         environment or in the env file",
+    ),
+    (
+        "openrouter_api_key",
+        "a credential does not go in a config file - set AFI_OPENROUTER_API_KEY in \
+         the environment or in the env file",
+    ),
+];
 
 /// The blocks at the root that carry structure rather than one value. Named
 /// here so a misspelling of one is answered with the right suggestion.
@@ -49,22 +128,22 @@ pub(super) const PRICE_CLASSES: [&str; 5] = RATE_CLASSES;
 pub(super) const TOP: &[Setting] = &[
     // Where a run starts and how hard it thinks.
     row("active", "AFI_ACTIVE", text),
-    row("approval", "AFI_APPROVAL", text),
+    mine("approval", "AFI_APPROVAL", text),
     row("effort", "AFI_EFFORT", effort_level),
     row("backend", "AFI_BACKEND", text),
     // Where afi keeps what it writes.
-    row("home", "AFI_HOME", text),
-    row("sessions_dir", "AFI_SESSIONS_DIR", text),
+    mine("home", "AFI_HOME", text),
+    mine("sessions_dir", "AFI_SESSIONS_DIR", text),
     // What the run may reach.
-    row("read_only", "AFI_READ_ONLY", flag),
-    row("allowed_tools", "AFI_ALLOWED_TOOLS", allow_list),
-    row("disallowed_tools", "AFI_DISALLOWED_TOOLS", list),
+    mine("read_only", "AFI_READ_ONLY", flag),
+    mine("allowed_tools", "AFI_ALLOWED_TOOLS", allow_list),
+    mine("disallowed_tools", "AFI_DISALLOWED_TOOLS", list),
     // What it is told to do, before the conversation starts.
-    row("system_prompt_file", "AFI_SYSTEM_PROMPT_FILE", text),
-    row("system_prompt_mode", "AFI_SYSTEM_PROMPT_MODE", prompt_mode),
+    mine("system_prompt_file", "AFI_SYSTEM_PROMPT_FILE", text),
+    mine("system_prompt_mode", "AFI_SYSTEM_PROMPT_MODE", prompt_mode),
     // How it reports itself.
     row("summary", "AFI_SUMMARY", summary_format),
-    row("summary_file", "AFI_SUMMARY_FILE", text),
+    mine("summary_file", "AFI_SUMMARY_FILE", text),
     // The one key whose variable is not its own name uppercased. It lives here
     // rather than beside the blocks because it carries one value like the rest of
     // this table - the `env` column is what the exception needs.
@@ -125,17 +204,13 @@ pub(super) const TOP: &[Setting] = &[
         "AFI_RECOVERY_DRY_ALLOWED_LENGTH",
         whole,
     ),
-    // Credentials that register a built-in source by existing.
-    row("together_api_key", "AFI_TOGETHER_API_KEY", text),
-    row("openrouter_api_key", "AFI_OPENROUTER_API_KEY", text),
 ];
 
 /// A named source's fields. `env` is the part after `AFI_SOURCE_<NAME>_`.
 pub(super) const SOURCE: &[Setting] = &[
-    row("base_url", "BASE_URL", text),
-    row("api_key", "API_KEY", text),
+    mine("base_url", "BASE_URL", text),
     row("model", "MODEL", text),
-    row("protocol", "PROTOCOL", protocol_name),
+    mine("protocol", "PROTOCOL", protocol_name),
     row("app_name", "APP_NAME", text),
     row("app_url", "APP_URL", text),
     row("extra_body", "EXTRA_BODY", object),
@@ -145,9 +220,7 @@ pub(super) const SOURCE: &[Setting] = &[
 /// namespace in the file for the same reason they are outside it in the
 /// environment - that namespace belongs to sources you define yourself.
 pub(super) const ANTHROPIC: &[Setting] = &[
-    row("api_key", "AFI_ANTHROPIC_API_KEY", text),
-    row("oauth_token", "AFI_ANTHROPIC_OAUTH_TOKEN", text),
-    row("base_url", "AFI_ANTHROPIC_BASE_URL", text),
+    mine("base_url", "AFI_ANTHROPIC_BASE_URL", text),
     row("model", "AFI_ANTHROPIC_MODEL", text),
     row("extra_body", "AFI_ANTHROPIC_EXTRA_BODY", object),
 ];
@@ -155,14 +228,15 @@ pub(super) const ANTHROPIC: &[Setting] = &[
 /// The workload-identity-federation ids, under `anthropic.federation`.
 ///
 /// These keep the un-prefixed variable names the official SDKs use, so a
-/// workspace already configured for them needs no second spelling. All five are
-/// non-secret: four ids and a path.
+/// workspace already configured for them needs no second spelling. The four ids
+/// are non-secret, but they name whose credential gets exchanged, so a project
+/// file does not set them. The identity token and the file holding it are the
+/// credential itself and have no key at all - see [`REFUSED`].
 pub(super) const FEDERATION: &[Setting] = &[
-    row("rule_id", "ANTHROPIC_FEDERATION_RULE_ID", text),
-    row("organization_id", "ANTHROPIC_ORGANIZATION_ID", text),
-    row("service_account_id", "ANTHROPIC_SERVICE_ACCOUNT_ID", text),
-    row("workspace_id", "ANTHROPIC_WORKSPACE_ID", text),
-    row("identity_token_file", "ANTHROPIC_IDENTITY_TOKEN_FILE", text),
+    mine("rule_id", "ANTHROPIC_FEDERATION_RULE_ID", text),
+    mine("organization_id", "ANTHROPIC_ORGANIZATION_ID", text),
+    mine("service_account_id", "ANTHROPIC_SERVICE_ACCOUNT_ID", text),
+    mine("workspace_id", "ANTHROPIC_WORKSPACE_ID", text),
 ];
 
 /// The row for `key`, or `None` when the table has none.

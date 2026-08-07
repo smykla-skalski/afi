@@ -18,7 +18,7 @@ mod system_prompt;
 mod tools;
 pub use args::{ParsedArgs, parse_args};
 pub use effort::Effort;
-pub use file::{FileSettings, config_path};
+pub use file::{FileSettings, Origin, config_files};
 pub use protocol::{Federation, IdentitySource, NOOP_KEY, Protocol, is_placeholder};
 pub use runtime::Runtime;
 pub use sources::discover_sources;

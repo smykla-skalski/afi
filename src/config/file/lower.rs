@@ -15,13 +15,17 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use super::super::sources;
-use super::schema;
+use super::Origin;
+use super::schema::{self, Scope};
 use super::suggest::nearest;
 use super::value::{self, Convert};
 
 /// One file being read: what it said, and why the run must not start.
 pub(super) struct Lowered<'f> {
     file: &'f Path,
+    /// Where this file came from, which decides what it is allowed to set - see
+    /// [`Scope`].
+    origin: Origin,
     pub pairs: Vec<(String, String)>,
     pub refusals: Vec<String>,
 }
@@ -31,9 +35,10 @@ pub(super) struct Lowered<'f> {
 /// A file that is entirely blank sets nothing and is not an error: it is what a
 /// `touch` leaves behind, and refusing it would answer "I have not written this
 /// yet" with a failed run. Anything else has to parse.
-pub(super) fn read<'f>(file: &'f Path, text: &str) -> Lowered<'f> {
+pub(super) fn read<'f>(file: &'f Path, text: &str, origin: Origin) -> Lowered<'f> {
     let mut out = Lowered {
         file,
+        origin,
         pairs: Vec::new(),
         refusals: Vec::new(),
     };
@@ -85,15 +90,7 @@ impl Lowered<'_> {
             return;
         };
         for (key, field) in fields {
-            match schema::find(schema::SOURCE, key) {
-                Some(setting) => self.set(
-                    &format!("{path}.{key}"),
-                    &format!("{prefix}{}", setting.env),
-                    setting.convert,
-                    field,
-                ),
-                None => self.unknown(&path, key, &schema::keys(schema::SOURCE, &[])),
-            }
+            self.field_as(&path, &prefix, schema::SOURCE, &[], key, field);
         }
     }
 
@@ -190,12 +187,35 @@ impl Lowered<'_> {
         key: &str,
         value: &Value,
     ) {
-        match schema::find(table, key) {
-            Some(setting) => {
-                self.set(&key_path(prefix, key), setting.env, setting.convert, value);
-            }
-            None => self.unknown(prefix, key, &schema::keys(table, nested)),
+        self.field_as(prefix, "", table, nested, key, value);
+    }
+
+    /// [`Self::field`], with `env_prefix` in front of the variable it lowers to -
+    /// which is how a source's fields reach `AFI_SOURCE_<NAME>_*`.
+    fn field_as(
+        &mut self,
+        prefix: &str,
+        env_prefix: &str,
+        table: &'static [schema::Setting],
+        nested: &[&'static str],
+        key: &str,
+        value: &Value,
+    ) {
+        let path = key_path(prefix, key);
+        if let Some((_, why)) = schema::REFUSED.iter().find(|(name, _)| *name == key) {
+            self.refuse(&path, why);
+            return;
         }
+        let Some(setting) = schema::find(table, key) else {
+            self.unknown(prefix, key, &schema::keys(table, nested));
+            return;
+        };
+        if self.origin == Origin::WorkingTree && setting.scope == Scope::Operator {
+            self.refuse(&path, PROJECT_REFUSAL);
+            return;
+        }
+        let env = format!("{env_prefix}{}", setting.env);
+        self.set(&path, &env, setting.convert, value);
     }
 
     /// Record one variable, or why the value could not become one.
@@ -236,6 +256,13 @@ impl Lowered<'_> {
         self.bad_file(&format!("unknown key \"{path}\"{hint}"));
     }
 }
+
+/// What a project file is told when it reaches for a key only the operator's own
+/// file may set.
+const PROJECT_REFUSAL: &str = "cannot be set by a file in the working directory - \
+     a repository does not choose where requests go, whose instructions the model \
+     follows, or whether you are asked before a tool runs; move it to \
+     $AFI_HOME/config.json, or name this file with --config";
 
 /// `prefix.key`, or bare `key` at the root, which has no prefix to join.
 fn key_path(prefix: &str, key: &str) -> String {

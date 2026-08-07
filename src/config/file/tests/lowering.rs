@@ -3,18 +3,19 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::super::Origin;
 use super::super::lower;
 
 /// Lower `body` and return its pairs as a map, asserting nothing was refused.
 fn pairs(body: &str) -> HashMap<String, String> {
-    let read = lower::read(Path::new("config.json"), body);
+    let read = lower::read(Path::new("config.json"), body, Origin::Operator);
     assert_eq!(read.refusals, Vec::<String>::new(), "unexpected refusals");
     read.pairs.into_iter().collect()
 }
 
 /// Lower `body` and return the refusals, asserting there was at least one.
 fn refusals(body: &str) -> Vec<String> {
-    let read = lower::read(Path::new("config.json"), body);
+    let read = lower::read(Path::new("config.json"), body, Origin::Operator);
     assert!(!read.refusals.is_empty(), "expected a refusal");
     read.refusals
 }
@@ -66,7 +67,6 @@ fn sources_become_their_prefixed_variables() {
     let out = pairs(
         r#"{"sources": {"zai": {
              "base_url": "https://api.z.ai/api/paas/v4",
-             "api_key": "$ZAI_API_KEY",
              "model": "glm-4.6",
              "protocol": "openai",
              "extra_body": {"provider": {"order": ["z-ai"]}}
@@ -76,7 +76,6 @@ fn sources_become_their_prefixed_variables() {
         out.get("AFI_SOURCE_ZAI_BASE_URL").unwrap(),
         "https://api.z.ai/api/paas/v4"
     );
-    assert_eq!(out.get("AFI_SOURCE_ZAI_API_KEY").unwrap(), "$ZAI_API_KEY");
     assert_eq!(out.get("AFI_SOURCE_ZAI_MODEL").unwrap(), "glm-4.6");
     assert_eq!(out.get("AFI_SOURCE_ZAI_PROTOCOL").unwrap(), "openai");
     // The one shape the file exists to give: an object stays an object here and
@@ -129,7 +128,7 @@ fn the_anthropic_block_keeps_its_own_variables() {
 
 #[test]
 fn a_blank_file_sets_nothing_and_is_not_an_error() {
-    let read = lower::read(Path::new("config.json"), "  \n\t\n");
+    let read = lower::read(Path::new("config.json"), "  \n\t\n", Origin::Operator);
     assert!(read.pairs.is_empty());
     assert!(read.refusals.is_empty());
 }

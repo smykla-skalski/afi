@@ -22,7 +22,12 @@ use super::super::schema;
 
 /// Variables that exist and deliberately have no key. Every entry needs a reason
 /// here and a matching sentence in `schema`'s module doc.
-const EXEMPT: [&str; 9] = [
+const EXEMPT: [&str; 13] = [
+    // A credential, which no config file holds - see `schema::REFUSED`.
+    "AFI_ANTHROPIC_API_KEY",
+    "AFI_ANTHROPIC_OAUTH_TOKEN",
+    "AFI_TOGETHER_API_KEY",
+    "AFI_OPENROUTER_API_KEY",
     // Read before the config file is located, so a key naming it could not take
     // effect.
     "AFI_ENV_FILE",

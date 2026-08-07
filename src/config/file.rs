@@ -22,16 +22,18 @@
 //! took effect, and a file layer that ignores what it does not recognize would
 //! reproduce the silence it exists to end.
 //!
-//! **Only files the operator named are read.** A per-project file - the nearest
-//! `.afi/config.json` above the working directory - was built and then taken back
-//! out, because it made every repository a configuration input: one key
-//! redirecting a source's `base_url` was enough for a clone to receive whatever
-//! credential `$NAME` indirection resolves out of the operator's own environment
-//! or env file, and `approval` in the same file switched off the gate that would
-//! have asked. Nothing else in afi reads configuration out of the working tree,
-//! and this layer will not be the first without a trust decision to lean on.
+//! A project keeps its own file, the nearest `.afi/config.json` at or above the
+//! working directory, and it is trusted less than the operator's. That file is
+//! written by whoever wrote the repository: given the whole keyspace, one key
+//! redirecting a source's `base_url` is enough for a clone to receive whatever
+//! credential the operator's environment holds, and `approval` in the same file
+//! switches off the gate that would have asked. So the keyspace is split - see
+//! [`schema::Scope`] - and a project file sets what a repository has a say in
+//! while the rest stays with the operator. No config file holds a credential at
+//! all.
 
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
@@ -47,37 +49,116 @@ mod value;
 #[cfg(test)]
 mod tests;
 
-/// The file's name inside `$AFI_HOME`.
+/// The file's name, in `$AFI_HOME` and in a project's `.afi`.
 const FILE_NAME: &str = "config.json";
-/// The variable naming one file in place of the default.
+/// The directory a project keeps its file in.
+const PROJECT_DIR: &str = ".afi";
+/// The variable naming one file in place of both defaults.
 const CONFIG_ENV: &str = "AFI_CONFIG";
 
-/// The file a run reads its settings from: the one that was named, or the
-/// default when it holds one.
+/// Where a config file came from, which decides what it may set.
+///
+/// The operator's own file, and one they name with `--config`, are the same
+/// thing here: naming a path is the act of trust. A file found by walking up from
+/// the working directory is not named by anyone, so it is the other kind - see
+/// [`schema::Scope`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A file the operator keeps, or one they named.
+    Operator,
+    /// A file found in the working tree.
+    WorkingTree,
+}
+
+/// The files a run reads its settings from, lowest precedence first.
+///
+/// The operator's own `$AFI_HOME/config.json`, then the project's - so a
+/// repository's answer wins, key by key, over the operator's for the keys it is
+/// allowed to give.
 ///
 /// `named` is `--config`; `AFI_CONFIG` stands in when the flag is absent, and
-/// either replaces the default rather than joining it - a caller pointing at one
-/// file means that file. A blank value names nothing and leaves the default
-/// alone, which is what an exported-but-unset shell variable looks like.
+/// either replaces both defaults rather than joining them - a caller pointing at
+/// one file means that file, and gets [`Origin::Operator`] for it, because
+/// naming a path is the act of trust. A blank value names nothing and leaves the
+/// defaults alone, which is what an exported-but-unset shell variable looks like.
 ///
 /// A named path is returned without checking that it exists, because a path
 /// someone typed and that holds no file is a mistake and starting anyway would
-/// run with settings nobody chose. The default is returned only when it holds a
+/// run with settings nobody chose. A default is returned only when it holds a
 /// file, which is what leaves "no config file" as an ordinary run configured by
 /// environment and flags.
 ///
 /// `env` supplies `AFI_HOME`, so it wants the env map after any env file has been
 /// merged - see `Runtime::resolve_env`.
 #[must_use]
-pub fn config_path<S: BuildHasher>(
+pub fn config_files<S: BuildHasher>(
     named: Option<&str>,
     env: &HashMap<String, String, S>,
-) -> Option<PathBuf> {
+    cwd: Option<&Path>,
+) -> Vec<(PathBuf, Origin)> {
     if let Some(path) = util::nonblank(named.or_else(|| env.get(CONFIG_ENV).map(String::as_str))) {
-        return Some(PathBuf::from(path));
+        return vec![(PathBuf::from(path), Origin::Operator)];
     }
+    let mut found = Vec::new();
     let user = afi_home(env).join(FILE_NAME);
-    user.is_file().then_some(user)
+    if user.is_file() {
+        found.push((user, Origin::Operator));
+    }
+    // The same file reached two ways is read once: `$AFI_HOME` at `~/.afi` with
+    // the working directory at `~` finds it as both, and the operator's trust is
+    // the one to keep.
+    if let Some(project) = project_file(cwd)
+        && !found.iter().any(|(first, _)| same_file(first, &project))
+    {
+        found.push((project, Origin::WorkingTree));
+    }
+    found
+}
+
+/// The nearest `.afi/config.json` at or above `cwd`, bounded by the project.
+///
+/// The walk stops at the directory holding `.git`, so "the project's file" means
+/// one inside the project rather than whatever the first ancestor happens to
+/// hold. Outside a repository only `cwd` is checked, for the same reason: with no
+/// boundary to stop at, the walk would eventually reach `$HOME` and pick the
+/// operator's own file up a second time as though a project had written it - and
+/// with less trust than it has.
+fn project_file(cwd: Option<&Path>) -> Option<PathBuf> {
+    let here = match cwd {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir().ok()?,
+    };
+    // No repository: `cwd` is both the start and the boundary.
+    let stop = git_root(&here).unwrap_or_else(|| here.clone());
+    let mut dir = Some(here.as_path());
+    while let Some(at) = dir {
+        let candidate = at.join(PROJECT_DIR).join(FILE_NAME);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if at == stop {
+            return None;
+        }
+        dir = at.parent();
+    }
+    None
+}
+
+/// The nearest ancestor holding `.git`, which is a directory in a clone and a
+/// file in a worktree - `exists` covers both.
+fn git_root(from: &Path) -> Option<PathBuf> {
+    from.ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// Whether two paths are the same file, following links and `..` where the
+/// filesystem can say so.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// What a run's config files say, lowered to the variable names every setting
@@ -89,12 +170,16 @@ pub struct FileSettings {
 }
 
 impl FileSettings {
-    /// Read `file`, or nothing when there is none to read.
+    /// Read every file, lowest precedence first.
+    ///
+    /// A later file's key replaces an earlier one's, key by key rather than file
+    /// by file, so a project setting wins over the same setting in the operator's
+    /// file while leaving the rest of it standing.
     #[must_use]
-    pub fn load(file: Option<&Path>) -> Self {
+    pub fn load(files: &[(PathBuf, Origin)]) -> Self {
         let mut settings = Self::default();
-        if let Some(path) = file {
-            settings.read(path);
+        for (path, origin) in files {
+            settings.read(path, *origin);
         }
         settings
     }
@@ -133,7 +218,7 @@ impl FileSettings {
     }
 
     /// Read one file into `self`.
-    fn read(&mut self, path: &Path) {
+    fn read(&mut self, path: &Path, origin: Origin) {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) => {
@@ -141,7 +226,7 @@ impl FileSettings {
                 return;
             }
         };
-        let lowered = lower::read(path, &text);
+        let lowered = lower::read(path, &text, origin);
         self.refusals.extend(lowered.refusals);
         self.values.extend(lowered.pairs);
     }

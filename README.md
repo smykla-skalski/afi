@@ -103,7 +103,7 @@ See [`sources.example.env`](sources.example.env) for a full annotated example. S
 
 ### Config file
 
-The same settings can live in `~/.afi/config.json`, where a source is an object rather than a set of variables whose names encode its name:
+The same settings can live in `~/.afi/config.json`, and a project can keep its own `.afi/config.json`, where a source is an object rather than a set of variables whose names encode its name:
 
 ```json
 {
@@ -112,14 +112,13 @@ The same settings can live in `~/.afi/config.json`, where a source is an object 
     "local": { "base_url": "http://localhost:8080/v1" },
     "zai": {
       "base_url": "https://api.z.ai/api/paas/v4",
-      "api_key": "$zai_test",
       "model": "glm-x-preview"
     }
   }
 }
 ```
 
-A flag beats a variable, a variable beats the file, and a key nothing reads refuses the run rather than being ignored. Nothing in the working directory is read - a repository cannot configure your afi. See [the reference](docs/reference.md#config-file) for the key names and the rest of the rules.
+A flag beats a variable, a variable beats the file, and a key nothing reads refuses the run rather than being ignored. No credential goes in a config file - keys stay in the environment or `~/.env`. A project's file sets what a repository has a say in, like which model to use, and not where requests go or whether you are asked before a tool runs. See [the reference](docs/reference.md#config-file) for the key names and the rest of the rules.
 
 ## Reference
 

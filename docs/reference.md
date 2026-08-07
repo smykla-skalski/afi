@@ -72,15 +72,22 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
 | `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
 | `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
-| `AFI_CONFIG`                                 | read settings from this file instead of the default ([details](#config-file)) |
+| `AFI_CONFIG`                                 | read settings from this file instead of the defaults ([details](#config-file)) |
 
-Almost all of these can be written in a [config file](#config-file) instead, where a variable beats the file. That section lists the four that cannot.
+Most of these can be written in a [config file](#config-file) instead, where a variable beats the file. No credential can: that section says where they go and which other names are absent.
 
 ## Config file
 
 Everything above is a flat string, so anything with structure has to be flattened into one: a source becomes a set of variables whose names encode its name, and the price table and the Anthropic extra body become JSON squeezed onto one line of shell. A misspelled variable is skipped in silence, so the run starts with the setting you thought you had set simply absent.
 
-A config file is a second way in for the same settings. afi reads `$AFI_HOME/config.json`, which is `~/.afi/config.json` unless you moved it.
+A config file is a second way in for the same settings. afi reads two, lowest precedence first:
+
+| file                                                             | written by                                    |
+| ---------------------------------------------------------------- | --------------------------------------------- |
+| `$AFI_HOME/config.json`, `~/.afi/config.json` unless you moved it | you, so it sets anything                     |
+| the nearest `.afi/config.json` at or above the working directory  | the repository, so it sets less - see below   |
+
+The project walk stops at the directory holding `.git`, so a file above the repository belongs to whatever is up there rather than to this project. Outside a repository only the working directory is checked.
 
 ```json
 {
@@ -90,7 +97,6 @@ A config file is a second way in for the same settings. afi reads `$AFI_HOME/con
   "sources": {
     "zai": {
       "base_url": "https://api.z.ai/api/paas/v4",
-      "api_key": "$ZAI_API_KEY",
       "model": "glm-4.6"
     },
     "local": { "base_url": "http://localhost:8080/v1" }
@@ -108,9 +114,30 @@ A config file is a second way in for the same settings. afi reads `$AFI_HOME/con
 
 **A flag beats a variable, a variable beats the file, and the file beats the built-in default.** An entry in the env file counts as the variable, since nothing downstream can tell the two apart, so a half-migrated setup keeps working rather than changing the moment a config file appears. A variable exported with no value still counts as set, because for several of these a blank is how you turn the setting off - `AFI_SUMMARY_FILE=` names no file, and filling it from the file would write one you suppressed. A run with no config file behaves exactly as it did before there was one.
 
-**Nothing in the working directory is read.** A per-project `.afi/config.json` was built and taken back out before release, because it made every repository a configuration input: one key redirecting a source's `base_url` was enough for a clone to receive whatever credential `$NAME` resolves out of your environment or env file, and `approval` in the same file switched off the gate that would have asked. Nothing else in afi reads configuration out of the working tree. Point `--config` at a file in a repository to opt into one by hand.
+**No config file holds a credential.** A config file is a thing people commit, paste into an issue, and copy between machines, and the one kind of value that must not travel that way is the kind that authenticates. `api_key`, `oauth_token`, `together_api_key`, `openrouter_api_key`, and `anthropic.federation.identity_token_file` are refused by name, with the variable to set instead:
 
-**Every key is its variable, minus the `AFI_` prefix and lowercased.** `AFI_MAX_TOKENS` is `max_tokens`, `AFI_READ_ONLY` is `read_only`, and so on through the table above and the tuning variables that are not in it. Four groups have structure instead:
+```
+  ✗ config.json: sources.zai.api_key a credential does not go in a config file - set AFI_SOURCE_<NAME>_API_KEY, in the environment or in the env file
+```
+
+Credentials stay in the environment or the [env file](#environment-variables), which is where the tooling around secrets already looks. A source with no `api_key` anywhere sends none, which is what a local llama.cpp wants.
+
+**A project file sets what a repository has a say in, and no more.** It is written by whoever wrote the repository rather than by whoever is running afi, so `cd`-ing into a clone must not reconfigure the run. Given the whole keyspace it could: one key redirecting a source's `base_url` is enough for the clone to receive whatever credential your environment holds, and `approval` in the same file switches off the gate that would have asked.
+
+So a project file may say **what to work with** - `active`, `source_order`, a source's `model`, `effort`, `backend`, `max_tokens` and the other sizing and tuning knobs, `summary`, `prices`, a source's `extra_body`, `app_name`, and `app_url`. It may not say where requests go, whose instructions the model follows, or whether you are asked:
+
+| refused in a project file                                        | why                                              |
+| ---------------------------------------------------------------- | ------------------------------------------------ |
+| `sources.*.base_url`, `sources.*.protocol`, `anthropic.base_url`  | where requests go, and what credential goes with them |
+| `anthropic.federation.*`                                          | whose credential is exchanged                   |
+| `approval`                                                        | whether you are asked before a tool runs        |
+| `read_only`, `allowed_tools`, `disallowed_tools`                   | what the run may reach                          |
+| `system_prompt_file`, `system_prompt_mode`                         | whose instructions the model follows            |
+| `summary_file`, `home`, `sessions_dir`                             | where afi writes                                |
+
+Reaching for one of those from a project file refuses the run and says so, naming the key. `--config <path>` reads a file with your full trust, whatever directory it sits in, because naming a path is the act of trust - so `afi --config ./.afi/config.json` opts into a repository's file whole.
+
+**Every key is its variable, minus the `AFI_` prefix and lowercased.** `AFI_MAX_TOKENS` is `max_tokens`, `AFI_READ_ONLY` is `read_only`, and so on through the table above and the tuning variables that are not in it. A test reads the source for `AFI_*` names and fails when one has neither a key nor a stated reason, so this stays true as settings are added. Four groups have structure instead:
 
 | key             | what it replaces                                                              |
 | --------------- | ----------------------------------------------------------------------------- |
@@ -119,11 +146,9 @@ A config file is a second way in for the same settings. afi reads `$AFI_HOME/con
 | `prices`        | `AFI_PRICES`, as an object rather than as JSON inside a string                 |
 | `anthropic`     | `AFI_ANTHROPIC_*`, with `anthropic.federation` holding the `ANTHROPIC_*` federation ids |
 
-A source takes `base_url`, `api_key`, `model`, `protocol`, `app_name`, `app_url`, and `extra_body`. `extra_body` is a JSON object here, not a string of one. Object key order is not preserved, so name the order you want in `source_order` rather than relying on the order you wrote the sources in. A source's name has to be lowercase, with digits, `-`, and `_` allowed: the name becomes part of a variable name, which is uppercased on the way in and lowercased on the way back out, so a source written `Zai` would register as `zai` and `"active": "Zai"` would then match nothing.
+A source takes `base_url`, `model`, `protocol`, `app_name`, `app_url`, and `extra_body` - no `api_key`, which is the one above. `extra_body` is a JSON object here, not a string of one. Object key order is not preserved, so name the order you want in `source_order` rather than relying on the order you wrote the sources in. A source's name has to be lowercase, with digits, `-`, and `_` allowed: the name becomes part of a variable name, which is uppercased on the way in and lowercased on the way back out, so a source written `Zai` would register as `zai` and `"active": "Zai"` would then match nothing.
 
 `home` and `sessions_dir` move what afi writes, not where this file is read from - the file has to be found before it can say anything. Point `AFI_HOME` at the directory to move both together.
-
-**A secret can be named rather than held.** `"api_key": "$ZAI_API_KEY"` reads `ZAI_API_KEY` from the environment or from the [env file](#environment-variables), which is what keeps a file safe to commit. It works for a source's `api_key` and for `anthropic.api_key` and `anthropic.oauth_token`, the same indirection those variables already accept.
 
 **An unknown key or a value of the wrong shape exits 2, naming the file and the key**, before the run is paid for:
 
@@ -136,9 +161,9 @@ Every problem is reported, not just the first, and a file with anything wrong in
 
 Value checks that already existed still apply. `effort`, `summary`, and a source's `protocol` are closed sets and are refused here. An unusable `approval` still warns and prompts for everything, and a price table with a negative rate still warns and disables cost reporting for the run, both as they do from a variable.
 
-**`--config <path>` or `AFI_CONFIG` reads that file instead of the default.** A path that holds no file exits 2, where a default location that holds no file is just a run configured by environment and flags. A blank `AFI_CONFIG` names no file and leaves the default alone, since that is what an exported-but-unset shell variable looks like.
+**`--config <path>` or `AFI_CONFIG` reads that file instead of both defaults.** A path that holds no file exits 2, where a default location that holds no file is just a run configured by environment and flags. A blank `AFI_CONFIG` names no file and leaves the defaults alone, since that is what an exported-but-unset shell variable looks like. A `--config` given wrongly - no value, a blank one, or another flag - refuses the run and reads no file at all, so the report names the flag rather than a default file you did not point at.
 
-Four variables have no key. `AFI_ENV_FILE` is read before the config file is located, so a key naming it could not take effect. The legacy `AFI_BASE_URL`, `AFI_MODEL`, and `AFI_API_KEY` trio is the flat spelling of one source, and `sources` is the structured one. `ANTHROPIC_IDENTITY_TOKEN` is a secret rather than a name for one, so use `anthropic.federation.identity_token_file`. `AFI_BUILD_*` are set by whoever builds afi, not by whoever runs it.
+Three more names have no key, for reasons other than being credentials. `AFI_ENV_FILE` is read before the config file is located, so a key naming it could not take effect. The legacy `AFI_BASE_URL`, `AFI_MODEL`, and `AFI_API_KEY` trio is the flat spelling of one source, and `sources` is the structured one. `AFI_BUILD_*` are set by whoever builds afi, not by whoever runs it.
 
 ## System prompt
 

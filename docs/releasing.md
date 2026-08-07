@@ -87,6 +87,12 @@ gh workflow run release.yml -f version=0.5.0-rc.1
 
 `git_release_type = "auto"` marks it a prerelease on GitHub, and the publish job leaves `releases/latest` pointing at the last stable version. [`scripts/deb-version.sh`](../scripts/deb-version.sh) converts the SemVer prerelease into `0.5.0~rc.1-1`, which dpkg sorts *below* `0.5.0`, so a plain `apt-get upgrade` will not pull a release candidate onto a stable machine.
 
+This works the same way any exact-version release does. `plan-release.sh` asks release-plz for a changelog section covering everything since the last tag, then forces the number to the one you gave it. The commits listed do not depend on what the release ends up being called, so the entry is right either way.
+
+It refuses when release-plz has no section to give, because the only thing left to rename would be the previous release's, which would hand its notes to the new version and delete it from `CHANGELOG.md`. That happens when nothing since the last tag is a `feat`, `fix`, `perf`, or `refactor` — usually meaning there is genuinely nothing to release — and when the package has no baseline to diff against, which is the state a crate rename leaves behind.
+
+To release anyway, land the version and its changelog section on the default branch in an ordinary commit. `plan-release.sh` treats a manifest version with no matching tag as its resume case and publishes it as it stands, so no flag is needed afterwards. That is how 0.6.0 was cut.
+
 ## When a release fails
 
 Find which job stopped, then:

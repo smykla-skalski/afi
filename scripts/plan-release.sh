@@ -66,37 +66,54 @@ if [ -n "$requested" ]; then
             had_previous=true
         fi
 
+        # `set-version` does not add a changelog section. It renames the topmost
+        # one. So give it one of its own to rename: `update` writes a section for
+        # the version it would have picked, listing every commit since the last
+        # tag, and `set-version` then forces the number to the one that was asked
+        # for. The entry is correct either way, because the commits it lists do
+        # not depend on what the release ends up being called.
+        #
+        # Without this, the topmost section is the *previous release's*, and
+        # renaming that ships it under the new number and deletes it from the
+        # file. Measured on a tree at 0.5.0 with no pending bump: `set-version
+        # 0.6.0` rewrote `## [0.5.0]` to `## [0.6.0]`, silently.
+        #
+        # `update` is allowed to decline. It writes nothing when no commit since
+        # the last tag is releasable, and it cannot work at all until the package
+        # has a baseline to diff against. Both leave the previous section on top,
+        # which the check below catches.
+        release-plz update >&2 || true
+
         # release-plz reports what it did on stdout, and this script's stdout is
         # the version alone, so its chatter goes to stderr with everything else.
         release-plz set-version "$requested" >&2
 
-        # `set-version` does not add a changelog section. It renames the topmost
-        # one. That is right when `release-plz update` has already written a
-        # section for this release and the number is only being forced to
-        # something else, and wrong when it has not: the section it renames is
-        # then the *previous release's*, which ships under the new number and
-        # vanishes from the file.
-        #
-        # Measured on a tree at 0.5.0 with no pending bump: `set-version 0.6.0`
-        # rewrote `## [0.5.0]` to `## [0.6.0]`, so the release would have carried
-        # 0.5.0's notes and 0.5.0 would have been gone from the changelog. Both
-        # silently.
         if ! changelog_has "$requested"; then
             printf 'set-version left no "## [%s]" section in CHANGELOG.md\n' \
                 "$requested" >&2
             exit 1
         fi
         if [ "$had_previous" = true ] && ! changelog_has "$before"; then
-            printf 'set-version renamed the %s changelog section to %s rather than adding one.\n' \
-                "$before" "$requested" >&2
-            printf 'Publishing that would give %s the release notes of %s and drop %s from\n' \
-                "$requested" "$before" "$before" >&2
-            printf 'CHANGELOG.md. Land the version and its changelog section on the default\n' >&2
-            printf 'branch instead; a release publishes the manifest as it stands.\n' >&2
+            printf 'Refusing to release %s: it would carry the release notes of %s.\n' \
+                "$requested" "$before" >&2
+            printf '\n' >&2
+            printf 'release-plz had no new changelog section to give this release, so\n' >&2
+            printf 'set-version renamed the %s section instead of adding one. That drops\n' \
+                "$before" >&2
+            printf '%s from CHANGELOG.md and gives its notes to %s.\n' "$before" "$requested" >&2
+            printf '\n' >&2
+            printf 'Usually this means there is nothing to release: no commit since v%s is a\n' \
+                "$before" >&2
+            printf 'feat, fix, perf, or refactor. It also happens when the package has no\n' >&2
+            printf 'baseline yet, which is the state a crate rename leaves behind.\n' >&2
+            printf '\n' >&2
+            printf 'To release anyway, land the version and its changelog section on the\n' >&2
+            printf 'default branch; a release then publishes the manifest as it stands.\n' >&2
             # set-version already wrote before this check could run. A release
             # runner is thrown away, so this only matters to someone running the
             # script by hand -- say so rather than guess which of their changes
             # to discard.
+            printf '\n' >&2
             printf 'CHANGELOG.md, Cargo.toml and Cargo.lock have been modified in place.\n' >&2
             exit 1
         fi

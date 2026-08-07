@@ -20,16 +20,51 @@ arrive through `apt-get upgrade` like any other package. The package holds a
 static binary and declares no dependencies, so it installs on any Debian
 derivative regardless of glibc version. amd64 and arm64 are both published.
 
+### macOS and other Linux
+
+```
+curl -fsSL https://raw.githubusercontent.com/smykla-skalski/afi/main/scripts/install.sh | sh
+```
+
+Works out your platform, checks the published sha256, and installs to
+`~/.local/bin` (or `/usr/local/bin` as root). Set `AFI_VERSION` to pin a version
+and `AFI_BIN_DIR` to install somewhere else. When the GitHub CLI is on your PATH
+the script also verifies the release's build provenance.
+
+### From crates.io
+
+```
+cargo install afi-cli --locked
+```
+
+The crate is `afi-cli` because `afi` on crates.io belongs to an unrelated
+audio/video crate from 2017. The binary it installs is `afi`.
+
 ### Prebuilt binary
 
-Every release attaches a tarball per target to the
-[releases page](https://github.com/smykla-skalski/afi/releases).
+Every release attaches an archive and a checksum per target to the
+[releases page](https://github.com/smykla-skalski/afi/releases): static musl
+builds for Linux on x86_64 and aarch64, a glibc build for x86_64 Linux, and
+macOS on both architectures.
 
 ### From source
 
 ```
 cargo install --path .
 ```
+
+### Checking what you downloaded
+
+Every archive and package carries a Sigstore build-provenance attestation, so
+you can check it was produced by this repository's release workflow:
+
+```
+gh attestation verify afi-x86_64-unknown-linux-musl.tar.gz --repo smykla-skalski/afi
+```
+
+The `.sha256` files are uploaded alongside the archives by the same job, so they
+tell you a download arrived intact and nothing about where it came from. The
+attestation is the one that answers that.
 
 ### Which build is this
 
@@ -83,6 +118,8 @@ Switch at runtime with `/source [name]`.
 ## Reference
 
 Flags, environment variables, subcommands, and slash commands: see [docs/reference.md](docs/reference.md).
+
+How a version gets built, published, and undone: see [docs/releasing.md](docs/releasing.md).
 
 ## Terminal interfaces
 

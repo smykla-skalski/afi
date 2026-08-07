@@ -28,6 +28,7 @@ Match validation to the affected surface:
 - Documentation and files outside the codebase: run `git diff --check -- <paths>`.
 - Narrow Rust logic: run the focused test task first, then the smallest lint task that covers it.
 - Shared CLI, REPL, or model behavior: run the focused test task and the repository test task.
+- Dependencies, workflows, or packaging: run `mise run check:supply-chain`. It reads `deny.toml` for the dependency policy and runs actionlint and zizmor over `.github/workflows`.
 
 Run validation in the session worktree. Do not run unrelated gates. Unit tests belong in crate-local `#[test]` blocks; integration tests belong in `tests/`. Isolate filesystem paths, environment variables, ports, and external resource names so tests never require runner-wide serialization. Use `tempfile` for real filesystem state.
 
@@ -46,6 +47,7 @@ Run validation in the session worktree. Do not run unrelated gates. Unit tests b
 - **CLI:** session listing, resume and session flag resolution, transcript printing, and the `--help` and `--version` short-circuits, the latter carrying build metadata from `build.rs` plus the running executable's own digest.
 - **Memory:** developer-memory save, remember, and list operations backed by Markdown files.
 - **Metrics:** abbreviated token counts in the statistics footer.
+- **Release:** version planning from the commit history, a build matrix that compiles, runs, and packages every target before a tag exists, draft-then-publish ordering, apt and crates.io publication, build provenance, and a reconciliation gate. `scripts/release-targets.sh` is the single definition of what a release contains; `docs/releasing.md` is the operator runbook.
 
 ## Rust conventions
 

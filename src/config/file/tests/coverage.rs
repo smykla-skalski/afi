@@ -107,7 +107,9 @@ fn accounted_for(name: &str) -> bool {
     if matches!(name, "AFI_SOURCES" | "AFI_PRICES" | "AFI_CONFIG") {
         return true;
     }
-    if schema::TOP.iter().any(|s| s.env == name) || schema::ANTHROPIC.iter().any(|s| s.env == name)
+    if [schema::TOP, schema::ANTHROPIC, schema::BEDROCK]
+        .iter()
+        .any(|table| table.iter().any(|s| s.env == name))
     {
         return true;
     }

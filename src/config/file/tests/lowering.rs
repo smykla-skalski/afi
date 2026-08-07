@@ -265,7 +265,7 @@ fn a_level_outside_the_closed_set_is_refused_with_the_set() {
     assert_eq!(
         refusal(r#"{"sources": {"zai": {"protocol": "anthropic-oath"}}}"#),
         "config.json: sources.zai.protocol must be one of openai, openai-compat, \
-         anthropic, anthropic-api-key, anthropic-oauth (got \"anthropic-oath\")"
+         anthropic, anthropic-api-key, anthropic-oauth, aws-bedrock-openai (got \"anthropic-oath\")"
     );
 }
 

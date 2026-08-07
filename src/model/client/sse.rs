@@ -11,7 +11,7 @@ use std::mem;
 use tokio::io::AsyncRead;
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
-use super::{ChatCompletionStream, ClientError};
+use super::{ChatCompletionStream, ClientError, Redactor};
 use crate::model::stream::{SseDecodeError, SseLine, StreamChunk, decode_sse_data};
 
 const MAX_SSE_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -48,9 +48,22 @@ struct DecodeState<R> {
     saw_finish: bool,
     non_sse_preview: String,
     failed: bool,
+    redact: Redactor,
 }
 
-pub(super) fn decoded_stream<R>(reader: R, decoder: Box<dyn SseDecoder>) -> ChatCompletionStream
+/// Decode one streaming response, reporting what broke if it does.
+///
+/// `redact` covers the two failures that quote the provider: a response that was
+/// never a stream, and an error the decoder read out of one. The case that
+/// matters is a 200 whose body is an HTML page from a gateway in front of the
+/// endpoint, because a gateway echoing the request it bounced returns the
+/// `Authorization` header with it, and the preview of that page is reported the
+/// same way a refusal body is.
+pub(super) fn decoded_stream<R>(
+    reader: R,
+    decoder: Box<dyn SseDecoder>,
+    redact: Redactor,
+) -> ChatCompletionStream
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -62,6 +75,7 @@ where
         saw_finish: false,
         non_sse_preview: String::new(),
         failed: false,
+        redact,
     };
     Box::pin(unfold(state, |mut state| async move {
         if state.failed {
@@ -120,7 +134,7 @@ fn handle_line<R>(state: &mut DecodeState<R>, line: &str) -> DecodeStep {
             Ok(SseLine::Chunk(chunk)) => return DecodeStep::Chunk(*chunk),
             Ok(SseLine::Done) => return DecodeStep::Done,
             Ok(SseLine::Ignore) => return DecodeStep::Wait,
-            Err(SseDecodeError::Provider(error)) => return provider_error(&error),
+            Err(SseDecodeError::Provider(error)) => return provider_error(&state.redact, &error),
             Err(SseDecodeError::Json(_)) => {}
         }
     }
@@ -157,14 +171,18 @@ fn decode_pending<R>(state: &mut DecodeState<R>) -> DecodeStep {
         Ok(SseLine::Chunk(chunk)) => DecodeStep::Chunk(*chunk),
         Ok(SseLine::Done) => DecodeStep::Done,
         Ok(SseLine::Ignore) => DecodeStep::Wait,
-        Err(SseDecodeError::Provider(error)) => provider_error(&error),
+        Err(SseDecodeError::Provider(error)) => provider_error(&state.redact, &error),
         Err(SseDecodeError::Json(error)) => {
             DecodeStep::Error(ClientError::Parse(error.to_string()))
         }
     }
 }
 
-fn provider_error(error: &str) -> DecodeStep {
+/// An error the decoder read out of the stream itself. Cleaned like any other
+/// quoted provider text: both call sites reach it holding a body afi did not
+/// write.
+fn provider_error(redact: &Redactor, error: &str) -> DecodeStep {
+    let error = redact.clean(error);
     DecodeStep::Error(ClientError::Parse(format!("provider error: {error}")))
 }
 
@@ -181,6 +199,11 @@ fn record_non_sse<R>(state: &mut DecodeState<R>, line: &str) {
     if remaining == 0 {
         return;
     }
+    // Cleaned per line rather than once over the finished preview. The lines are
+    // joined with a space below, and a credential the page wrapped would no
+    // longer be verbatim by then, nor would either half sit at the end where a
+    // severed tail is looked for.
+    let line = state.redact.clean_line(line);
     if !state.non_sse_preview.is_empty() {
         state.non_sse_preview.push(' ');
         remaining = remaining.saturating_sub(1);
@@ -199,7 +222,7 @@ fn eof_step<R>(state: &mut DecodeState<R>) -> DecodeStep {
     if !state.saw_data && !state.non_sse_preview.is_empty() {
         return DecodeStep::Error(ClientError::Parse(format!(
             "response was not an SSE stream: {}",
-            state.non_sse_preview
+            state.redact.clean(&state.non_sse_preview)
         )));
     }
     DecodeStep::Error(ClientError::Parse(

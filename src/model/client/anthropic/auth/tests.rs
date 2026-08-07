@@ -225,7 +225,12 @@ fn a_refused_identity_exchange_is_an_auth_failure_not_a_transport_one() {
     // and classifying that as the provider's trouble would make a caller retry
     // until the schedule ran out to be refused in the same words.
     for status in [StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED] {
-        let error = refused_credential("the exchange refused it", status, "{\"error\":\"x\"}");
+        let error = refused_credential(
+            "the exchange refused it",
+            status,
+            "{\"error\":\"x\"}",
+            &Redactor::default(),
+        );
         assert!(matches!(error, ClientError::Auth(_)), "got {error:?}");
         assert_eq!(error.kind(), ErrorKind::Auth);
     }
@@ -239,14 +244,19 @@ fn a_busy_credential_endpoint_stays_retryable() {
         StatusCode::TOO_MANY_REQUESTS,
         StatusCode::SERVICE_UNAVAILABLE,
     ] {
-        let error = refused_credential("busy", status, "slow down");
+        let error = refused_credential("busy", status, "slow down", &Redactor::default());
         assert_eq!(error.kind(), ErrorKind::ProviderHttp, "{status}");
     }
 }
 
 #[test]
 fn a_refusal_body_is_quoted_but_bounded() {
-    let error = refused_credential("refused", StatusCode::FORBIDDEN, &"x".repeat(1000));
+    let error = refused_credential(
+        "refused",
+        StatusCode::FORBIDDEN,
+        &"x".repeat(1000),
+        &Redactor::default(),
+    );
     let text = error.to_string();
     assert!(text.contains("refused (HTTP 403)"), "{text}");
     assert!(
@@ -254,4 +264,61 @@ fn a_refusal_body_is_quoted_but_bounded() {
         "the body must be trimmed to the preview length: {}",
         text.len()
     );
+}
+
+// --- credentials in the reported body -----------------------------------------
+
+/// Stands in for the OIDC assertion the exchange is posted.
+const ASSERTION: &str = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyZXBvOmFjbWUvYWZpIn0.signature";
+
+/// A refusal that quotes the request it turned down, credential and all.
+fn echoed_refusal(assertion: &str) -> String {
+    format!(
+        r#"{{"error":{{"type":"invalid_request_error","message":"unprotected ref"}},"request":{{"assertion":"{assertion}"}}}}"#
+    )
+}
+
+/// One refusal of the assertion, as the exchange reports it.
+fn refused(status: StatusCode, body: &str) -> ClientError {
+    let redact = Redactor::default().with(ASSERTION, Credential::IdentityToken);
+    refused_credential("the exchange refused it", status, body, &redact)
+}
+
+#[test]
+fn a_refused_exchange_does_not_report_the_assertion_it_posted() {
+    // The endpoint echoes the request it turned down, so the body it returns
+    // holds the credential afi just sent. That sentence goes to stderr and to the
+    // run summary, and afi fetched the token outside the toolkit that would have
+    // masked it, so nothing further down catches it.
+    let text = refused(StatusCode::BAD_REQUEST, &echoed_refusal(ASSERTION)).to_string();
+    assert!(!text.contains(ASSERTION), "{text}");
+    assert!(text.contains("[redacted OIDC identity token]"), "{text}");
+}
+
+#[test]
+fn a_refusal_still_says_why_it_was_refused() {
+    // A rejected credential has to stay distinguishable from a rate limit, so
+    // only the credential goes.
+    let text = refused(StatusCode::BAD_REQUEST, &echoed_refusal(ASSERTION)).to_string();
+    assert!(text.contains("invalid_request_error"), "{text}");
+    assert!(text.contains("unprotected ref"), "{text}");
+}
+
+#[test]
+fn the_preview_cannot_reveal_what_redaction_removed() {
+    // The 200-character window is applied after cleaning. Cutting first would
+    // leave whichever half of the credential fell inside it.
+    let padding = "p".repeat(BODY_PREVIEW_CHARS * 2);
+    let text = refused(StatusCode::UNAUTHORIZED, &format!("{ASSERTION}{padding}")).to_string();
+    assert!(!text.contains(&ASSERTION[..20]), "{text}");
+}
+
+#[test]
+fn a_busy_endpoint_reports_a_clean_body_too() {
+    // The retryable branch keeps its status and its whole body, which is exactly
+    // the body the echo was in.
+    let error = refused(StatusCode::SERVICE_UNAVAILABLE, &echoed_refusal(ASSERTION));
+    let text = error.to_string();
+    assert_eq!(error.kind(), ErrorKind::ProviderHttp);
+    assert!(!text.contains(ASSERTION), "{text}");
 }

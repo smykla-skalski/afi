@@ -2,6 +2,7 @@ use super::sse::{OpenAiDecoder, decoded_stream};
 use super::*;
 use futures::StreamExt;
 use std::io;
+use std::io::Cursor;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf, duplex};
@@ -13,7 +14,15 @@ fn openai_stream<R>(reader: R) -> ChatCompletionStream
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    decoded_stream(reader, Box::new(OpenAiDecoder))
+    redacting_stream(reader, Redactor::default())
+}
+
+/// The same, for a stream whose request carried a credential.
+fn redacting_stream<R>(reader: R, redact: Redactor) -> ChatCompletionStream
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    decoded_stream(reader, Box::new(OpenAiDecoder), redact)
 }
 
 #[tokio::test]
@@ -157,4 +166,80 @@ async fn a_body_that_dies_mid_stream_reports_a_stream_failure() {
     let error = stream.next().await.unwrap().unwrap_err();
     assert!(matches!(error, ClientError::Stream(_)), "got {error:?}");
     assert_eq!(error.kind(), ErrorKind::ProviderStream);
+}
+
+// --- what a bounded error body reports ----------------------------------------
+
+/// Stands in for a bearer token echoed back inside a refusal.
+const TOKEN: &str = "sk-ant-oat01-echoed-back-by-the-endpoint";
+
+fn token_redactor() -> Redactor {
+    Redactor::default().with(TOKEN, Credential::BearerToken)
+}
+
+#[test]
+fn an_echoed_credential_goes_before_the_body_is_reported() {
+    let body = format!(r#"{{"error":"bad key","sent":"{TOKEN}"}}"#);
+    let reported = reported_body(body.as_bytes(), &token_redactor());
+    assert!(!reported.contains(TOKEN), "{reported}");
+    assert!(reported.contains("[redacted bearer token]"), "{reported}");
+    assert!(reported.contains("bad key"), "{reported}");
+}
+
+#[test]
+fn a_credential_severed_by_the_length_limit_goes_too() {
+    // The size cap cuts the body before redaction sees it, so the half that
+    // survived the cut is what would otherwise be reported. Marking runs after
+    // cleaning for exactly this: `[truncated]` would hide the tail from the
+    // check that removes it.
+    let severed = &TOKEN[..24];
+    let reported = truncated_body(
+        format!(r#"{{"sent":"{severed}"#).as_bytes(),
+        &token_redactor(),
+    );
+    assert!(!reported.contains(severed), "{reported}");
+    assert!(reported.contains("[redacted bearer token]"), "{reported}");
+    assert!(reported.ends_with("\n[truncated]"), "{reported}");
+}
+
+#[test]
+fn a_reader_tells_redaction_from_truncation() {
+    // Both mark themselves, and they mean different things: one says a credential
+    // was here, the other says the body ran long.
+    let reported = truncated_body(b"{\"error\":\"rate_limit_error\"}", &token_redactor());
+    assert_eq!(reported, "{\"error\":\"rate_limit_error\"}\n[truncated]");
+    assert!(!reported.contains("[redacted"), "{reported}");
+}
+
+#[tokio::test]
+async fn a_response_that_was_never_a_stream_reports_no_credential() {
+    // A 200 whose body is a gateway's error page rather than SSE. A gateway that
+    // echoes the request it bounced hands back the Authorization header with it,
+    // and the preview of that page is reported the way a refusal body is.
+    let page = format!("<html>rejected upstream: Bearer {TOKEN}</html>\n");
+    let mut stream = redacting_stream(Cursor::new(page.into_bytes()), token_redactor());
+    let error = stream.next().await.unwrap().unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("was not an SSE stream"), "{text}");
+    assert!(!text.contains(TOKEN), "{text}");
+    assert!(text.contains("[redacted bearer token]"), "{text}");
+}
+
+#[tokio::test]
+async fn a_gateway_page_that_wrapped_the_credential_reports_neither_half() {
+    // The leak an adversarial review found: `record_non_sse` joins lines with a
+    // space, so a token the page wrapped was verbatim in neither half and sat at
+    // the end of neither, and the whole of it reached the summary.
+    let page = format!(
+        "<pre>rejected: authorization: Bearer {}\n{}</pre>\n",
+        &TOKEN[..24],
+        &TOKEN[24..]
+    );
+    let mut stream = redacting_stream(Cursor::new(page.into_bytes()), token_redactor());
+    let text = stream.next().await.unwrap().unwrap_err().to_string();
+    assert!(text.contains("was not an SSE stream"), "{text}");
+    assert!(!text.contains(&TOKEN[..24]), "{text}");
+    assert!(!text.contains(&TOKEN[24..]), "{text}");
+    // Removing the separator the join inserted must not put the token back.
+    assert!(!text.replace(' ', "").contains(TOKEN), "{text}");
 }

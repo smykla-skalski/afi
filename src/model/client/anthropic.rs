@@ -26,8 +26,8 @@ use std::io;
 
 use super::sse::decoded_stream;
 use super::{
-    ChatCompletionStream, ClientError, ReqwestClient, StreamRequest, limited_error_body,
-    transport_error,
+    ChatCompletionStream, ClientError, Credential, Redactor, ReqwestClient, StreamRequest,
+    limited_error_body, transport_error,
 };
 use crate::config::Source;
 use crate::model::stream::{NormalizedUsage, PromptTokensDetails, Usage, normalize_usage};
@@ -192,20 +192,33 @@ async fn bearer_for(
 
 /// Build a request with auth headers applied, then the source's own headers so
 /// user-configured values still win (matching the `OpenAI` path).
+///
+/// The redactor comes back with it because the bearer is resolved here and
+/// nowhere else - a caller that had to fetch it a second time to clean an error
+/// body would be a caller that could forget to.
 async fn authed_post(
     http: &Client,
     tokens: &TokenCache,
     source: &Source,
     url: String,
     body: &Value,
-) -> Result<reqwest::RequestBuilder, ClientError> {
+) -> Result<(reqwest::RequestBuilder, Redactor), ClientError> {
     let bearer = bearer_for(http, tokens, source).await?;
     let headers = auth::auth_headers(&source.protocol, &source.api_key, bearer.as_deref())?;
     let mut request = http.post(url).headers(headers).json(body);
     if let Some(extra) = ReqwestClient::build_headers(source) {
         request = request.headers(extra);
     }
-    Ok(request)
+    // Bearer first, because `AnthropicOAuth` keeps its token in `api_key` and the
+    // two registrations would then be the same string. Whichever lands first
+    // names it, and for that mode the honest name is the bearer.
+    let redact = Redactor::default()
+        .with(
+            bearer.as_deref().unwrap_or_default(),
+            Credential::BearerToken,
+        )
+        .with(&source.api_key, Credential::ApiKey);
+    Ok((request, redact))
 }
 
 /// `POST /v1/messages` with `stream: true`, returning the parsed chunk stream.
@@ -224,22 +237,21 @@ pub(super) async fn stream(
         extra_body: request.extra_body,
         stream: true,
     });
-    let response = authed_post(http, tokens, source, messages_url(&source.base_url), &body)
-        .await?
-        .send()
-        .await
-        .map_err(|e| transport_error(&e))?;
+    let (request, redact) =
+        authed_post(http, tokens, source, messages_url(&source.base_url), &body).await?;
+    let response = request.send().await.map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
         return Err(ClientError::Http {
             status,
-            body: limited_error_body(response).await,
+            body: limited_error_body(response, &redact).await,
         });
     }
     let bytes = response.bytes_stream().map_err(io::Error::other);
     Ok(decoded_stream(
         StreamReader::new(bytes),
         Box::new(AnthropicDecoder::new()),
+        redact,
     ))
 }
 
@@ -265,8 +277,9 @@ pub(super) async fn complete(
         extra_body,
         stream: false,
     });
-    let response = authed_post(http, tokens, source, messages_url(&source.base_url), &body)
-        .await?
+    let (request, redact) =
+        authed_post(http, tokens, source, messages_url(&source.base_url), &body).await?;
+    let response = request
         // Non-streaming, so a total deadline is meaningful here. The streaming
         // path deliberately has none.
         .timeout(Duration::from_secs(timeout))
@@ -278,7 +291,7 @@ pub(super) async fn complete(
     if !status.is_success() {
         return Err(ClientError::Http {
             status: status.as_u16(),
-            body: text,
+            body: redact.clean(&text),
         });
     }
     record_completion_usage(&source.name, model, &text);

@@ -29,9 +29,11 @@ pub type ChatCompletionStream =
 
 mod anthropic;
 mod openai;
+mod redact;
 mod sse;
 use anthropic::TokenCache;
 use anthropic::thinking::strip_history;
+use redact::{Credential, Redactor};
 
 pub(crate) use anthropic::thinking::{THINKING_HISTORY_KEY, thinking_disabled};
 
@@ -99,6 +101,10 @@ pub trait ChatClient: Send + Sync {
 /// The variants are cut where the [`ErrorKind`] boundaries are, so a failed run
 /// classifies itself from the error it already has. Anything coarser would leave
 /// the summary substring-matching its own message.
+///
+/// Every body reaching one of these has already been through [`Redactor`], so no
+/// caller has to strip a credential from it again. That is the point of doing it
+/// here: the same body goes to stderr, to the summary, and to the summary file.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("connection error: {0}")]
@@ -186,7 +192,9 @@ fn unsupported(source: &Source, what: &str) -> ClientError {
     ))
 }
 
-async fn limited_error_body(response: reqwest::Response) -> String {
+/// Read a failing response's body, bounded, with the credentials the request
+/// carried struck out of it.
+async fn limited_error_body(response: reqwest::Response, redact: &Redactor) -> String {
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -197,10 +205,27 @@ async fn limited_error_body(response: reqwest::Response) -> String {
         body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
         if body.len() > MAX_ERROR_BODY_BYTES {
             body.truncate(MAX_ERROR_BODY_BYTES);
-            return format!("{}\n[truncated]", String::from_utf8_lossy(&body));
+            return truncated_body(&body, redact);
         }
     }
-    String::from_utf8_lossy(&body).into_owned()
+    reported_body(&body, redact)
+}
+
+/// What a failing response reports: its body, with the credentials the request
+/// carried struck out.
+fn reported_body(body: &[u8], redact: &Redactor) -> String {
+    redact.clean(&String::from_utf8_lossy(body))
+}
+
+/// The same, for a body [`MAX_ERROR_BODY_BYTES`] cut short.
+///
+/// Cleaning runs before the marker goes on rather than after. That cap is the
+/// one limit landing before redaction can look at the whole body, so a
+/// credential straddling it leaves its opening behind - which
+/// [`Redactor::clean`] strips as a severed tail. Marking first would hide that
+/// opening behind `[truncated]`, where nothing would go looking for it.
+fn truncated_body(body: &[u8], redact: &Redactor) -> String {
+    format!("{}\n[truncated]", reported_body(body, redact))
 }
 
 /// A reqwest-based implementation of `ChatClient`.

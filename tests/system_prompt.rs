@@ -8,79 +8,18 @@
 //! configuring nothing sends the bytes it always has.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::Write;
+use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::sync::Arc;
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-/// Every `/chat/completions` body the endpoint was sent.
-type Bodies = Arc<Mutex<Vec<String>>>;
+mod common;
 
-/// A plain text answer, which ends the turn loop after one request.
-fn final_body() -> String {
-    [
-        r#"data: {"choices":[{"delta":{"content":"finished"}}]}"#,
-        r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
-        "data: [DONE]",
-    ]
-    .join("\n\n")
-        + "\n\n"
-}
-
-fn serve(listener: TcpListener, bodies: &Bodies) -> JoinHandle<()> {
-    let bodies = Arc::clone(bodies);
-    thread::spawn(move || {
-        while let Ok((stream, _)) = listener.accept() {
-            answer(stream, &bodies);
-        }
-    })
-}
-
-fn answer(mut stream: TcpStream, bodies: &Bodies) {
-    let mut reader = BufReader::new(stream.try_clone().expect("the socket must clone"));
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() {
-        return;
-    }
-    let body = read_body(&mut reader);
-    let response = if request_line.contains("/chat/completions") {
-        bodies.lock().expect("the lock must hold").push(body);
-        let sse = final_body();
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{sse}",
-            sse.len()
-        )
-    } else {
-        // The context-window probe. 404 is a fine answer; afi falls back.
-        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
-    };
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
-}
-
-/// Read past the headers and whatever body they announce, so the client is not
-/// answered before it has finished sending.
-fn read_body(reader: &mut BufReader<TcpStream>) -> String {
-    let mut length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-            break;
-        }
-        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            length = value.trim().parse().unwrap_or(0);
-        }
-    }
-    let mut body = vec![0u8; length];
-    let _ = reader.read_exact(&mut body);
-    String::from_utf8_lossy(&body).into_owned()
-}
+use common::endpoint::{Bodies, serve, text_answer};
 
 /// One-shot, against `addr` when there is one and a closed port when there is
 /// not - a run that refuses to start never reaches either.
@@ -97,15 +36,33 @@ fn run_afi_with_env(
     extra: &[&str],
     env: &[(&str, &str)],
 ) -> Output {
+    let mut args = vec!["-f", "-"];
+    args.extend_from_slice(extra);
+    spawn_afi(home, addr, &args, env, "review the diff\n")
+}
+
+/// A piped session rather than a one-shot: without `-f` the run goes through the
+/// REPL, which is the path that saves a session to resume from.
+fn run_afi_session(home: &TempDir, addr: Option<SocketAddr>, extra: &[&str]) -> Output {
+    spawn_afi(home, addr, extra, &[], "review the diff\n/quit\n")
+}
+
+/// The one spawn. Every helper above funnels through here so a second copy
+/// cannot drift and make the feature look like it misbehaved.
+fn spawn_afi(
+    home: &TempDir,
+    addr: Option<SocketAddr>,
+    args: &[&str],
+    env: &[(&str, &str)],
+    input: &str,
+) -> Output {
     let base = addr.map_or_else(
         || "http://127.0.0.1:9/v1".to_string(),
         |addr| format!("http://{addr}/v1"),
     );
-    let mut args = vec!["-f", "-"];
-    args.extend_from_slice(extra);
     let mut command = Command::new(env!("CARGO_BIN_EXE_afi"));
     command
-        .args(&args)
+        .args(args)
         .env_clear()
         .env("AFI_HOME", home.path())
         .env("HOME", home.path())
@@ -122,7 +79,7 @@ fn run_afi_with_env(
         .stdin
         .take()
         .expect("piped stdin")
-        .write_all(b"review the diff\n")
+        .write_all(input.as_bytes())
         .expect("the prompt must write");
     child.wait_with_output().expect("afi must exit")
 }
@@ -185,11 +142,12 @@ fn the_prompt_a_run_configures_is_what_it_sends() {
         .local_addr()
         .expect("the endpoint must have an addr");
     let bodies: Bodies = Arc::default();
-    let server = serve(listener, &bodies);
+    let server = serve(listener, &bodies, |_| text_answer("finished"));
 
     nothing_configured_sends_the_built_in_prompt(addr, &bodies);
     replace_drops_the_guidance_and_keeps_the_contract(addr, &bodies);
     append_sends_both(addr, &bodies);
+    a_resume_sends_this_runs_prompt_and_only_it(addr, &bodies);
 
     drop(server);
 }
@@ -256,6 +214,57 @@ fn append_sends_both(addr: SocketAddr, bodies: &Bodies) {
     assert!(
         system.ends_with(SUPPLIED),
         "the supplied text lands last: {system}"
+    );
+    bodies.lock().unwrap().clear();
+}
+
+/// A resumed run is still the run the operator just configured.
+///
+/// The session file stores the system message it was saved under, so resuming
+/// has to drop it and insert this run's. Without that, a `replace` run resuming a
+/// session saved under the built-in prompt sends both - and the Anthropic path
+/// joins multiple system messages into one block, handing a review job back the
+/// shell guidance that replacing exists to remove.
+fn a_resume_sends_this_runs_prompt_and_only_it(addr: SocketAddr, bodies: &Bodies) {
+    let home = TempDir::new().unwrap();
+    let first = write_prompt(&home, SUPPLIED);
+    let saved = run_afi_session(&home, Some(addr), &["--system-prompt-file", &first]);
+    let stdout = String::from_utf8(saved.stdout).expect("stdout must be utf-8");
+    let session = stdout
+        .split("resume with: afi --resume ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("the run must save a session: {stdout}"))
+        .to_string();
+    bodies.lock().unwrap().clear();
+
+    let second = home.path().join("other.md");
+    fs::write(&second, "Only summarize. Never review.").expect("the prompt must write");
+    run_afi_session(
+        &home,
+        Some(addr),
+        &[
+            "--resume",
+            &session,
+            "--system-prompt-file",
+            second.to_str().unwrap(),
+        ],
+    );
+
+    // `system_sent` asserts there is exactly one, which is the half that fails
+    // when the stored message is not dropped.
+    let system = system_sent(bodies);
+    assert!(
+        system.contains("Only summarize."),
+        "the resumed run sends the prompt it was given: {system}"
+    );
+    assert!(
+        !system.contains(SUPPLIED),
+        "not the prompt the session was saved under: {system}"
+    );
+    assert!(
+        !system.contains(SHELL_GUIDANCE),
+        "and not the built-in guidance a replace run is dropping: {system}"
     );
     bodies.lock().unwrap().clear();
 }

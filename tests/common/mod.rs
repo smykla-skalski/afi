@@ -23,6 +23,8 @@ use serde_json::Value;
 pub const NOT_FOUND: &str =
     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
+pub mod endpoint;
+
 /// Build a runtime with a clean env (only the vars you pass in).
 ///
 /// `args` is argv including argv[0] (typically `"afi"`). `env` is the

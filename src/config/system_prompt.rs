@@ -163,11 +163,33 @@ pub fn resolve(file: Option<&str>, mode: Option<&str>) -> Result<SystemPrompt, S
 fn read(path: &str) -> Result<String, String> {
     let body = fs::read_to_string(path)
         .map_err(|error| format!("can't read the system prompt from {path:?}: {error}"))?;
-    let text = body.trim().to_string();
+    let text = body.trim_matches(unreadable).to_string();
     if text.is_empty() {
         return Err(format!("the system prompt at {path:?} is empty"));
     }
     Ok(text)
+}
+
+/// Whether `c` is a character the model cannot act on.
+///
+/// Wider than `char::is_whitespace`, which follows the Unicode `White_Space`
+/// property and therefore keeps a byte-order mark, a zero-width space, and a
+/// word joiner. A file holding only those is as empty as one holding only
+/// spaces, and it is what an editor writing a BOM into an otherwise-truncated
+/// file leaves behind - but `trim` would pass it, and the run would go out
+/// reporting instructions the model never received. Trimming rather than
+/// rejecting also drops the BOM a Windows editor puts in front of a real prompt,
+/// which is noise the model would otherwise be sent.
+fn unreadable(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_control()
+        || matches!(c,
+            '\u{00ad}'               // soft hyphen
+            | '\u{200b}'..='\u{200f}' // zero-width space through RTL mark
+            | '\u{2028}'..='\u{202e}' // line/paragraph separators, bidi embedding
+            | '\u{2060}'..='\u{2064}' // word joiner through invisible plus
+            | '\u{feff}'              // byte-order mark
+        )
 }
 
 #[cfg(test)]

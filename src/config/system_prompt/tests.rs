@@ -125,13 +125,44 @@ fn a_directory_refuses_the_run_naming_the_path() {
 fn an_empty_file_refuses_the_run_rather_than_falling_back() {
     // What a truncated write and an unexpanded template both leave behind. The
     // built-in prompt is the one answer that must not happen here.
-    for body in ["", "\n", "   \n\t\n"] {
+    //
+    // The invisible cases pass `str::trim`, which follows the Unicode
+    // `White_Space` property and so keeps every one of them. Before they were
+    // caught, a file holding just a byte-order mark produced a run that exited 0
+    // and reported `{"mode": "replace", "file": ...}` while the model was sent no
+    // instructions at all.
+    for body in [
+        "",
+        "\n",
+        "   \n\t\n",
+        "\u{feff}",           // BOM alone, what an editor leaves on a truncated file
+        "\u{feff}\n",         // and with the newline it would normally precede
+        "\u{200b}",           // zero-width space
+        "\u{2060}",           // word joiner
+        "\u{00ad}  \u{feff}", // a mix, none of it visible
+    ] {
         let (_dir, path) = prompt_file(body);
         let error = resolve(Some(&path), None)
             .expect_err(&format!("an empty prompt must refuse, gave {body:?}"));
         assert!(error.contains(&path), "{error}");
         assert!(error.contains("empty"), "{error}");
     }
+}
+
+#[test]
+fn a_byte_order_mark_is_stripped_off_a_real_prompt() {
+    // The other half of trimming rather than rejecting: a Windows editor writes a
+    // BOM in front of perfectly good instructions, and sending it would put a
+    // stray invisible character at the seam between afi's part and the
+    // operator's.
+    let (_dir, path) = prompt_file("\u{feff}Review the diff.\n");
+    let resolved = resolve(Some(&path), None).expect("a BOM must not refuse a real prompt");
+    assert!(
+        resolved.text().ends_with("\n\nReview the diff."),
+        "{:?}",
+        resolved.text()
+    );
+    assert!(!resolved.text().contains('\u{feff}'));
 }
 
 #[test]

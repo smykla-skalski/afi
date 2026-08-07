@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::config::Runtime;
+use crate::config::{Runtime, Source};
 use crate::model::usage_totals;
 use crate::summary::{self, RunSummary, final_answer};
 use crate::term::{MessageKind, UserInterface};
@@ -71,5 +71,8 @@ fn build<'a>(
             .and_then(|pricing| pricing.run_cost_usd(&by_model)),
         elapsed_secs: elapsed.as_secs_f64(),
         tools: rt.tool_policy.permitted(),
+        // Read off the source rather than the flag, so what is reported is what
+        // the requests carried - including a level `EXTRA_BODY` set by hand.
+        effort: rt.active_source().and_then(Source::resolved_effort),
     }
 }

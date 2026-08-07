@@ -20,6 +20,8 @@ use std::borrow::Cow;
 
 use serde_json::{Value, json};
 
+use crate::config::Effort;
+
 /// Where an assistant turn's raw Anthropic thinking blocks live in the
 /// `OpenAI`-shape history.
 ///
@@ -43,6 +45,14 @@ pub(super) enum Thinking {
     Drop,
 }
 
+impl Thinking {
+    /// Whether this request may spend tokens thinking. The same fact the
+    /// replay rule turns on, under the name the `max_tokens` floor needs it by.
+    pub(super) fn is_on(self) -> bool {
+        self == Self::Replay
+    }
+}
+
 /// The `thinking` value for a request, or `None` to omit the key entirely.
 ///
 /// Three states, all reachable from a source's `EXTRA_BODY`:
@@ -54,12 +64,39 @@ pub(super) enum Thinking {
 ///
 /// Anything else is passed through rather than second-guessed; the API rejects
 /// a malformed value with a clearer message than afi could write.
+///
+/// The default gives way to omission above effort `high`, where `disabled` is
+/// no longer accepted - see [`disabled_would_be_rejected`].
 pub(super) fn resolve(extra_body: Option<&Value>) -> Option<Value> {
     match extra_body.and_then(|body| body.get("thinking")) {
+        None if disabled_would_be_rejected(extra_body) => None,
         None => Some(json!({"type": DISABLED})),
         Some(Value::Null) => None,
         Some(value) => Some(value.clone()),
     }
+}
+
+/// True at the effort levels where Claude Opus 5 rejects an explicit
+/// `disabled`.
+///
+/// `disabled` is afi's default because it is the value the widest set of models
+/// accepts, which stops being true above `high`: asking for that much effort and
+/// then turning thinking off is a contradiction the API refuses. Omitting the
+/// key leaves the model at its own default, which is the closest thing to
+/// "afi did not ask" - and an `--effort max` run failing every turn over a
+/// default the caller never set would be afi's bug, not theirs. Anything
+/// explicit in `EXTRA_BODY` still wins, including an explicit `disabled`.
+///
+/// The level is read back through [`Effort`] rather than matched as a pair of
+/// string literals, so a rename or a sixth level cannot leave this predicate
+/// silently pointing at names nothing produces any more.
+fn disabled_would_be_rejected(extra_body: Option<&Value>) -> bool {
+    extra_body
+        .and_then(|body| body.get("output_config"))
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)
+        .and_then(Effort::parse)
+        .is_some_and(|level| level > Effort::High)
 }
 
 /// The replay mode implied by a resolved `thinking` value.

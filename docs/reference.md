@@ -14,6 +14,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--prompt-file <path>` / `-f`               | non-interactive single-shot mode (reads from file or stdin) |
 | `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary)) |
 | `--summary-file <path>`                     | also write that summary to a path ([details](#writing-the-summary-to-a-file)) |
+| `--effort <low\|medium\|high\|xhigh\|max>`  | how hard the model is asked to think ([details](#reasoning-effort))  |
 | `--read-only`                               | deny every tool that can change anything ([details](#tool-policy)) |
 | `--allowed-tools <a,b>`                     | only these tools may be called ([details](#tool-policy))    |
 | `--disallowed-tools <a,b>`                  | these tools may not be called ([details](#tool-policy))     |
@@ -62,6 +63,7 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_TOOL_RESULT_CHARS`                      | per-tool-result char cap (default 20000)                             |
 | `AFI_SUMMARY`                                | set to `json` for a run summary on stdout ([details](#run-summary))  |
 | `AFI_SUMMARY_FILE`                           | path to also write the run summary to ([details](#writing-the-summary-to-a-file)) |
+| `AFI_EFFORT`                                 | reasoning effort for every source ([details](#reasoning-effort))     |
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
 | `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
 | `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
@@ -92,6 +94,37 @@ A restricted run shows `tools:` in the status line and lists the permitted set i
 
 **This is not a sandbox.** It bounds which afi tools run, not what a permitted command does once started. A permitted `run_bash` can do anything the user can, including editing files, and nothing stops it unsetting these variables for a nested `afi`. Use it to keep a run inside the shape you intended, not to contain something adversarial.
 
+## Reasoning effort
+
+`--effort <level>` (or `AFI_EFFORT`) says how hard the model should think. The levels are `low`, `medium`, `high`, `xhigh`, and `max`, and the flag wins over the variable.
+
+```
+afi --effort xhigh -f review-prompt.txt
+```
+
+The same level reaches every source in whatever its endpoint calls it:
+
+| endpoint                     | sent as                              | highest level |
+| ---------------------------- | ------------------------------------ | ------------- |
+| Anthropic Messages API       | `output_config: {"effort": "…"}`     | `max`         |
+| OpenRouter                   | `reasoning: {"effort": "…"}`         | `high`        |
+| OpenAI                       | `reasoning_effort: "…"`              | `high`        |
+| everything else              | nothing                              | -             |
+
+A level above an endpoint's ceiling is capped rather than sent, and a source with no effort control afi knows of - llama.cpp, vLLM, SGLang, Z.ai - gets nothing at all. Both print a line on stderr naming the source, and neither stops the run: a level is a preference the endpoint may simply not have, and dying over it would make the flag unusable in any script that switches source. Only the source the run starts on is reported; `/source` switches to an endpoint with a different ladder without saying so.
+
+Talking to OpenAI's own API also switches the output limit from `max_tokens` to `max_completion_tokens`, since its reasoning models - the only ones `reasoning_effort` applies to - reject the older key outright. Every other endpoint keeps `max_tokens`, the only spelling a self-hosted server implements.
+
+The ceilings above belong to the wire formats, which are stable. **Individual models are stricter, and afi keeps no table of that** - `claude-haiku-4-5` takes no effort at all, and older Opus stops at `high`. A model that rejects a level says so on the first request, which is a clearer answer than a compiled-in list nobody notices going stale.
+
+**An unusable level exits 2 without starting**, whether it came from the flag or the variable. This is the reason to prefer it over hand-writing the same JSON into `EXTRA_BODY`, where a typo is warned about and ignored: a run at an effort nobody asked for finishes normally and looks exactly like one at the right effort, so there is nothing downstream to notice.
+
+`EXTRA_BODY` stays the escape hatch and wins wherever the two would meet. afi never overwrites a level written there by hand, and it never adds one to an object written there either: `{"reasoning":{"max_tokens":2000}}` is left exactly as it is rather than becoming `{"max_tokens":2000,"effort":"high"}`, because OpenRouter documents those two keys as mutually exclusive and afi cannot know which keys any given endpoint pairs that way. Either case prints a line on stderr, and the [run summary](#run-summary) reports whichever level the requests actually carried.
+
+On the Anthropic path one default gives way. `thinking` is sent as `disabled` unless [`AFI_ANTHROPIC_EXTRA_BODY`](#anthropic) says otherwise, and `claude-opus-5` rejects an explicit `disabled` above effort `high`; at `xhigh` and `max` the key is therefore omitted, leaving the model at its own default. Anything explicit in `EXTRA_BODY` is still sent as written, `disabled` included.
+
+**Thinking is charged against `max_tokens`, so the floor moves with it.** Anthropic caps thinking and visible text with one number, and afi's forced-final turn asks for only 2048. Whenever a request may think - because `EXTRA_BODY` turned it on, or because the effort is above `high` - that request's `max_tokens` is floored at 16000 rather than 4096, so the budget cannot go entirely on reasoning and leave nothing to say. Higher effort wants more than the floor, and `AFI_MAX_TOKENS` is how to give it (Anthropic's own guidance is 64000 at `xhigh` and `max`). A turn that ends with no answer at all now prints `FORCED FINAL RETURNED NO ANSWER`, exits 1, and reports `"ok": false` rather than a successful empty answer.
+
 ## Run summary
 
 `--summary json` (or `AFI_SUMMARY=json`) prints one JSON object on stdout after a non-interactive run, for CI that needs the result rather than the rendered transcript:
@@ -114,13 +147,16 @@ A restricted run shows `tools:` in the status line and lists the permitted set i
     "cost_usd": 0.023398
   },
   "elapsed_secs": 12.17,
-  "tools": ["read_file", "write_file", "edit_file", "list_dir", "run_bash", "wait_background"]
+  "tools": ["read_file", "write_file", "edit_file", "list_dir", "run_bash", "wait_background"],
+  "effort": "xhigh"
 }
 ```
 
 `answer` is the last assistant message with text, so a review flow can post it directly. Turns that only called tools are skipped.
 
 `tools` is what the run was permitted to call, so an audit of a CI log can confirm the [tool policy](#tool-policy) from the output instead of trusting that the workflow passed the flag it claims to.
+
+`effort` is there for the same reason: it is the level the requests actually carried, read back off the source rather than off the flag, so a capped level reads as the capped one and a level set by hand in `EXTRA_BODY` still shows up. `null` means the run took the endpoint's own default - either nobody asked for a level, or that endpoint has no [effort control](#reasoning-effort) afi knows of.
 
 The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run.
 
@@ -224,6 +260,7 @@ A read-only job needs nothing else: there is no terminal to answer a prompt, and
 | `thinking` in `EXTRA_BODY` | sent as | for |
 | ---------------------------- | --------------------------- | -------------------------------------------- |
 | absent                       | `{"type": "disabled"}`      | the default; the only shape `claude-haiku-4-5` accepts |
+| absent, at effort `xhigh` or `max` | omitted entirely      | `claude-opus-5`, which rejects an explicit `disabled` that high ([details](#reasoning-effort)) |
 | `null`                       | omitted entirely            | `claude-fable-5`, which rejects an explicit `disabled` and always thinks |
 | an object                    | verbatim                    | `{"type": "adaptive", "display": "summarized"}` |
 

@@ -95,10 +95,25 @@ fn stream_body(request: &StreamRequest<'_>) -> Value {
         body["tool_choice"] = choice.clone();
     }
     if let Some(limit) = request.max_tokens.filter(|value| *value > 0) {
-        body["max_tokens"] = Value::from(limit);
+        body[max_tokens_key(request.source)] = Value::from(limit);
     }
     merge_extra_body(&mut body, request.extra_body);
     body
+}
+
+/// The output-limit parameter this endpoint takes.
+///
+/// `max_tokens` is the spelling every `OpenAI`-compatible server implements,
+/// and the one `OpenAI`'s own reasoning models refuse outright: they take
+/// `max_completion_tokens` and 400 on the older key. Those are exactly the
+/// models `reasoning_effort` applies to, so without this the effort dialect afi
+/// advertises for that host could never produce a request it would accept.
+fn max_tokens_key(source: &Source) -> &'static str {
+    if source.is_openai() {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }
 }
 
 /// The non-streaming request body, used by `/compress`.
@@ -227,12 +242,14 @@ pub(super) async fn overrun_probe(
     source: &Source,
     model: &str,
 ) -> Result<String, ClientError> {
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 10_000_000,
         "stream": false,
     });
+    // Same spelling the real request uses, or the probe reads back a complaint
+    // about the parameter instead of the limit it went looking for.
+    body[max_tokens_key(source)] = Value::from(10_000_000);
     let response = authed_post(http, source, chat_url(source), &body)
         .timeout(Duration::from_secs(30))
         .send()

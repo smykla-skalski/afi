@@ -30,7 +30,7 @@ pub mod util;
 pub mod version;
 
 pub use approval::{ApprovalKind, ApprovalState, Level};
-pub use config::{Runtime, Source};
+pub use config::{Effort, Runtime, Source};
 pub use repl::banner;
 pub use sessions::{
     SESSION_LIST_DEFAULT_LIMIT, SESSION_LIST_MAX_LIMIT, SessionSummary, delete_session,

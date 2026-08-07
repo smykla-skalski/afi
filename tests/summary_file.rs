@@ -6,7 +6,7 @@
 //! model answers cannot tell a broken run from a missing one.
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -29,12 +29,22 @@ fn run_afi(home: &TempDir, args: &[&str], env: &[(&str, &str)], input: &str) -> 
         command.env(key, value);
     }
     let mut child = command.spawn().expect("afi must start");
-    child
+    // Half the runs here are refused before the REPL starts, so the child can be
+    // gone by the time this write lands and a broken pipe means "it already
+    // exited" rather than a test failure. Those runs assert on the exit code and
+    // on stderr, neither of which the unread prompt reaches - and a run that did
+    // need the prompt fails on its own missing summary. Same hardening as
+    // `plain_repl` and `tool_policy`.
+    let written = child
         .stdin
         .take()
         .expect("piped stdin")
-        .write_all(input.as_bytes())
-        .expect("the prompt must write");
+        .write_all(input.as_bytes());
+    match written {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("the prompt must write: {error}"),
+    }
     child.wait_with_output().expect("afi must exit")
 }
 

@@ -303,12 +303,14 @@ fn is_local_public_is_not() {
     assert!(!mk_source("https://openrouter.ai/api/v1").is_local());
 }
 
+/// `parse_args` over a borrowed argv, which is how every caller here spells it.
+fn mk(args: &[&str]) -> ParsedArgs {
+    parse_args(&args.iter().map(ToString::to_string).collect::<Vec<_>>())
+}
+
 // parse_args handles --resume with and without a target
 #[test]
 fn parse_args_resume_bare_vs_target() {
-    let mk = |args: &[&str]| -> ParsedArgs {
-        parse_args(&args.iter().map(ToString::to_string).collect::<Vec<_>>())
-    };
     assert_eq!(mk(&["afi", "--resume"]).resume, Some(None));
     assert_eq!(
         mk(&["afi", "--resume", "deadbe"]).resume,
@@ -324,4 +326,33 @@ fn parse_args_resume_bare_vs_target() {
 #[test]
 fn approval_kind_import_works() {
     let _ = ApprovalKind::Yolo;
+}
+
+// A value-less flag must not swallow the next flag. Losing `--effort` this way
+// produced a finished run at an effort nobody asked for, with no refusal.
+#[test]
+fn parse_args_never_takes_another_flag_as_a_value() {
+    let p = mk(&["afi", "--summary", "--effort", "xhigh", "-f", "p.txt"]);
+    assert_eq!(p.summary, None, "--summary must not eat --effort");
+    assert_eq!(p.effort.as_deref(), Some("xhigh"));
+    assert_eq!(p.prompt_file.as_deref(), Some("p.txt"));
+    assert!(p.flag_errors.is_empty(), "{:?}", p.flag_errors);
+
+    for flag in ["--source", "--session", "--approval", "--prompt-file"] {
+        let p = mk(&["afi", flag, "--yolo"]);
+        assert!(p.yolo, "{flag} must not eat --yolo");
+    }
+}
+
+// `-` is the documented stdin form and is a value, not a flag.
+#[test]
+fn parse_args_still_reads_the_prompt_from_stdin() {
+    assert_eq!(mk(&["afi", "-f", "-"]).prompt_file.as_deref(), Some("-"));
+    assert_eq!(
+        mk(&["afi", "--prompt-file", "-", "--yolo"])
+            .prompt_file
+            .as_deref(),
+        Some("-")
+    );
+    assert!(mk(&["afi", "-f", "-", "--yolo"]).yolo);
 }

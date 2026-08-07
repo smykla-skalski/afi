@@ -103,3 +103,39 @@ fn optional_request_fields_are_omitted_rather_than_sent_empty() {
     assert_eq!(body["provider"], json!({"order": ["deepinfra"]}));
     assert_eq!(body["stream"], true);
 }
+
+#[test]
+fn openais_own_host_gets_the_output_limit_it_accepts() {
+    // Reasoning models - the only ones `reasoning_effort` applies to - reject
+    // `max_tokens` outright and take `max_completion_tokens`. Sending the older
+    // key there 400s the first turn of every run.
+    let openai = Source::new(
+        "oa",
+        "https://api.openai.com/v1".to_string(),
+        Some("key".to_string()),
+        None,
+        None,
+        None,
+    );
+    let request = |source: &Source| {
+        stream_body(&StreamRequest {
+            source,
+            model: "gpt-5",
+            messages: &[json!({"role": "user", "content": "hi"})],
+            tools: None,
+            tool_choice: None,
+            max_tokens: Some(16_000),
+            extra_body: None,
+            recovery_sampling: false,
+        })
+    };
+    let body = request(&openai);
+    assert_eq!(body["max_completion_tokens"], 16_000);
+    assert!(body.get("max_tokens").is_none());
+
+    // Every other endpoint keeps the OpenAI-compatible spelling, which is the
+    // only one a self-hosted server implements.
+    let body = request(&source());
+    assert_eq!(body["max_tokens"], 16_000);
+    assert!(body.get("max_completion_tokens").is_none());
+}

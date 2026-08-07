@@ -45,6 +45,16 @@ use decode::AnthropicDecoder;
 const MIN_MAX_TOKENS: u32 = 4096;
 /// Used when the caller supplied no limit at all.
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
+/// The floor once the request may actually think.
+///
+/// 4096 is room for an answer and not for the reasoning in front of it, which
+/// is the same failure that floor was raised to prevent, one tier up: a
+/// forced-final turn at 2048 becomes 4096, spends all of it thinking, and
+/// returns no text. Thinking is on whenever a source configures it and whenever
+/// `--effort` goes above `high`, so the floor has to move with it. A caller who
+/// asked for less than the default gets the default; higher effort wants more
+/// than that, and `AFI_MAX_TOKENS` is how you say so.
+const MIN_MAX_TOKENS_THINKING: u32 = DEFAULT_MAX_TOKENS;
 
 /// Body keys a source may set through its `EXTRA_BODY`.
 ///
@@ -100,10 +110,11 @@ struct BodyParams<'a> {
 
 fn build_body(params: &BodyParams<'_>) -> Value {
     let thinking = thinking::resolve(params.extra_body);
-    let translated = messages::translate(params.history, thinking::mode(thinking.as_ref()));
+    let mode = thinking::mode(thinking.as_ref());
+    let translated = messages::translate(params.history, mode);
     let mut body = json!({
         "model": params.model,
-        "max_tokens": clamp_max_tokens(params.max_tokens),
+        "max_tokens": clamp_max_tokens(params.max_tokens, mode),
         "stream": params.stream,
         "messages": translated.messages,
     });
@@ -125,11 +136,16 @@ fn build_body(params: &BodyParams<'_>) -> Value {
     body
 }
 
-fn clamp_max_tokens(requested: Option<u32>) -> u32 {
+fn clamp_max_tokens(requested: Option<u32>, thinking: thinking::Thinking) -> u32 {
+    let floor = if thinking.is_on() {
+        MIN_MAX_TOKENS_THINKING
+    } else {
+        MIN_MAX_TOKENS
+    };
     requested
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_TOKENS)
-        .max(MIN_MAX_TOKENS)
+        .max(floor)
 }
 
 /// The system prompt as a cacheable block.

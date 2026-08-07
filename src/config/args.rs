@@ -20,6 +20,7 @@ pub struct ParsedArgs {
     pub summary_file: Option<String>,
     pub allowed_tools: Option<String>,
     pub disallowed_tools: Option<String>,
+    pub effort: Option<String>,
     /// Flags that were given wrongly. Only the flags whose silent fallback
     /// loses something the caller asked for record here - see `set_required`.
     pub flag_errors: Vec<String>,
@@ -66,6 +67,7 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
         "--summary" => return set_opt(&mut out.summary, value),
         "--summary-file" => return set_summary_file(out, value),
         "--allowed-tools" | "--disallowed-tools" => return set_tool_flag(out, flag, value),
+        "--effort" => return set_effort(out, value),
         "--resume" | "-r" => {
             // bare --resume, or --resume <target> where target doesn't start
             // with '-' (so `--resume --yolo` doesn't swallow --yolo).
@@ -84,12 +86,15 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
 ///
 /// Unlike `set_opt`, a missing value cannot be shrugged off for these flags.
 /// `afi --disallowed-tools $DENY` with `DENY` unset would grant every tool while
-/// the command line says otherwise, and `afi --summary-file $OUT` with `OUT`
-/// unset would exit 0 having written nothing to the path a workflow is about to
-/// read. Both are silent failures in the direction nobody wants, so the run
-/// refuses to start instead. A value that looks like another flag - what
+/// the command line says otherwise, `afi --summary-file $OUT` with `OUT` unset
+/// would exit 0 having written nothing to the path a workflow is about to read,
+/// and a dropped `--effort $LEVEL` would run at an effort nobody asked for. All
+/// three are silent failures in the direction nobody wants, so the run refuses
+/// to start instead. A value that looks like another flag - what
 /// `--summary-file --yolo` produces - is the same mistake and is refused too,
-/// and is left unconsumed so the following flag still applies.
+/// and is left unconsumed so the following flag still applies. A bare `-` is
+/// refused here as well, unlike on the `set_opt` path: none of these flags
+/// takes one, and a summary file literally named `-` is a typo every time.
 fn set_required(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> Option<String> {
     let Some(v) = value.filter(|v| !v.starts_with('-')) else {
         out.flag_errors.push(format!("{flag} needs a value"));
@@ -127,6 +132,18 @@ fn set_summary_file(out: &mut ParsedArgs, value: Option<&str>) -> bool {
     true
 }
 
+/// Set `--effort`. Returns whether a value was consumed.
+///
+/// The level itself is validated later, against the sources it has to reach -
+/// see `config::effort`. All this decides is that one was given.
+fn set_effort(out: &mut ParsedArgs, value: Option<&str>) -> bool {
+    let Some(level) = set_required(out, "--effort", value) else {
+        return false;
+    };
+    out.effort = Some(level);
+    true
+}
+
 /// Set one of the two tool-policy flags. Returns whether a value was consumed.
 fn set_tool_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
     let Some(v) = set_required(out, flag, value) else {
@@ -140,11 +157,29 @@ fn set_tool_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool 
     true
 }
 
-/// Set `slot` to `value` when present; returns whether a value was consumed.
+/// Set `slot` to `value` when there is one; returns whether a value was
+/// consumed.
+///
+/// A flag-shaped token is left alone rather than swallowed. Taking it loses two
+/// settings at once: `afi --summary --effort xhigh` set `summary` to
+/// `"--effort"` and then dropped `xhigh` as a stray positional, so the run
+/// produced no summary *and* ran at an effort nobody asked for - the silent
+/// failure `--effort` exists to prevent, reached through a flag that has
+/// nothing to do with it. Not consuming costs a missing value here, which every
+/// flag on this path already tolerates.
 fn set_opt(slot: &mut Option<String>, value: Option<&str>) -> bool {
-    if let Some(v) = value {
-        *slot = Some(v.to_string());
-        return true;
-    }
-    false
+    let Some(v) = value.filter(|v| !is_another_flag(v)) else {
+        return false;
+    };
+    *slot = Some(v.to_string());
+    true
+}
+
+/// True for a token that is the next flag rather than this one's value.
+///
+/// A bare `-` is not one: it is `--prompt-file`'s documented "read the prompt
+/// from stdin". `set_required` is stricter and refuses it, because none of the
+/// flags on that path takes a dash for a value.
+fn is_another_flag(value: &str) -> bool {
+    value.starts_with('-') && value != "-"
 }

@@ -25,6 +25,7 @@ fn summary(ok: bool, answer: &str, usage: UsageTotals) -> RunSummary<'_> {
         cost_usd: None,
         elapsed_secs: 14.2341,
         tools: known_tool_names().to_vec(),
+        effort: None,
     }
 }
 
@@ -63,6 +64,22 @@ fn a_successful_run_reports_every_field() {
     assert_eq!(json["model"], "claude-sonnet-5");
     assert_eq!(json["answer"], "APPROVE_WITH_COMMENTS");
     assert_eq!(json["elapsed_secs"], 14.234);
+}
+
+#[test]
+fn the_effort_the_requests_carried_is_reported_beside_the_tools() {
+    // Both are settings a CI job depends on and cannot confirm from the answer,
+    // so both are auditable from the summary alone.
+    let mut run = summary(true, "x", totals(1));
+    run.effort = Some("xhigh");
+    assert_eq!(run.to_json()["effort"], "xhigh");
+
+    // Null covers both "nobody asked" and "the endpoint has no such control":
+    // either way the run took the endpoint's own default.
+    assert_eq!(
+        summary(true, "x", totals(1)).to_json()["effort"],
+        Value::Null
+    );
 }
 
 #[test]

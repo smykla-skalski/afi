@@ -40,7 +40,8 @@ fn main() {
     // degrade into a wider grant than was asked for (`--disallowed-tools
     // run_bsah` matches no tool, a bare `--disallowed-tools` sets none at all,
     // and either leaves `run_bash` available while the command line says
-    // otherwise), or a summary file it could not write.
+    // otherwise), a summary file it could not write, or an effort level nobody
+    // could have meant.
     let refusals = rt.refusals();
     if !refusals.is_empty() {
         for refusal in &refusals {

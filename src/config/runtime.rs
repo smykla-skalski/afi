@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
 use crate::envfile;
 use crate::pricing::Pricing;
-use crate::prompt;
 use crate::summary::{ErrorKind, RunError, SummaryFormat, summary_path, writable};
 use crate::tools::policy::ToolPolicy;
 
@@ -250,17 +249,19 @@ impl Runtime {
         out
     }
 
-    /// The system content every turn of this run sends.
+    /// The system prompt every turn of this run sends.
     ///
-    /// A run whose configured prompt could not be resolved has already been
-    /// refused by `refusals`, so the built-in text here is unreachable from the
-    /// binary. It is the answer rather than a panic for a library caller who
-    /// builds a `Runtime` and skips the check.
+    /// The only place the unresolvable case is answered. A run whose configured
+    /// prompt failed has already been stopped by `refusals`, so the built-in
+    /// prompt here is unreachable from the binary; it is the answer rather than a
+    /// panic for a library caller who builds a `Runtime` and skips the check.
+    /// Answering it once matters more than which answer it is - the enforcing and
+    /// reporting halves of `--read-only` once disagreed exactly this way.
     #[must_use]
-    pub fn system_text(&self) -> &str {
+    pub fn prompt(&self) -> &SystemPrompt {
         self.system_prompt
             .as_ref()
-            .map_or_else(|_| prompt::system(), SystemPrompt::text)
+            .unwrap_or_else(|_| system_prompt::builtin())
     }
 }
 

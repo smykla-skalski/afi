@@ -30,6 +30,7 @@ use serde_json::{Number, Value, json};
 
 use crate::atomic;
 use crate::model::usage_totals::{RefusedToolCalls, UsageTotals};
+use crate::util;
 
 mod auth;
 pub use auth::RunAuth;
@@ -70,13 +71,11 @@ impl SummaryFormat {
 /// caller kept. Pass both to get both.
 ///
 /// A blank value is no path, matching how the other variables here read a shell
-/// variable that is exported but unset. The flag is stricter, because writing it
-/// out is a statement that a file is wanted - see `set_required`.
+/// variable that is exported but unset - see `util::nonblank`. The flag is
+/// stricter, because writing it out is a statement that a file is wanted.
 #[must_use]
 pub fn summary_path(raw: Option<&str>) -> Option<PathBuf> {
-    raw.map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
+    util::nonblank(raw).map(PathBuf::from)
 }
 
 /// Prove the summary can reach `path` before the run starts.

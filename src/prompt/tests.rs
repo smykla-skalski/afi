@@ -1,5 +1,3 @@
-use std::ptr;
-
 use super::*;
 
 #[test]
@@ -21,15 +19,6 @@ fn the_built_in_prompt_is_the_parts_in_order() {
         !system.contains("\n\n\n"),
         "the seams are one blank line, not two"
     );
-}
-
-#[test]
-fn the_prompt_is_assembled_once() {
-    // Not an optimization. A prefix rebuilt per request is still byte-stable
-    // today, but it invites something per-request being interpolated into it
-    // later, which is exactly what the cache breakpoint cannot survive.
-    assert!(ptr::eq(system(), system()));
-    assert!(ptr::eq(tool_protocol(), tool_protocol()));
 }
 
 #[test]

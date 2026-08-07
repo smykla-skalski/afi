@@ -43,7 +43,7 @@ fn replace_is_the_default_and_keeps_the_wire_contract() {
     assert_eq!(resolved.file(), Some(path.as_str()));
     assert!(resolved.text().contains("Review the diff."));
     assert!(
-        resolved.text().starts_with(prompt::tool_protocol()),
+        resolved.text().starts_with(&prompt::tool_protocol()),
         "the contract leads, so what the operator wrote reads last"
     );
     assert!(

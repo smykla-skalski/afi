@@ -65,7 +65,7 @@ pub(crate) async fn handle_slash_command(
 
     match cmd {
         "/quit" | "/exit" => return CommandResult::Quit,
-        "/reset" | "/clear" | "/new" => cmd_reset(rt.system_text(), messages, session_id, ui),
+        "/reset" | "/clear" | "/new" => cmd_reset(rt.prompt().message(), messages, session_id, ui),
         "/yolo" => cmd_yolo(rt, ui),
         "/approval" => cmd_approval(rt, arg, ui),
         "/source" => cmd_source(rt, arg, ui),
@@ -85,8 +85,8 @@ pub(crate) async fn handle_slash_command(
     CommandResult::Continue
 }
 
-fn cmd_reset(system: &str, messages: &mut Vec<Value>, session_id: &mut String, ui: Ui<'_>) {
-    *messages = vec![json!({"role": "system", "content": system})];
+fn cmd_reset(system: Value, messages: &mut Vec<Value>, session_id: &mut String, ui: Ui<'_>) {
+    *messages = vec![system];
     *session_id = new_session_id();
     say(ui, Info, format!("Started a fresh session ({session_id})"));
 }

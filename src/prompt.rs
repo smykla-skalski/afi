@@ -7,8 +7,6 @@
 //! replacement while the guidance around them does not. See
 //! `crate::config::system_prompt`.
 
-use std::sync::LazyLock;
-
 /// Who the agent is. The shortest part, and the first thing a supplied prompt
 /// wants to say differently.
 const AGENT: &str = "You are a terminal coding agent working in the user's current directory.\n\
@@ -33,27 +31,25 @@ Operating principles for long background commands (docker pull/build, git clone 
 /// out. Part of the contract, so it is kept alongside `PROTOCOL`.
 const PROTOCOL_RUN_BASH: &str = "Text-protocol run_bash arg is `command` (NOT `cmd`): [afi_tool_call]{\"name\": \"run_bash\", \"arguments\": {\"command\": \"ls -la\"}}[/afi_tool_call]";
 
-static BUILT_IN: LazyLock<String> =
-    LazyLock::new(|| format!("{AGENT}\n\n{PROTOCOL}\n\n{SHELL}\n\n{PROTOCOL_RUN_BASH}"));
-
-static CONTRACT: LazyLock<String> = LazyLock::new(|| format!("{PROTOCOL}\n\n{PROTOCOL_RUN_BASH}"));
-
 /// The built-in system prompt, byte for byte what afi has always sent.
 ///
 /// Assembled rather than frozen as one literal so a replaced prompt can keep
-/// `tool_protocol` without keeping the rest. Assembled once, so it stays a
-/// `&'static str`: this string is the Anthropic cache prefix, and nothing
-/// per-request may be interpolated into it - see
-/// `crate::model::client::anthropic`.
+/// `tool_protocol` without keeping the rest. The order and the blank-line seams
+/// are the point: this string is the Anthropic cache prefix, so a run that
+/// configures nothing has to keep hitting the cache it filled before this
+/// setting existed - see `crate::model::client::anthropic`.
+///
+/// Called once per run, by `crate::config::system_prompt::resolve`, which holds
+/// the result for the whole run. Nothing per-request may reach this.
 #[must_use]
-pub fn system() -> &'static str {
-    &BUILT_IN
+pub fn system() -> String {
+    format!("{AGENT}\n\n{PROTOCOL}\n\n{SHELL}\n\n{PROTOCOL_RUN_BASH}")
 }
 
 /// The wire contract on its own, for a prompt that replaces the built-in text.
 #[must_use]
-pub fn tool_protocol() -> &'static str {
-    &CONTRACT
+pub fn tool_protocol() -> String {
+    format!("{PROTOCOL}\n\n{PROTOCOL_RUN_BASH}")
 }
 
 pub const DESC_SYSTEM: &str = "Describe the user's coding session in one short line (<=70 chars).";

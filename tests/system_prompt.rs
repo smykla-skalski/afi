@@ -85,13 +85,26 @@ fn read_body(reader: &mut BufReader<TcpStream>) -> String {
 /// One-shot, against `addr` when there is one and a closed port when there is
 /// not - a run that refuses to start never reaches either.
 fn run_afi(home: &TempDir, addr: Option<SocketAddr>, extra: &[&str]) -> Output {
+    run_afi_with_env(home, addr, extra, &[])
+}
+
+/// The same, with extra variables in the environment. Split out rather than
+/// duplicated, because a second copy of the spawn is free to drift from this one
+/// and the drift would look like the feature misbehaving.
+fn run_afi_with_env(
+    home: &TempDir,
+    addr: Option<SocketAddr>,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     let base = addr.map_or_else(
         || "http://127.0.0.1:9/v1".to_string(),
         |addr| format!("http://{addr}/v1"),
     );
     let mut args = vec!["-f", "-"];
     args.extend_from_slice(extra);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_afi"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_afi"));
+    command
         .args(&args)
         .env_clear()
         .env("AFI_HOME", home.path())
@@ -100,9 +113,11 @@ fn run_afi(home: &TempDir, addr: Option<SocketAddr>, extra: &[&str]) -> Output {
         .env("AFI_MODEL", "test-model")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("afi must start");
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("afi must start");
     child
         .stdin
         .take()
@@ -359,27 +374,15 @@ fn a_blank_variable_is_not_a_refusal() {
     // for a job, so it has to mean "no prompt file" rather than "stop".
     let home = TempDir::new().unwrap();
     let summary = home.path().join("run.json");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_afi"))
-        .args(["-f", "-", "--summary-file", summary.to_str().unwrap()])
-        .env_clear()
-        .env("AFI_HOME", home.path())
-        .env("HOME", home.path())
-        .env("AFI_BASE_URL", "http://127.0.0.1:9/v1")
-        .env("AFI_MODEL", "test-model")
-        .env("AFI_SYSTEM_PROMPT_FILE", "")
-        .env("AFI_SYSTEM_PROMPT_MODE", "")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("afi must start");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(b"hello\n")
-        .expect("the prompt must write");
-    let output = child.wait_with_output().expect("afi must exit");
+    let output = run_afi_with_env(
+        &home,
+        None,
+        &["--summary-file", summary.to_str().unwrap()],
+        &[
+            ("AFI_SYSTEM_PROMPT_FILE", ""),
+            ("AFI_SYSTEM_PROMPT_MODE", ""),
+        ],
+    );
 
     assert_ne!(output.status.code(), Some(2), "{}", stderr_of(&output));
     assert_eq!(read_json(&summary)["system_prompt"]["mode"], "builtin");

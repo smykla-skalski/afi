@@ -16,8 +16,12 @@
 //! `crate::prompt`.
 
 use std::fs;
+use std::sync::LazyLock;
+
+use serde_json::{Value, json};
 
 use crate::prompt;
+use crate::util;
 
 /// How a supplied prompt meets the built-in one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -87,6 +91,30 @@ impl SystemPrompt {
     pub fn file(&self) -> Option<&str> {
         self.from.as_ref().map(|(_, path)| path.as_str())
     }
+
+    /// The message a conversation opens with.
+    ///
+    /// The one place the shape is written down. Every entry point that starts or
+    /// restarts a history - a fresh session, a resume, a one-shot run, `/reset` -
+    /// builds it from here, so the next change to the shape is one edit rather
+    /// than four that have to agree.
+    #[must_use]
+    pub fn message(&self) -> Value {
+        json!({"role": "system", "content": self.text})
+    }
+}
+
+/// afi's own prompt, resolved once.
+///
+/// Exists so `Runtime` has a `'static` answer for a run whose configured prompt
+/// failed to resolve, which keeps that fallback to one site instead of one per
+/// caller. Reaching it means `refusals` was skipped - see `Runtime::prompt`.
+pub(super) fn builtin() -> &'static SystemPrompt {
+    static BUILT_IN: LazyLock<SystemPrompt> = LazyLock::new(|| SystemPrompt {
+        text: prompt::system(),
+        from: None,
+    });
+    &BUILT_IN
 }
 
 /// Resolve the prompt this run sends from an already-merged file and mode.
@@ -104,17 +132,14 @@ pub fn resolve(file: Option<&str>, mode: Option<&str>) -> Result<SystemPrompt, S
     // Checked whether or not a file was named. A value afi does not have is a
     // mistake worth hearing about at the moment it is made, rather than on the
     // first run that also supplies a file.
-    let mode = match blank_is_unset(mode) {
+    let mode = match util::nonblank(mode) {
         Some(raw) => PromptMode::from_value(raw).ok_or_else(|| {
             format!("unknown system prompt mode {raw:?} (want replace or append)")
         })?,
         None => PromptMode::default(),
     };
-    let Some(path) = blank_is_unset(file) else {
-        return Ok(SystemPrompt {
-            text: prompt::system().to_string(),
-            from: None,
-        });
+    let Some(path) = util::nonblank(file) else {
+        return Ok(builtin().clone());
     };
     let supplied = read(path)?;
     let afi = match mode {
@@ -143,14 +168,6 @@ fn read(path: &str) -> Result<String, String> {
         return Err(format!("the system prompt at {path:?} is empty"));
     }
     Ok(text)
-}
-
-/// A blank value names nothing, matching how the other variables here read a
-/// shell variable that is exported but unset. The flags are stricter, since
-/// writing one out is a statement that a value was meant - see
-/// `super::args::set_required_value`.
-fn blank_is_unset(raw: Option<&str>) -> Option<&str> {
-    raw.map(str::trim).filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]

@@ -12,13 +12,13 @@ mod builtins;
 mod effort;
 mod protocol;
 mod runtime;
-pub mod system_prompt;
+mod system_prompt;
 mod tools;
 pub use args::{ParsedArgs, parse_args};
 pub use effort::Effort;
 pub use protocol::{Federation, IdentitySource, NOOP_KEY, Protocol, is_placeholder};
 pub use runtime::{Runtime, discover_sources};
-pub use system_prompt::{PromptMode, SystemPrompt};
+pub use system_prompt::SystemPrompt;
 
 use crate::summary::RunAuth;
 

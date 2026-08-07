@@ -8,7 +8,7 @@
 //! configuring nothing sends the bytes it always has.
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -75,12 +75,19 @@ fn spawn_afi(
         command.env(key, value);
     }
     let mut child = command.spawn().expect("afi must start");
-    child
+    let written = child
         .stdin
         .take()
         .expect("piped stdin")
-        .write_all(input.as_bytes())
-        .expect("the prompt must write");
+        .write_all(input.as_bytes());
+    // A run that refuses its configured prompt exits before reading stdin, so
+    // the pipe is already closed by the time this writes. That is the behaviour
+    // one of these cases exists to assert, not a failure of the harness.
+    match written {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("the prompt must write: {error}"),
+    }
     child.wait_with_output().expect("afi must exit")
 }
 

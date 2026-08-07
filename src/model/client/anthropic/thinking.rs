@@ -20,6 +20,8 @@ use std::borrow::Cow;
 
 use serde_json::{Value, json};
 
+use crate::config::Effort;
+
 /// Where an assistant turn's raw Anthropic thinking blocks live in the
 /// `OpenAI`-shape history.
 ///
@@ -84,14 +86,17 @@ pub(super) fn resolve(extra_body: Option<&Value>) -> Option<Value> {
 /// "afi did not ask" - and an `--effort max` run failing every turn over a
 /// default the caller never set would be afi's bug, not theirs. Anything
 /// explicit in `EXTRA_BODY` still wins, including an explicit `disabled`.
+///
+/// The level is read back through [`Effort`] rather than matched as a pair of
+/// string literals, so a rename or a sixth level cannot leave this predicate
+/// silently pointing at names nothing produces any more.
 fn disabled_would_be_rejected(extra_body: Option<&Value>) -> bool {
-    matches!(
-        extra_body
-            .and_then(|body| body.get("output_config"))
-            .and_then(|config| config.get("effort"))
-            .and_then(Value::as_str),
-        Some("xhigh" | "max")
-    )
+    extra_body
+        .and_then(|body| body.get("output_config"))
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)
+        .and_then(Effort::parse)
+        .is_some_and(|level| level > Effort::High)
 }
 
 /// The replay mode implied by a resolved `thinking` value.

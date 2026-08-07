@@ -5,7 +5,6 @@ mod common;
 
 use std::process::{Command, Output, Stdio};
 
-use afi::Effort;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -21,7 +20,6 @@ fn the_flag_reaches_every_source_in_its_own_spelling() {
         &["afi", "--effort", "high"],
         &[LOCAL, ANTHROPIC_KEY, OPENROUTER_KEY],
     );
-    assert_eq!(rt.effort, Some(Effort::High));
     assert_eq!(
         rt.sources["anthropic"].extra_body,
         Some(json!({"output_config": {"effort": "high"}}))
@@ -41,7 +39,6 @@ fn the_flag_reaches_every_source_in_its_own_spelling() {
 #[test]
 fn the_env_var_works_and_the_flag_beats_it() {
     let env = common::build(&["afi"], &[LOCAL, ANTHROPIC_KEY, ("AFI_EFFORT", "medium")]);
-    assert_eq!(env.effort, Some(Effort::Medium));
     assert_eq!(
         env.sources["anthropic"].extra_body,
         Some(json!({"output_config": {"effort": "medium"}}))
@@ -51,14 +48,12 @@ fn the_env_var_works_and_the_flag_beats_it() {
         &["afi", "--effort", "low"],
         &[LOCAL, ANTHROPIC_KEY, ("AFI_EFFORT", "medium")],
     );
-    assert_eq!(flag.effort, Some(Effort::Low));
     assert_eq!(flag.sources["anthropic"].resolved_effort(), Some("low"));
 }
 
 #[test]
 fn nothing_is_added_when_no_effort_is_asked_for() {
     let rt = common::build(&["afi"], &[LOCAL, ANTHROPIC_KEY, OPENROUTER_KEY]);
-    assert_eq!(rt.effort, None);
     assert_eq!(rt.sources["anthropic"].extra_body, None);
     assert_eq!(rt.sources["anthropic"].resolved_effort(), None);
     assert_eq!(
@@ -132,7 +127,6 @@ fn another_flag_cannot_swallow_the_level() {
         &[LOCAL, ANTHROPIC_KEY],
     );
     assert!(rt.refusals().is_empty(), "{:?}", rt.refusals());
-    assert_eq!(rt.effort, Some(Effort::XHigh));
     assert_eq!(rt.sources["anthropic"].resolved_effort(), Some("xhigh"));
     assert_eq!(rt.prompt_file.as_deref(), Some("p.txt"));
 }
@@ -152,7 +146,6 @@ fn an_effort_only_extra_body_is_still_reported() {
             ),
         ],
     );
-    assert_eq!(rt.effort, None);
     assert_eq!(rt.sources["anthropic"].resolved_effort(), Some("xhigh"));
 }
 
@@ -168,7 +161,6 @@ fn an_unknown_level_refuses_to_start() {
         let refusals = rt.refusals();
         assert_eq!(refusals.len(), 1, "{args:?} -> {refusals:?}");
         assert!(refusals[0].contains("--effort"), "{refusals:?}");
-        assert_eq!(rt.effort, None);
         assert_eq!(rt.sources["anthropic"].extra_body, None);
     }
 }
@@ -195,7 +187,9 @@ fn a_missing_value_refuses_rather_than_being_dropped() {
 fn a_blank_variable_is_simply_unset() {
     let rt = common::build(&["afi"], &[LOCAL, ANTHROPIC_KEY, ("AFI_EFFORT", "  ")]);
     assert!(rt.refusals().is_empty());
-    assert_eq!(rt.effort, None);
+    // Neither refused nor read as a level - the run is the one it would have
+    // been with the variable unexported.
+    assert_eq!(rt.sources["anthropic"].extra_body, None);
 }
 
 /// Run the real binary with a clean env. A refused run exits before reading

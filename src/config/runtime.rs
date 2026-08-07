@@ -13,7 +13,7 @@ use crate::tools::policy::ToolPolicy;
 
 use super::args::{ParsedArgs, parse_args};
 use super::builtins::add_builtin_sources;
-use super::effort::{self, Effort};
+use super::effort;
 use super::tools::apply_tool_flags;
 use super::{Protocol, Source, build_http_headers, parse_extra_body};
 
@@ -44,9 +44,6 @@ pub struct Runtime {
     /// header renders it on every frame; `ModelConfig::from_env` reads the same
     /// env vars, so the two cannot disagree.
     pub tool_policy: ToolPolicy,
-    /// How hard this run asks the model to think, translated into each source's
-    /// own wire format. `None` leaves every source at its endpoint's default.
-    pub effort: Option<Effort>,
     /// Flags given wrongly on the command line. See `refusals`.
     pub flag_errors: Vec<String>,
     /// Token rates for the summary's cost, `None` when unset or unusable.
@@ -113,7 +110,6 @@ impl Runtime {
                 env.get("AFI_DISALLOWED_TOOLS").map(String::as_str),
                 env.get("AFI_READ_ONLY").map(String::as_str),
             ),
-            effort,
             flag_errors,
             // At startup, so a typo is heard about before the run, not after.
             pricing: Pricing::from_env(&env),
@@ -128,8 +124,11 @@ impl Runtime {
             rt.switch_source(&name, None);
         }
         // After the starting source is known, so the one warning it can raise
-        // names the source the run will actually use.
-        effort::apply_to_sources(&mut rt);
+        // names the source the run will actually use. Passed rather than held on
+        // the runtime: this is the level that was asked for, and each source
+        // caps it separately, so the only honest answer to "what effort did the
+        // requests carry" is `Source::resolved_effort`.
+        effort::apply_to_sources(&mut rt, effort);
 
         rt
     }

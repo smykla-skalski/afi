@@ -269,6 +269,17 @@ pub struct RunSummary<'a> {
     /// The credential the run billed. `None` when no single one can be named:
     /// a run with no source at all, or a session that spent on two of them.
     pub auth: Option<RunAuth<'a>>,
+    /// How the run's system prompt was built: `builtin`, `replace`, or
+    /// `append`. Reported for the same reason as `tools` - a job told to review
+    /// under its own instructions and a job that fell back to afi's produce
+    /// otherwise identical output.
+    ///
+    /// `None` only for a run that refused to start, which sent no prompt at all.
+    pub system_prompt_mode: Option<&'static str>,
+    /// The file that prompt came from, absent for `builtin`. The path, not the
+    /// text: the prompt can be long, and a workflow that wants to know what was
+    /// sent has the file.
+    pub system_prompt_file: Option<&'a str>,
 }
 
 impl<'a> RunSummary<'a> {
@@ -306,6 +317,10 @@ impl<'a> RunSummary<'a> {
             // No credential to name, for the reason `source` is none: the run was
             // refused before it resolved one.
             auth: None,
+            // Nothing was sent, so there is no prompt to name - including when the
+            // prompt itself is what the run was refused over.
+            system_prompt_mode: None,
+            system_prompt_file: None,
         }
     }
 
@@ -329,7 +344,18 @@ impl<'a> RunSummary<'a> {
             "tools": self.tools,
             "effort": self.effort,
             "auth": RunAuth::json(self.auth),
+            "system_prompt": self.system_prompt_json(),
         })
+    }
+
+    /// Null rather than an object of nulls when the run never started, matching
+    /// `usage`: a consumer can tell "no prompt was sent" from "the built-in one
+    /// was" instead of reading a refusal as an ordinary unconfigured run.
+    fn system_prompt_json(&self) -> Value {
+        let Some(mode) = self.system_prompt_mode else {
+            return Value::Null;
+        };
+        json!({"mode": mode, "file": self.system_prompt_file})
     }
 
     fn usage_json(&self) -> Value {

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::config::{Runtime, Source};
+use crate::config::{Runtime, Source, SystemPrompt};
 use crate::model::usage_totals;
 use crate::summary::{self, RunError, RunSummary, final_answer};
 use crate::term::{MessageKind, UserInterface};
@@ -78,6 +78,15 @@ fn build<'a>(
         effort: rt.active_source().and_then(Source::resolved_effort),
         refused_tool_calls: usage_totals::refused_tool_calls(),
         auth: billing_source(rt, &billed).map(Source::run_auth),
+        // A prompt that could not be resolved refuses the run before it starts,
+        // so a summary built here is only ever built for a resolved one. The
+        // refusal reports `None` - see `RunSummary::refused`.
+        system_prompt_mode: Some(
+            rt.system_prompt
+                .as_ref()
+                .map_or("builtin", SystemPrompt::mode),
+        ),
+        system_prompt_file: rt.system_prompt.as_ref().ok().and_then(SystemPrompt::file),
     }
 }
 

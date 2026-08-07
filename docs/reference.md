@@ -15,6 +15,8 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary)) |
 | `--summary-file <path>`                     | also write that summary to a path ([details](#writing-the-summary-to-a-file)) |
 | `--effort <low\|medium\|high\|xhigh\|max>`  | how hard the model is asked to think ([details](#reasoning-effort))  |
+| `--system-prompt-file <path>`               | send these standing instructions to the model ([details](#system-prompt)) |
+| `--system-prompt-mode <replace\|append>`    | against the built-in prompt, default `replace` ([details](#system-prompt)) |
 | `--read-only`                               | deny every tool that can change anything ([details](#tool-policy)) |
 | `--allowed-tools <a,b>`                     | only these tools may be called ([details](#tool-policy))    |
 | `--disallowed-tools <a,b>`                  | these tools may not be called ([details](#tool-policy))     |
@@ -64,9 +66,36 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_SUMMARY`                                | set to `json` for a run summary on stdout ([details](#run-summary))  |
 | `AFI_SUMMARY_FILE`                           | path to also write the run summary to ([details](#writing-the-summary-to-a-file)) |
 | `AFI_EFFORT`                                 | reasoning effort for every source ([details](#reasoning-effort))     |
+| `AFI_SYSTEM_PROMPT_FILE`                     | standing instructions to send instead of afi's ([details](#system-prompt)) |
+| `AFI_SYSTEM_PROMPT_MODE`                     | `replace` (default) or `append` ([details](#system-prompt))           |
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
 | `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
 | `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
+
+## System prompt
+
+`--system-prompt-file <path>` (or `AFI_SYSTEM_PROMPT_FILE=<path>`) gives a run its own standing instructions. They reach the model as system content on both protocols - hoisted into `system` on the Messages API, sent as the leading `system` message on an OpenAI-compatible endpoint - which is what separates them from writing the same text into the task prompt file, where it arrives as a user message mixed in with the task.
+
+```bash
+afi -f task.md --system-prompt-file ci/review.md --read-only --summary json
+```
+
+`--system-prompt-mode` decides what happens to afi's own prompt. A flag wins over its variable, as everywhere else.
+
+| mode                | what the model is told                                          |
+| ------------------- | --------------------------------------------------------------- |
+| `replace` (default) | the tool-call contract, then your file                           |
+| `append`            | afi's whole prompt, then your file                               |
+
+Replacing is what makes the setting worth having. Most of afi's prompt explains how to launch and wait on detached shell commands, which a read-only review job resends on every request and can never act on. `append` is for adding a rule to a run that still wants the rest.
+
+**The tool-call contract survives both modes.** It is four lines describing the `[afi_tool_call]` syntax, and it is a wire format rather than guidance: a model on an endpoint that parses no native tool calls and has not been told that syntax cannot call a tool at all. afi never learns which kind of endpoint it is pointed at - it sends the schemas and reads back either answer - so the alternative to keeping the contract would be refusing every replaced run.
+
+**A prompt that cannot be used exits 2 and names it.** A missing file, an unreadable one, a path that turns out to be a directory, a file that is empty or only whitespace, and a mode that is not one of the two are all refused before the run starts. None of them falls back to the built-in prompt: a job told to send its own instructions and quietly sending afi's is exactly the failure worth avoiding, and an empty file is what a truncated write and an unexpanded template both leave behind.
+
+The flags are stricter than the variables about being given nothing, the way [`--summary-file`](#writing-the-summary-to-a-file) is. `afi --system-prompt-file "$PROMPT"` with `PROMPT` unset is refused; a blank `AFI_SYSTEM_PROMPT_FILE` names no file and is not an error, since that is what an exported-but-unset shell variable looks like in a workflow's env block. A mode set with no file configured does nothing, so a workflow can export `AFI_SYSTEM_PROMPT_MODE` once for jobs that pass a file and jobs that do not.
+
+The [run summary](#run-summary) reports which prompt the run used, so a job's behaviour can be read out of its own output rather than out of the workflow file that was supposed to have configured it. A run that configures nothing sends the bytes afi has always sent, and the Anthropic prompt cache keeps hitting across turns.
 
 ## Tool policy
 
@@ -159,7 +188,8 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
     "service_account_id": "svac_...",
     "workspace_id": "wrkspc_...",
     "federation_rule_id": "fdrl_..."
-  }
+  },
+  "system_prompt": {"mode": "builtin", "file": null}
 }
 ```
 
@@ -188,6 +218,9 @@ It names the credential the tokens were **billed** to, not the one that happens 
 The identifiers are the non-secret ones the [federation](#anthropic) exchange sends, and only those. A rule covering one workspace passes no `ANTHROPIC_WORKSPACE_ID`, so no `workspace_id` comes back here, and a static-key run has nothing to identify at all - both name the mode and stop rather than emitting empty strings. Neither the access token nor the OIDC identity token is ever in the block: this JSON usually ends up as a build artifact, and an artifact carries no masking, so a value redacted in a log would be plain text there.
 
 The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run - unless the run was refused a call, which afi observed itself and reports either way, with `requests` still `0` to mark the silence.
+`system_prompt` is there for the same reason. `mode` is `builtin`, `replace`, or `append`, and `file` is the path the text came from, or `null` for `builtin` - see [System prompt](#system-prompt). The path rather than the text: a prompt can be long, and a job that wants to know what was sent has the file.
+
+The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run.
 
 `cache_write_tokens` is separate from `cache_read_tokens` and from `input_tokens` because the three are priced differently - Anthropic bills a write above base input and a read far below it, so a cost calculation needs its own rate for each. Only the Anthropic path reports writes; an OpenAI-compatible source reports `0`, as does llama.cpp, whose `timings.cache_n` counts a reused prefix and is therefore a read.
 

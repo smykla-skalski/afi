@@ -25,6 +25,8 @@ flags:
   --summary json                 print a machine-readable run summary on stdout
   --summary-file <path>          also write that summary to a path
   --effort <level>               low | medium | high | xhigh | max
+  --system-prompt-file <path>    send these standing instructions to the model
+  --system-prompt-mode <mode>    replace (default) | append, against the built-in prompt
   --read-only                    deny every tool that can change anything
   --allowed-tools <a,b>          only these tools may be called
   --disallowed-tools <a,b>       these tools may not be called

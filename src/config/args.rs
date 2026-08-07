@@ -20,6 +20,8 @@ pub struct ParsedArgs {
     pub sessions_query: Option<Vec<String>>,
     pub summary: Option<String>,
     pub summary_file: Option<String>,
+    pub system_prompt_file: Option<String>,
+    pub system_prompt_mode: Option<String>,
     pub allowed_tools: Option<String>,
     pub disallowed_tools: Option<String>,
     pub effort: Option<String>,
@@ -71,7 +73,33 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
         "--session" => return set_opt(&mut out.session, value),
         "--prompt-file" | "-f" => return set_opt(&mut out.prompt_file, value),
         "--summary" => return set_opt(&mut out.summary, value),
-        "--summary-file" => return set_summary_file(out, value),
+        "--summary-file" => {
+            return set_required_value(
+                &mut out.flag_errors,
+                &mut out.summary_file,
+                flag,
+                value,
+                ErrorKind::Input,
+            );
+        }
+        "--system-prompt-file" => {
+            return set_required_value(
+                &mut out.flag_errors,
+                &mut out.system_prompt_file,
+                flag,
+                value,
+                ErrorKind::Input,
+            );
+        }
+        "--system-prompt-mode" => {
+            return set_required_value(
+                &mut out.flag_errors,
+                &mut out.system_prompt_mode,
+                flag,
+                value,
+                ErrorKind::Input,
+            );
+        }
         "--allowed-tools" | "--disallowed-tools" => return set_tool_flag(out, flag, value),
         "--effort" => return set_effort(out, value),
         "--resume" | "-r" => {
@@ -118,34 +146,44 @@ fn set_required(
     Some(v.to_string())
 }
 
-/// Set `--summary-file`. Returns whether a value was consumed.
+/// Fill `slot` from a flag whose value must be there and must say something.
+/// Returns whether a value was consumed; `slot` is untouched on a refusal.
 ///
 /// Blank is refused as well as absent, which `set_required` alone does not do:
 /// `"".starts_with('-')` is false, so an empty argument passes that filter.
 /// `afi --summary-file "$OUT"` with `OUT` unset passes exactly that - the quoted
 /// form is how a CI script is written - and accepting it would exit 0 having
 /// written nothing to the path the next step reads, or leave a file from an
-/// earlier run standing as this run's result. The unquoted `$OUT` drops the
-/// argument entirely and was already refused; both spellings of the same mistake
-/// now fail the same way.
+/// earlier run standing as this run's result. `--system-prompt-file "$PROMPT"`
+/// is the same mistake and costs more: the run would send afi's own prompt while
+/// the command line says it is sending its own. The unquoted `$OUT` drops the
+/// argument entirely and was already refused; both spellings now fail the same
+/// way.
 ///
-/// Blank stays permitted for `AFI_SUMMARY_FILE`, where an exported but unset
-/// variable is how a workflow turns the feature off - see `summary_path`. The
-/// tool-policy flags keep the looser rule too, because a blank list there is
-/// documented as "every tool" rather than as a mistake.
-fn set_summary_file(out: &mut ParsedArgs, value: Option<&str>) -> bool {
-    let Some(path) = set_required(out, "--summary-file", value, ErrorKind::Input) else {
+/// Blank stays permitted for the matching variables, where an exported but unset
+/// variable is how a workflow turns the feature off - see `summary_path` and
+/// `super::system_prompt::resolve`. The tool-policy flags keep the looser rule
+/// too, because a blank list there is documented as "every tool" rather than as
+/// a mistake.
+///
+/// `kind` is what the summary reports, as it is for `set_required`.
+fn set_required_value(
+    flag_errors: &mut Vec<RunError>,
+    slot: &mut Option<String>,
+    flag: &str,
+    value: Option<&str>,
+    kind: ErrorKind,
+) -> bool {
+    let Some(given) = value.filter(|v| !v.starts_with('-')) else {
+        flag_errors.push(RunError::new(format!("{flag} needs a value"), kind));
         return false;
     };
-    if path.trim().is_empty() {
-        out.flag_errors.push(RunError::new(
-            "--summary-file needs a value",
-            ErrorKind::Input,
-        ));
+    if given.trim().is_empty() {
+        flag_errors.push(RunError::new(format!("{flag} needs a value"), kind));
         // Consumed all the same: the argument was there, it just said nothing.
         return true;
     }
-    out.summary_file = Some(path);
+    *slot = Some(given.to_string());
     true
 }
 

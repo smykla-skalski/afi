@@ -1,5 +1,6 @@
 use super::*;
 use crate::model::{FINAL_ANSWER_TOOL_CHOICE, TURN_DONE};
+use crate::prompt;
 use crate::tools::TOOLS;
 
 fn history() -> Vec<Value> {
@@ -181,34 +182,6 @@ fn thinking_blocks_replay_only_when_thinking_is_on() {
     let blocks = on["messages"][1]["content"].as_array().unwrap();
     assert_eq!(blocks[0], block);
     assert_eq!(blocks[1]["type"], "tool_use");
-}
-
-#[test]
-fn system_is_hoisted_and_marked_cacheable() {
-    let body = body_with(None);
-    let system = body["system"].as_array().expect("system is a block array");
-    assert_eq!(system.len(), 1);
-    assert_eq!(system[0]["text"], "You are a terminal coding agent.");
-    assert_eq!(system[0]["cache_control"], json!({"type": "ephemeral"}));
-    // It must not remain in messages.
-    let messages = body["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["role"], "user");
-}
-
-#[test]
-fn no_system_message_means_no_system_key() {
-    let body = build_body(&BodyParams {
-        model: "claude-sonnet-5",
-        history: &[json!({"role": "user", "content": "hi"})],
-        tools: None,
-        tool_choice: None,
-        max_tokens: None,
-        extra_body: None,
-        stream: false,
-    });
-    assert!(body.get("system").is_none());
-    assert_eq!(body["stream"], false);
 }
 
 #[test]
@@ -407,3 +380,5 @@ fn a_response_without_usage_is_not_counted() {
     assert!(completion_usage(r#"{"content":[]}"#).is_none());
     assert!(completion_usage("not json").is_none());
 }
+
+mod system;

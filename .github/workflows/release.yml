@@ -165,14 +165,18 @@ jobs:
 
           secrets=()
           [[ -n "${APP_PRIVATE_KEY}" ]] || secrets+=(SMYKLOT_APP_PRIVATE_KEY)
-          # Needed by the publish job at the very end of the run. Asked for here,
-          # at the only point where a missing answer costs nothing: by the time
-          # publish-crate.sh runs, the tag, the release and the apt packages all
-          # exist, and stopping there would leave the crate behind the rest.
-          [[ -n "${CARGO_REGISTRY_TOKEN}" ]] || secrets+=(CARGO_REGISTRY_TOKEN)
           if (( ${#secrets[@]} )); then
             echo "::error::missing repository secrets: ${secrets[*]}"
             exit 1
+          fi
+
+          # A warning rather than an error, because there are two ways to hold a
+          # crates.io credential and this job can only see one of them. Trusted
+          # publishing leaves no secret to find, and once it is configured the
+          # token is meant to be revoked. The publish job fails outright when
+          # neither is available, which is the check that can actually tell.
+          if [[ -z "${CARGO_REGISTRY_TOKEN}" ]]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN is unset. The release will publish the crate only if trusted publishing is configured for it."
           fi
 
       - name: Install mise
@@ -481,6 +485,9 @@ jobs:
     runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
     permissions:
       contents: write
+      # crates.io exchanges this for a short-lived publishing token. See the
+      # trusted-publishing step below.
+      id-token: write
     steps:
       # The step that makes the release visible. Everything it publishes has been
       # built, run, packaged, installed in a clean container, pushed to apt, and
@@ -520,11 +527,42 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
 
+      # Trusted publishing: crates.io takes this job's OIDC identity and returns
+      # a token that lasts 30 minutes and is revoked when the job ends. The same
+      # model the apt push already uses for Cloudsmith, and for the same reason --
+      # no long-lived credential sitting in the repository secrets.
+      #
+      # It cannot be configured until the crate exists, because the trust is
+      # registered against a crate you already own. So this is allowed to fail
+      # and the step below falls back to the stored token, which is what gets
+      # `afi-cli` published the first time. Once trusted publishing is set up and
+      # the token revoked, the fallback stops existing and the failure is real.
+      - name: Exchange an OIDC token for a crates.io token
+        id: crates-auth
+        continue-on-error: true
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
       # Last, because it is the only publication a release cannot undo. A crate
       # can be yanked, which stops new dependents resolving to it, but it can
       # never be removed. publish-crate.sh is a no-op when the version is already
       # on crates.io, so re-running a half-finished release resumes here.
       - name: Publish the crate
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: mise run publish:crate
+          OIDC_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          STORED_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Which credential was used is worth saying out loud. A silent fallback
+          # would let a broken trusted-publishing setup keep working off the
+          # long-lived token without anyone noticing it had stopped being used.
+          if [[ -n "${OIDC_TOKEN}" ]]; then
+            echo "Authenticated to crates.io by trusted publishing."
+            export CARGO_REGISTRY_TOKEN="${OIDC_TOKEN}"
+          elif [[ -n "${STORED_TOKEN}" ]]; then
+            echo "::warning::Trusted publishing is not configured for this crate. Falling back to the stored CARGO_REGISTRY_TOKEN. Set it up at https://crates.io/crates/afi-cli/settings/trusted-publishing and revoke the token."
+            export CARGO_REGISTRY_TOKEN="${STORED_TOKEN}"
+          else
+            echo "::error::No crates.io credential. Trusted publishing is not configured and CARGO_REGISTRY_TOKEN is unset."
+            exit 1
+          fi
+          mise run publish:crate

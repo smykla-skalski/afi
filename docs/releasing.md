@@ -249,7 +249,7 @@ Repository secrets:
 | secret | purpose |
 |--------|---------|
 | `SMYKLOT_APP_PRIVATE_KEY` | the app that can commit the version bump to `main` |
-| `CARGO_REGISTRY_TOKEN` | crates.io publishing. A token with the `publish-update` scope. |
+| `CARGO_REGISTRY_TOKEN` | crates.io publishing, until trusted publishing replaces it. See below. |
 
 The `plan` job checks all of them before anything is tagged, so a missing one
 costs a failed run rather than a half-finished release.
@@ -258,6 +258,34 @@ costs a failed run rather than a half-finished release.
 exercises the Cloudsmith credential without publishing. Run it if a release has
 not happened in a while and you want to know the OIDC trust still resolves before
 you find out during one.
+
+## crates.io credentials
+
+The publish job prefers [trusted publishing](https://crates.io/docs/trusted-publishing):
+crates.io takes the job's OIDC identity and returns a token that lasts thirty
+minutes and is revoked when the job ends. Same model as the Cloudsmith push, and
+for the same reason: nothing long-lived sits in the repository secrets.
+
+It cannot be turned on yet. A trusted publisher is registered against a crate you
+already own, and `afi-cli` has never been published, so the first release falls
+back to `CARGO_REGISTRY_TOKEN` and says so with a warning in the job log.
+
+That token is scoped as narrowly as crates.io allows: crate pattern `afi-cli`,
+endpoints `publish-new` and `publish-update` only, 365-day expiry. It cannot
+touch any other crate, and `publish-new` is there solely so the first release can
+create `afi-cli`.
+
+Once the first release has published the crate:
+
+1. Go to `https://crates.io/crates/afi-cli/settings/trusted-publishing`.
+2. Add a GitHub publisher: owner `smykla-skalski`, repository `afi`, workflow
+   `release.yml`. Leave the environment empty unless one is added later.
+3. Run a release and confirm the log says `Authenticated to crates.io by trusted
+   publishing.` rather than the fallback warning.
+4. Revoke the token on crates.io and delete the `CARGO_REGISTRY_TOKEN` secret.
+
+After step 4 the fallback has nothing to fall back to, so a broken trusted-publishing
+setup fails the job instead of quietly reverting to a stored credential.
 
 ## Immutable releases
 

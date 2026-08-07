@@ -3,6 +3,17 @@
 All notable changes to `afi`. Generated from the commit history; maintained by
 release-plz from the conventional-commit messages on `main`.
 
+## [0.7.0] - 2026-08-07
+
+### Added
+
+- **config** Read settings from a config file ([#70](https://github.com/smykla-skalski/afi/pull/70))
+- **summary** Report the schema version ([#74](https://github.com/smykla-skalski/afi/pull/74))
+
+### Documentation
+
+- **release** Record the trusted publisher ([#75](https://github.com/smykla-skalski/afi/pull/75))
+
 ## [0.6.0] - 2026-08-07
 
 ### Added

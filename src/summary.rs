@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Number, Value, json};
 
 use crate::atomic;
-use crate::model::usage_totals::UsageTotals;
+use crate::model::usage_totals::{RefusedToolCalls, UsageTotals};
 
 /// How to report the run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -252,6 +252,17 @@ pub struct RunSummary<'a> {
     /// no effort control afi knows - in both cases the run used the endpoint's
     /// own default, which is what a null here means.
     pub effort: Option<&'a str>,
+    /// Tool calls the run asked for and did not get. `tools` is what the run was
+    /// permitted; this is what it tried anyway.
+    ///
+    /// Reported as a total and split by what refused it, because the two halves
+    /// mean different things: a policy block is the model reaching for a tool the
+    /// caller ruled out, while a run with no terminal and no `--yolo` denies every
+    /// mutating call at the gate by default. Always reported, zeros included, so a
+    /// caller can tell "nothing was refused" from "this afi does not report
+    /// refusals". A tool that ran and failed is not counted - that is an error, and
+    /// folding the two together would lose the signal.
+    pub refused_tool_calls: RefusedToolCalls,
 }
 
 impl<'a> RunSummary<'a> {
@@ -280,6 +291,12 @@ impl<'a> RunSummary<'a> {
             // No request was ever sent, so no effort was carried. Reporting the
             // resolved level here would describe a run that did not happen.
             effort: None,
+            // A literal rather than the live counters, which would read the same:
+            // this refusal lands before any turn, so nothing has been dispatched to
+            // refuse. Zeros are also what keeps `usage` null here, which is how a
+            // run that never started stays distinguishable from one that ran and was
+            // refused nothing.
+            refused_tool_calls: RefusedToolCalls::default(),
         }
     }
 
@@ -287,7 +304,8 @@ impl<'a> RunSummary<'a> {
     ///
     /// `usage` is null rather than a zeroed object when no request reported any,
     /// so a consumer can tell "the provider sent no usage" from "the run used no
-    /// tokens" instead of silently charting zeros.
+    /// tokens" instead of silently charting zeros. A refusal keeps the object
+    /// anyway - see `usage_json`.
     #[must_use]
     pub fn to_json(&self) -> Value {
         json!({
@@ -305,7 +323,11 @@ impl<'a> RunSummary<'a> {
     }
 
     fn usage_json(&self) -> Value {
-        if self.usage.is_empty() {
+        // A refused call is afi's own observation, so it survives a provider that
+        // reported no tokens at all: dropping it would hide the one thing this
+        // field exists to report. `requests` is still 0 there, which is how a
+        // consumer tells the silent provider apart from a run that used nothing.
+        if self.usage.is_empty() && self.refused_tool_calls.is_empty() {
             return Value::Null;
         }
         let mut usage = json!({
@@ -316,6 +338,9 @@ impl<'a> RunSummary<'a> {
             "reasoning_tokens": self.usage.reasoning_tokens,
             "total_tokens": self.usage.total_tokens(),
             "requests": self.usage.requests,
+            "refused_tool_calls": self.refused_tool_calls.total(),
+            "refused_by_policy": self.refused_tool_calls.by_policy,
+            "refused_by_approval": self.refused_tool_calls.by_approval,
         });
         // Inserted rather than declared in the object above, because an unpriced
         // run must have no key here at all: a null would read as "the run was

@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::approval::ApprovalState;
 use crate::model::ModelConfig;
+use crate::model::usage_totals;
 use crate::risk::{RiskClassifier, confirm};
 use crate::term::{OutputEvent, UserInterface};
 use crate::tools;
@@ -117,6 +118,10 @@ pub(crate) fn dispatch_tool(
     // side effect.
     if let Some(refusal) = policy_refusal(name, &da.config.tool_policy) {
         emit_tool_finished(da.ui, name, "blocked by policy");
+        // Counted for the run summary. Announcing it in the terminal is no use to
+        // a job that reads the JSON, and a refused write is exactly what a caller
+        // reviewing untrusted input wants to know happened.
+        usage_totals::record_policy_refusal();
         return ToolDispatchResult::Ok(refusal);
     }
 
@@ -137,6 +142,9 @@ pub(crate) fn dispatch_tool(
             Ok(true) => {}
             Ok(false) => {
                 emit_tool_finished(da.ui, name, "denied by user");
+                // A refusal too: the call never ran and the model was told no. The
+                // reason differs from a policy block, so the count does too.
+                usage_totals::record_approval_denial();
                 return ToolDispatchResult::Ok("DENIED by user".to_string());
             }
             Err(error) => {
@@ -175,6 +183,32 @@ fn policy_refusal(name: &str, policy: &ToolPolicy) -> Option<String> {
         "ERROR: tool '{name}' is blocked by this run's tool policy and will stay \
          blocked. Do not retry it. Permitted tools: {available}."
     ))
+}
+
+/// Count the policy refusals in a batch of tool calls that was thrown away before
+/// dispatch could rule on it.
+///
+/// Two paths drop a batch: arguments that would not parse, and a forced-final turn
+/// that answered with a tool. Neither reaches the gate in `dispatch_tool`, so a
+/// `--read-only` run whose model asked to write reported a clean zero exactly when
+/// the request was malformed enough to sidestep dispatch. The policy reads names
+/// only, so its answer is already known here without the arguments that failed to
+/// parse. The names are resolved the way the dispatcher resolves them, so the two
+/// agree on what an unnamed call is, and `final_answer` is always permitted and so
+/// never counted.
+///
+/// Counts every blocked call in the batch, including one whose own arguments were
+/// fine, because the whole batch is gone. A retried batch is a fresh model output
+/// and counts again: the alternative is a stream that keeps arriving malformed
+/// ending on a clean zero, which is the failure this exists to prevent.
+pub(crate) fn count_discarded_refusals(ordered: &[ToolCallAccum], policy: &ToolPolicy) {
+    for call in ordered {
+        // `permits` rather than `policy_refusal`: the same verdict, without building
+        // the sentence that would have gone back to a model this batch never reaches.
+        if !policy.permits(call.name.as_deref().unwrap_or("tool")) {
+            usage_totals::record_policy_refusal();
+        }
+    }
 }
 
 fn run_tool(name: &str, args: &Value, da: &mut DispatchArgs<'_>) -> String {

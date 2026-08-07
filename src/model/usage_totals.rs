@@ -15,7 +15,14 @@
 //! session can `/source` its way onto a second one and the two are not billed
 //! at the same rates. `snapshot` folds the models together for the summary's
 //! flat counts; `snapshot_by_model` keeps them apart for pricing.
+//!
+//! Two counts here are not about tokens: `refused_tool_calls`, what the run asked
+//! for and was refused, by policy and by the approval gate. They live beside the
+//! token totals because they are the same kind of thing - run-level facts the
+//! summary reports and one `reset` clears - and because the alternative is
+//! threading a counter through the turn loop.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::stream::NormalizedUsage;
@@ -138,12 +145,76 @@ pub fn snapshot_by_model() -> Vec<(String, UsageTotals)> {
         .clone()
 }
 
+/// Tool calls the run refused, split by what refused them.
+///
+/// Split because the two answer different questions. A policy block means the run
+/// asked for a tool the caller had ruled out, which is the signal worth alerting
+/// on. An approval denial can mean that too, but a non-interactive run with no
+/// `--yolo` denies every mutating call by default, so on its own it reports the
+/// configuration as much as the model's behaviour. One number covering both would
+/// make an ordinary unattended run indistinguishable from a probed one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefusedToolCalls {
+    /// Blocked by the run's tool policy - at dispatch, or in a batch discarded
+    /// before dispatch could rule on it.
+    pub by_policy: u64,
+    /// Denied at the approval gate, a human answering no or the automatic denial a
+    /// run with no terminal falls back to.
+    pub by_approval: u64,
+}
+
+impl RefusedToolCalls {
+    /// Every refused call, whatever refused it.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.by_policy.saturating_add(self.by_approval)
+    }
+
+    /// Whether the run got through without being refused anything.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+}
+
+/// The two counters behind `RefusedToolCalls`. Plain atomics rather than
+/// `UsageTotals` fields: a refusal is afi's own observation, not a number a
+/// provider reported, and it splits by no model - the dispatch site that sees one
+/// does not know which model asked.
+static REFUSED_BY_POLICY: AtomicU64 = AtomicU64::new(0);
+static REFUSED_BY_APPROVAL: AtomicU64 = AtomicU64::new(0);
+
+/// Count one tool call the policy refused.
+///
+/// A tool that ran and failed is not one of these. Folding the two together would
+/// lose the only signal the run gives that something asked for a tool it was not
+/// allowed to have.
+pub fn record_policy_refusal() {
+    REFUSED_BY_POLICY.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one tool call the approval gate denied.
+pub fn record_approval_denial() {
+    REFUSED_BY_APPROVAL.fetch_add(1, Ordering::Relaxed);
+}
+
+/// What the run has been refused so far.
+#[must_use]
+pub fn refused_tool_calls() -> RefusedToolCalls {
+    RefusedToolCalls {
+        by_policy: REFUSED_BY_POLICY.load(Ordering::Relaxed),
+        by_approval: REFUSED_BY_APPROVAL.load(Ordering::Relaxed),
+    }
+}
+
 /// Clear the totals. Exists for tests, which share one process.
 pub fn reset() {
     totals()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clear();
+    REFUSED_BY_POLICY.store(0, Ordering::Relaxed);
+    REFUSED_BY_APPROVAL.store(0, Ordering::Relaxed);
 }
 
 #[cfg(test)]

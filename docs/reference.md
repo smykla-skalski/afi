@@ -248,6 +248,8 @@ A rate limit is `provider_http` rather than a kind of its own, since what a call
 
 `ok: false` always comes with both fields, so a consumer never has to fall back to reading the sentence. A session that failed more than once reports the first kind, since an auth failure repeats on every later turn and the first thing that went wrong is the reason the run did.
 
+**A credential afi sent never comes back in a reported error.** A provider that echoes the request when it refuses one returns the credential inside the body afi then quotes, and the federated path is where that bites: the token exchange posts the OIDC assertion, and afi fetches that assertion from the Actions endpoint itself rather than through the toolkit that would register it for masking, so nothing downstream hides it. The API key and the bearer token are treated the same way, since one path reports all three. Whatever was removed is marked in place - `[redacted OIDC identity token]`, `[redacted API key]`, `[redacted bearer token]`, `[redacted Actions request token]` - so a reader tells a struck credential from a `[truncated]` body that merely ran long. Only the credential goes: the error type and message stay, because a rejected credential and a rate limit are otherwise the same shape.
+
 ```bash
 afi -f review.txt --summary-file summary.json
 case "$(jq -r .error_kind summary.json)" in

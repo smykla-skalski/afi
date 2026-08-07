@@ -19,7 +19,9 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::config::{Federation, IdentitySource, Protocol, Source, is_placeholder};
-use crate::model::client::{BODY_PREVIEW_CHARS, ClientError, transport_error, transport_error_at};
+use crate::model::client::{
+    BODY_PREVIEW_CHARS, ClientError, Credential, Redactor, transport_error, transport_error_at,
+};
 
 /// Pinned API version. Anthropic requires this on every request.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -238,12 +240,15 @@ async fn github_identity_token(
     let status = response.status();
     let body = response.text().await.map_err(|e| transport_error(&e))?;
     if !status.is_success() {
-        // The body here is an Actions error, not a credential. A 403 is the
-        // workflow lacking `permissions: id-token: write`.
+        // Normally an Actions error rather than a credential - a 403 is the
+        // workflow lacking `permissions: id-token: write` - but the runtime token
+        // went out in the request header, so an endpoint or proxy that echoes the
+        // request hands it straight back.
         return Err(refused_credential(
             "the GitHub Actions OIDC endpoint refused the token request",
             status,
             &body,
+            &Redactor::default().with(request_token, Credential::RequestToken),
         ));
     }
     json_string_field(&body, "value")
@@ -280,10 +285,13 @@ async fn exchange(
     let status = response.status();
     let text = response.text().await.map_err(|e| transport_error(&e))?;
     if !status.is_success() {
+        // The assertion was in the body that was just posted, so a rejected grant
+        // echoed back carries it. This is the leak the redaction exists for.
         return Err(refused_credential(
             "the Anthropic token exchange refused the identity token",
             status,
             &text,
+            &Redactor::default().with(assertion, Credential::IdentityToken),
         ));
     }
     parse_minted(&text)
@@ -297,14 +305,25 @@ async fn exchange(
 /// transport error it arrives as. Retrying one spends the schedule to be refused
 /// in the same words. A 429 or a 5xx is the endpoint having a bad day and keeps
 /// its status, because that one is worth another attempt.
-fn refused_credential(what: &str, status: StatusCode, body: &str) -> ClientError {
+///
+/// `redact` is taken rather than left to callers because both endpoints here are
+/// handed the credential they are being asked about, and both quote what comes
+/// back. Cleaning runs before the preview is cut, so the window can only ever
+/// trim a marker.
+fn refused_credential(
+    what: &str,
+    status: StatusCode,
+    body: &str,
+    redact: &Redactor,
+) -> ClientError {
+    let body = redact.clean(body);
     if status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS {
         let preview: String = body.chars().take(BODY_PREVIEW_CHARS).collect();
         return ClientError::Auth(format!("{what} (HTTP {}): {preview}", status.as_u16()));
     }
     ClientError::Http {
         status: status.as_u16(),
-        body: body.to_string(),
+        body,
     }
 }
 

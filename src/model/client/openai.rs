@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use super::sse::{OpenAiDecoder, decoded_stream};
 use super::{
-    ChatCompletionStream, ClientError, ReqwestClient, StreamRequest, limited_error_body,
+    ChatCompletionStream, ClientError, Redactor, ReqwestClient, StreamRequest, limited_error_body,
     strip_history, transport_error,
 };
 use crate::config::Source;
@@ -135,19 +135,21 @@ pub(super) async fn stream(
 ) -> Result<ChatCompletionStream, ClientError> {
     let source = request.source;
     let body = stream_body(&request);
+    let redact = Redactor::for_source(source);
     let response = authed_post(http, source, chat_url(source), &body)
         .send()
         .await
         .map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let body = limited_error_body(response).await;
+        let body = limited_error_body(response, &redact).await;
         return Err(ClientError::Http { status, body });
     }
     let bytes = response.bytes_stream().map_err(io::Error::other);
     Ok(decoded_stream(
         StreamReader::new(bytes),
         Box::new(OpenAiDecoder),
+        redact,
     ))
 }
 
@@ -168,7 +170,7 @@ pub(super) async fn complete(
         .map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
+        let body = Redactor::for_source(source).clean(&response.text().await.unwrap_or_default());
         return Err(ClientError::Http { status, body });
     }
     let text = response.text().await.map_err(|e| transport_error(&e))?;
@@ -208,19 +210,29 @@ pub(super) async fn list_models(http: &Client, source: &Source) -> Result<Value,
     if let Some(headers) = ReqwestClient::build_headers(source) {
         request = request.headers(headers);
     }
-    json_response(request).await
+    json_response(request, &Redactor::for_source(source)).await
 }
 
 /// `GET /props`, llama.cpp's server-configuration endpoint.
 pub(super) async fn get_props(http: &Client, source: &Source) -> Result<Value, ClientError> {
-    json_response(http.get(props_url(source)).timeout(Duration::from_secs(5))).await
+    // Unauthenticated, but it goes through the same redactor as the rest: a
+    // reader of this code should not have to work out which endpoints are the
+    // safe ones.
+    json_response(
+        http.get(props_url(source)).timeout(Duration::from_secs(5)),
+        &Redactor::for_source(source),
+    )
+    .await
 }
 
-async fn json_response(request: reqwest::RequestBuilder) -> Result<Value, ClientError> {
+async fn json_response(
+    request: reqwest::RequestBuilder,
+    redact: &Redactor,
+) -> Result<Value, ClientError> {
     let response = request.send().await.map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
+        let body = redact.clean(&response.text().await.unwrap_or_default());
         return Err(ClientError::Http { status, body });
     }
     response
@@ -250,8 +262,9 @@ pub(super) async fn overrun_probe(
         .await
         .map_err(|e| transport_error(&e))?;
     // The probe expects a 400 with the context limit in the error, so the body
-    // is returned either way for the caller to parse.
-    Ok(response.text().await.unwrap_or_default())
+    // is returned either way for the caller to parse - which makes it another
+    // error body a caller may report, and it is cleaned like one.
+    Ok(Redactor::for_source(source).clean(&response.text().await.unwrap_or_default()))
 }
 
 #[cfg(test)]

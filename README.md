@@ -15,10 +15,7 @@ curl -1sLf 'https://dl.cloudsmith.io/public/smykla-skalski/afi/setup.deb.sh' | s
 sudo apt-get install afi
 ```
 
-The setup script adds the signing key and the apt source, after which upgrades
-arrive through `apt-get upgrade` like any other package. The package holds a
-static binary and declares no dependencies, so it installs on any Debian
-derivative regardless of glibc version. amd64 and arm64 are both published.
+The setup script adds the signing key and the apt source, after which upgrades arrive through `apt-get upgrade` like any other package. The package holds a static binary and declares no dependencies, so it installs on any Debian derivative regardless of glibc version. amd64 and arm64 are both published.
 
 ### macOS and other Linux
 
@@ -26,10 +23,7 @@ derivative regardless of glibc version. amd64 and arm64 are both published.
 curl -fsSL https://raw.githubusercontent.com/smykla-skalski/afi/main/scripts/install.sh | sh
 ```
 
-Works out your platform, checks the published sha256, and installs to
-`~/.local/bin` (or `/usr/local/bin` as root). Set `AFI_VERSION` to pin a version
-and `AFI_BIN_DIR` to install somewhere else. When the GitHub CLI is on your PATH
-the script also verifies the release's build provenance.
+Works out your platform, checks the published sha256, and installs to `~/.local/bin` (or `/usr/local/bin` as root). Set `AFI_VERSION` to pin a version and `AFI_BIN_DIR` to install somewhere else. When the GitHub CLI is on your PATH the script also verifies the release's build provenance.
 
 ### From crates.io
 
@@ -37,15 +31,11 @@ the script also verifies the release's build provenance.
 cargo install afi-cli --locked
 ```
 
-The crate is `afi-cli` because `afi` on crates.io belongs to an unrelated
-audio/video crate from 2017. The binary it installs is `afi`.
+The crate is `afi-cli` because `afi` on crates.io belongs to an unrelated audio/video crate from 2017. The binary it installs is `afi`.
 
 ### Prebuilt binary
 
-Every release attaches an archive and a checksum per target to the
-[releases page](https://github.com/smykla-skalski/afi/releases): static musl
-builds for Linux on x86_64 and aarch64, a glibc build for x86_64 Linux, and
-macOS on both architectures.
+Every release attaches an archive and a checksum per target to the [releases page](https://github.com/smykla-skalski/afi/releases): static musl builds for Linux on x86_64 and aarch64, a glibc build for x86_64 Linux, and macOS on both architectures.
 
 ### From source
 
@@ -55,16 +45,13 @@ cargo install --path .
 
 ### Checking what you downloaded
 
-Every archive and package carries a Sigstore build-provenance attestation, so
-you can check it was produced by this repository's release workflow:
+Every archive and package carries a Sigstore build-provenance attestation, so you can check it was produced by this repository's release workflow:
 
 ```
 gh attestation verify afi-x86_64-unknown-linux-musl.tar.gz --repo smykla-skalski/afi
 ```
 
-The `.sha256` files are uploaded alongside the archives by the same job, so they
-tell you a download arrived intact and nothing about where it came from. The
-attestation is the one that answers that.
+The `.sha256` files are uploaded alongside the archives by the same job, so they tell you a download arrived intact and nothing about where it came from. The attestation is the one that answers that.
 
 ### Which build is this
 
@@ -112,8 +99,7 @@ AFI_SOURCE_ZAI_API_KEY=$zai_test         # $name = look up a key from env / ~/.e
 AFI_SOURCE_ZAI_MODEL=glm-x-preview
 ```
 
-See [`sources.example.env`](sources.example.env) for a full annotated example.
-Switch at runtime with `/source [name]`.
+See [`sources.example.env`](sources.example.env) for a full annotated example. Switch at runtime with `/source [name]`.
 
 ## Reference
 

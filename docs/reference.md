@@ -106,7 +106,7 @@ A config file is a second way in for the same settings. afi reads `$AFI_HOME/con
 }
 ```
 
-**A flag beats a variable, a variable beats the file, and the file beats the built-in default.** An entry in the env file counts as the variable, since nothing downstream can tell the two apart, so a half-migrated setup keeps working rather than changing the moment a config file appears. A run with no config file behaves exactly as it did before there was one.
+**A flag beats a variable, a variable beats the file, and the file beats the built-in default.** An entry in the env file counts as the variable, since nothing downstream can tell the two apart, so a half-migrated setup keeps working rather than changing the moment a config file appears. A variable exported with no value still counts as set, because for several of these a blank is how you turn the setting off - `AFI_SUMMARY_FILE=` names no file, and filling it from the file would write one you suppressed. A run with no config file behaves exactly as it did before there was one.
 
 **Nothing in the working directory is read.** A per-project `.afi/config.json` was built and taken back out before release, because it made every repository a configuration input: one key redirecting a source's `base_url` was enough for a clone to receive whatever credential `$NAME` resolves out of your environment or env file, and `approval` in the same file switched off the gate that would have asked. Nothing else in afi reads configuration out of the working tree. Point `--config` at a file in a repository to opt into one by hand.
 

@@ -194,14 +194,10 @@ fn a_value_of_the_wrong_shape_says_what_was_wanted() {
 }
 
 #[test]
-fn a_setting_added_after_this_layer_still_has_a_key() {
-    // `system_prompt_file` and `system_prompt_mode` arrived with `--system-prompt-*`.
-    // The rule is that every AFI_* setting has a key, so a new variable that stops
-    // at the flag is the rule quietly breaking.
+fn the_mode_is_checked_against_its_own_parser() {
     let out = pairs(r#"{"system_prompt_file": "p.md", "system_prompt_mode": "append"}"#);
     assert_eq!(out.get("AFI_SYSTEM_PROMPT_FILE").unwrap(), "p.md");
     assert_eq!(out.get("AFI_SYSTEM_PROMPT_MODE").unwrap(), "append");
-    // The mode is checked against its own parser, not a copy of its list.
     assert_eq!(
         refusal(r#"{"system_prompt_mode": "prepend"}"#),
         "config.json: system_prompt_mode must be one of replace, append (got \"prepend\")"

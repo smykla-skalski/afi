@@ -20,8 +20,8 @@
 use crate::pricing::RATE_CLASSES;
 
 use super::value::{
-    Convert, allow_list, count, decimal, effort_level, flag, list, object, prompt_mode,
-    protocol_name, summary_format, text, whole,
+    Convert, allow_list, count, decimal, effort_level, flag, list, object, percent, prompt_mode,
+    protocol_name, summary_format, text, whole, wide_count,
 };
 
 /// One key and the variable it carries.
@@ -76,15 +76,19 @@ pub(super) const TOP: &[Setting] = &[
         "AFI_FORCED_FINAL_MAX_TOKENS",
         count,
     ),
-    row("autocompress_percent", "AFI_AUTOCOMPRESS_PERCENT", count),
+    row("autocompress_percent", "AFI_AUTOCOMPRESS_PERCENT", percent),
     row("read_file_lines", "AFI_READ_FILE_LINES", whole),
-    row("tool_result_chars", "AFI_TOOL_RESULT_CHARS", count),
+    row("tool_result_chars", "AFI_TOOL_RESULT_CHARS", wide_count),
     row("max_model_turns", "AFI_MAX_MODEL_TURNS", count),
     row("bash_poll_seconds", "AFI_BASH_POLL_SECONDS", whole),
     row("session_desc_refresh", "AFI_SESSION_DESC_REFRESH", count),
     // When to give up on a turn.
-    row("reasoning_only_chars", "AFI_REASONING_ONLY_CHARS", count),
-    row("reasoning_only_time", "AFI_REASONING_ONLY_TIME", count),
+    row(
+        "reasoning_only_chars",
+        "AFI_REASONING_ONLY_CHARS",
+        wide_count,
+    ),
+    row("reasoning_only_time", "AFI_REASONING_ONLY_TIME", wide_count),
     row(
         "reasoning_only_retries",
         "AFI_REASONING_ONLY_RETRIES",

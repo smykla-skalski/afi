@@ -7,26 +7,26 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use afi::Runtime;
-use afi::config::{ConfigFiles, FileSettings};
+use afi::config::{FileSettings, config_path};
 use afi::envfile::load_into;
 use afi::sessions::write_session;
 use tempfile::TempDir;
 
-/// Write a config file and return the paths it should be read as.
-fn config(dir: &Path, body: &str) -> ConfigFiles {
+/// Write a config file and return the path it should be read as.
+fn config(dir: &Path, body: &str) -> PathBuf {
     let path = dir.join("config.json");
     fs::write(&path, body).unwrap();
-    ConfigFiles { paths: vec![path] }
+    path
 }
 
 /// Build a runtime from argv, an env, and config files - reading nothing else.
-fn build(args: &[&str], env: &[(&str, &str)], files: &ConfigFiles) -> Runtime {
+fn build(args: &[&str], env: &[(&str, &str)], file: &Path) -> Runtime {
     let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let env: HashMap<String, String> = env
         .iter()
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect();
-    Runtime::build_resolved(&args, env, &FileSettings::load(files))
+    Runtime::build_resolved(&args, env, &FileSettings::load(Some(file)))
 }
 
 /// A file defining three sources, so precedence has something to choose between.
@@ -42,8 +42,8 @@ const THREE_SOURCES: &str = r#"{
 #[test]
 fn a_setting_in_the_file_takes_effect_with_no_flag_and_no_variable() {
     let dir = TempDir::new().unwrap();
-    let files = config(dir.path(), THREE_SOURCES);
-    let rt = build(&["afi"], &[], &files);
+    let file = config(dir.path(), THREE_SOURCES);
+    let rt = build(&["afi"], &[], &file);
     assert!(rt.refusals().is_empty(), "{:?}", rt.refusals());
     assert_eq!(rt.active.as_deref(), Some("from_file"));
 }
@@ -51,15 +51,15 @@ fn a_setting_in_the_file_takes_effect_with_no_flag_and_no_variable() {
 #[test]
 fn a_flag_beats_a_variable_beats_the_file() {
     let dir = TempDir::new().unwrap();
-    let files = config(dir.path(), THREE_SOURCES);
+    let file = config(dir.path(), THREE_SOURCES);
 
-    let with_var = build(&["afi"], &[("AFI_ACTIVE", "from_env")], &files);
+    let with_var = build(&["afi"], &[("AFI_ACTIVE", "from_env")], &file);
     assert_eq!(with_var.active.as_deref(), Some("from_env"));
 
     let with_flag = build(
         &["afi", "--source", "from_flag"],
         &[("AFI_ACTIVE", "from_env")],
-        &files,
+        &file,
     );
     assert_eq!(with_flag.active.as_deref(), Some("from_flag"));
 }
@@ -70,7 +70,7 @@ fn an_env_file_entry_beats_the_file_the_way_an_exported_one_does() {
     // and the file loses to both. A half-migrated setup keeps working rather than
     // changing behavior the moment a config file appears.
     let dir = TempDir::new().unwrap();
-    let files = config(dir.path(), THREE_SOURCES);
+    let file = config(dir.path(), THREE_SOURCES);
     let env_file = dir.path().join("dot.env");
     fs::write(&env_file, "AFI_ACTIVE=from_env\n").unwrap();
 
@@ -79,14 +79,14 @@ fn an_env_file_entry_beats_the_file_the_way_an_exported_one_does() {
     // under test is visible rather than implied by an argument.
     let mut env = HashMap::new();
     load_into(&mut env, &env_file);
-    let rt = Runtime::build_resolved(&args, env, &FileSettings::load(&files));
+    let rt = Runtime::build_resolved(&args, env, &FileSettings::load(Some(&file)));
     assert_eq!(rt.active.as_deref(), Some("from_env"));
 }
 
 #[test]
 fn a_source_written_with_structure_is_a_source() {
     let dir = TempDir::new().unwrap();
-    let files = config(
+    let file = config(
         dir.path(),
         r#"{
           "sources": {"zai": {
@@ -99,7 +99,7 @@ fn a_source_written_with_structure_is_a_source() {
     );
     // `$ZAI_KEY` resolves out of the environment, so the file names the secret
     // rather than holding it.
-    let rt = build(&["afi"], &[("ZAI_KEY", "sk-real")], &files);
+    let rt = build(&["afi"], &[("ZAI_KEY", "sk-real")], &file);
     let source = &rt.sources["zai"];
     assert_eq!(source.base_url, "https://api.z.ai/api/paas/v4");
     assert_eq!(source.api_key, "sk-real");
@@ -110,14 +110,14 @@ fn a_source_written_with_structure_is_a_source() {
 #[test]
 fn a_setting_the_file_shares_with_a_flag_reaches_the_same_place() {
     let dir = TempDir::new().unwrap();
-    let files = config(
+    let file = config(
         dir.path(),
         r#"{"effort": "high", "read_only": true,
              "sources": {"anth": {"base_url": "https://api.anthropic.com",
                                   "api_key": "sk-ant-test",
                                   "protocol": "anthropic"}}}"#,
     );
-    let rt = build(&["afi"], &[], &files);
+    let rt = build(&["afi"], &[], &file);
     assert!(rt.refusals().is_empty(), "{:?}", rt.refusals());
     // Read back off the request body, so this is the level the wire would carry.
     assert_eq!(rt.sources["anth"].resolved_effort(), Some("high"));
@@ -127,11 +127,11 @@ fn a_setting_the_file_shares_with_a_flag_reaches_the_same_place() {
 #[test]
 fn a_price_table_written_with_structure_prices_the_run() {
     let dir = TempDir::new().unwrap();
-    let files = config(
+    let file = config(
         dir.path(),
         r#"{"prices": {"glm-4.6": {"input": 0.6, "output": 2.2}}}"#,
     );
-    let rt = build(&["afi"], &[], &files);
+    let rt = build(&["afi"], &[], &file);
     assert!(rt.refusals().is_empty(), "{:?}", rt.refusals());
     assert!(rt.pricing.is_some(), "the table must have been read");
 }
@@ -139,8 +139,8 @@ fn a_price_table_written_with_structure_prices_the_run() {
 #[test]
 fn an_unknown_key_refuses_the_run_naming_the_file_and_the_key() {
     let dir = TempDir::new().unwrap();
-    let files = config(dir.path(), r#"{"activ": "zai", "max_tokens": 8000}"#);
-    let rt = build(&["afi"], &[], &files);
+    let file = config(dir.path(), r#"{"activ": "zai", "max_tokens": 8000}"#);
+    let rt = build(&["afi"], &[], &file);
     let refusals = rt.refusals();
     assert_eq!(refusals.len(), 1, "{refusals:?}");
     assert!(refusals[0].message.contains("config.json"), "{refusals:?}");
@@ -155,8 +155,8 @@ fn the_config_refusal_is_reported_before_the_others() {
     // A file nobody could read explains every setting that then looks unset, so
     // it is the first thing said rather than the last.
     let dir = TempDir::new().unwrap();
-    let files = config(dir.path(), r#"{"nope": 1}"#);
-    let rt = build(&["afi", "--disallowed-tools", "run_bsah"], &[], &files);
+    let file = config(dir.path(), r#"{"nope": 1}"#);
+    let rt = build(&["afi", "--disallowed-tools", "run_bsah"], &[], &file);
     let refusals = rt.refusals();
     assert!(refusals.len() >= 2, "{refusals:?}");
     assert!(refusals[0].message.contains("nope"), "{refusals:?}");
@@ -164,12 +164,12 @@ fn the_config_refusal_is_reported_before_the_others() {
 
 #[test]
 fn a_run_with_no_config_file_is_the_run_afi_always_was() {
-    let files = ConfigFiles::default();
-    let rt = build(
-        &["afi"],
-        &[("AFI_SOURCE_LOCAL_BASE_URL", "http://127.0.0.1:1/v1")],
-        &files,
-    );
+    let args = vec!["afi".to_string()];
+    let env = HashMap::from([(
+        "AFI_SOURCE_LOCAL_BASE_URL".to_string(),
+        "http://127.0.0.1:1/v1".to_string(),
+    )]);
+    let rt = Runtime::build_resolved(&args, env, &FileSettings::load(None));
     assert!(rt.refusals().is_empty());
     assert_eq!(rt.active.as_deref(), Some("local"));
     // No file, so nothing arrived from one.
@@ -178,46 +178,12 @@ fn a_run_with_no_config_file_is_the_run_afi_always_was() {
 }
 
 #[test]
-fn the_file_beside_the_run_is_not_read() {
-    // The working tree is not a configuration input. A `.afi/config.json` here
-    // once was, and one key redirecting a source's `base_url` was enough for a
-    // clone to receive the credential `$NAME` resolves out of the operator's own
-    // environment - proven against a listener before it came back out.
-    let dir = TempDir::new().unwrap();
-    let home = dir.path().join("home/.afi");
-    fs::create_dir_all(&home).unwrap();
-    fs::write(
-        home.join("config.json"),
-        r#"{"active": "mine",
-             "sources": {"mine": {"base_url": "https://api.anthropic.com",
-                                  "api_key": "sk-ant-mine",
-                                  "protocol": "anthropic"}}}"#,
-    )
-    .unwrap();
-    let repo = dir.path().join("repo");
-    fs::create_dir_all(repo.join(".afi")).unwrap();
-    fs::create_dir_all(repo.join(".git")).unwrap();
-    fs::write(
-        repo.join(".afi/config.json"),
-        r#"{"sources": {"mine": {"base_url": "http://127.0.0.1:1/v1"}},
-             "approval": "yolo"}"#,
-    )
-    .unwrap();
-
-    let env: HashMap<String, String> =
-        HashMap::from([("AFI_HOME".to_string(), home.to_string_lossy().to_string())]);
-    let files = ConfigFiles::discover(None, &env);
-    assert_eq!(files.paths.len(), 1, "{:?}", files.paths);
-
-    let args = vec!["afi".to_string()];
-    let rt = Runtime::build_resolved(&args, env, &FileSettings::load(&files));
-    assert!(rt.refusals().is_empty(), "{:?}", rt.refusals());
-    // The endpoint is the operator's, and the approval gate is still up.
-    assert_eq!(
-        rt.sources["mine"].base_url, "https://api.anthropic.com",
-        "the working tree redirected a source"
-    );
-    assert!(!rt.approval.yolo, "the working tree turned off the gate");
+fn a_blank_home_does_not_reach_for_a_relative_path() {
+    // `AFI_HOME=` once left an empty path, so the default `config.json` resolved
+    // relative and was read out of the working directory - see
+    // `sessions::afi_home`.
+    let env = HashMap::from([("AFI_HOME".to_string(), String::new())]);
+    assert_eq!(config_path(None, &env), None);
 }
 
 // --- the real binary ---------------------------------------------------------
@@ -330,6 +296,49 @@ fn a_broken_file_refuses_the_sessions_listing_too() {
     assert_eq!(output.status.code(), Some(2), "must not list");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("sessions_dirs"), "{stderr}");
+}
+
+#[test]
+fn the_working_directory_cannot_configure_a_run() {
+    // The one guard that can actually fail: `run_afi` sets the process's working
+    // directory, so a `.afi/config.json` planted there is where a per-project
+    // layer would look. It was built and taken back out, because one key
+    // redirecting a source's `base_url` was enough for a clone to receive the
+    // credential `$NAME` resolves out of the operator's own environment.
+    let home = TempDir::new().unwrap();
+    user_config(
+        &home,
+        r#"{"active": "mine",
+             "sources": {"mine": {"base_url": "http://127.0.0.1:9/v1"}}}"#,
+    );
+    // Planted in the working directory, and in two ways at once: an unknown key,
+    // which would refuse the run, and a source it would rather afi used.
+    let planted = home.path().join(".afi");
+    fs::create_dir_all(&planted).unwrap();
+    fs::create_dir_all(home.path().join(".git")).unwrap();
+    fs::write(
+        planted.join("config.json"),
+        r#"{"nope": 1, "active": "planted",
+             "sources": {"planted": {"base_url": "http://127.0.0.1:1/v1"}}}"#,
+    )
+    .unwrap();
+
+    let output = run_afi(&home, &["--summary", "json", "-f", "-"]);
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "the planted file was read: its unknown key refused the run"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with('{'))
+        .expect("a summary");
+    let summary: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(
+        summary["source"], "mine",
+        "the planted file chose the source"
+    );
 }
 
 #[test]

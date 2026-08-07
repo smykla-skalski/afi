@@ -13,7 +13,7 @@ use crate::tools::policy::ToolPolicy;
 use super::Source;
 use super::args::{ParsedArgs, parse_args};
 use super::effort;
-use super::file::{ConfigFiles, FileSettings};
+use super::file::{FileSettings, config_path};
 use super::sources::discover_sources;
 use super::system_prompt::{self, SystemPrompt};
 use super::tools::apply_tool_flags;
@@ -47,11 +47,11 @@ pub struct Runtime {
     pub tool_policy: ToolPolicy,
     /// Flags given wrongly on the command line, each with its kind. See
     /// `refusals`.
+    /// Why the run must not start, in the order it is reported. A config file
+    /// that would not read comes first, because every setting that then looks
+    /// unset is explained by it; the flags follow. Not only flags, despite the
+    /// name - an unusable `AFI_EFFORT` lands here too.
     pub flag_errors: Vec<RunError>,
-    /// What a config file said that afi cannot honour. Kept apart from
-    /// `flag_errors` because it is reported first: a file nobody could read
-    /// explains every setting that then looks unset.
-    pub config_errors: Vec<RunError>,
     /// Token rates for the summary's cost, `None` when unset or unusable.
     pub pricing: Option<Pricing>,
     /// The system prompt every turn of this run sends, resolved once here so a
@@ -92,8 +92,8 @@ impl Runtime {
         if let Some(path) = &env_file {
             envfile::load_into(&mut env, path);
         }
-        let files = ConfigFiles::discover(parse_args(args).config.as_deref(), &env);
-        let settings = FileSettings::load(&files);
+        let file = config_path(parse_args(args).config.as_deref(), &env);
+        let settings = FileSettings::load(file.as_deref());
         settings.apply_to(&mut env);
         (env, settings)
     }
@@ -139,7 +139,17 @@ impl Runtime {
         let parsed = parse_args(args);
         let approval = resolve_approval(&env, &parsed);
         apply_tool_flags(&mut env, &parsed);
-        let mut flag_errors = parsed.flag_errors;
+        // The config file first: `refusals` reports in this order, and a file
+        // nobody could read explains every setting that then looks unset.
+        //
+        // `Input`: the invocation named settings this run cannot use, and
+        // retrying it lands in the same place.
+        let mut flag_errors: Vec<RunError> = settings
+            .refusals()
+            .iter()
+            .map(|why| RunError::new(why.clone(), ErrorKind::Input))
+            .collect();
+        flag_errors.extend(parsed.flag_errors);
         let effort = effort::resolve(
             parsed.effort.as_deref(),
             env.get("AFI_EFFORT").map(String::as_str),
@@ -180,13 +190,6 @@ impl Runtime {
                 env.get("AFI_READ_ONLY").map(String::as_str),
             ),
             flag_errors,
-            // `Input`: the invocation named settings this run cannot use, and
-            // retrying it lands in the same place.
-            config_errors: settings
-                .refusals()
-                .iter()
-                .map(|why| RunError::new(why.clone(), ErrorKind::Input))
-                .collect(),
             // At startup, so a typo is heard about before the run, not after.
             pricing: Pricing::from_env(&env),
             system_prompt: system_prompt::resolve(
@@ -284,17 +287,13 @@ impl Runtime {
     /// watching stdout for the JSON, and a run that has already been paid for is
     /// a poor moment to learn the directory does not exist.
     ///
-    /// The config file comes first. Every other refusal describes one setting,
-    /// where a file that would not read takes all of them with it.
-    ///
     /// Each refusal carries the kind the summary reports, decided here where the
     /// reason is known. Deriving it afterwards from which field was non-empty
     /// would put the caller's classification back at one remove from the thing
     /// being classified, which is what `error_kind` exists to end.
     #[must_use]
     pub fn refusals(&self) -> Vec<RunError> {
-        let mut out = self.config_errors.clone();
-        out.extend(self.flag_errors.iter().cloned());
+        let mut out = self.flag_errors.clone();
         out.extend(
             self.tool_policy
                 .unknown_names_message()
@@ -333,7 +332,7 @@ impl Runtime {
     }
 }
 
-// --- Source discovery --------------------------------------------------------
+// --- Startup defaults --------------------------------------------------------
 
 /// Resolve the starting approval state from env (`AFI_APPROVAL`) then the
 /// `--approval` / `--yolo` flags. Unknown levels warn and are ignored.

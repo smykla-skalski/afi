@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::Local;
+
+use crate::util;
 use std::hash::BuildHasher;
 use std::thread;
 use std::time::SystemTime;
@@ -31,7 +33,7 @@ pub const SESSION_LIST_MAX_LIMIT: usize = 100;
 /// `AFI_HOME/sessions`, then `~/.afi/sessions`.
 #[must_use]
 pub fn sessions_dir<S: BuildHasher>(env: &HashMap<String, String, S>) -> PathBuf {
-    if let Some(d) = env.get("AFI_SESSIONS_DIR") {
+    if let Some(d) = util::nonblank(env.get("AFI_SESSIONS_DIR").map(String::as_str)) {
         return PathBuf::from(d);
     }
     let home = afi_home(env);
@@ -47,7 +49,11 @@ pub fn memories_dir<S: BuildHasher>(env: &HashMap<String, String, S>) -> PathBuf
 /// `~/.afi` or `AFI_HOME`.
 #[must_use]
 pub fn afi_home<S: BuildHasher>(env: &HashMap<String, String, S>) -> PathBuf {
-    if let Some(d) = env.get("AFI_HOME") {
+    // Blank is unset, per `util::nonblank`. `AFI_HOME=` would otherwise be an
+    // empty path, and every `join` off it a relative one - sessions written to
+    // `./sessions`, and the config file read from the working directory, which
+    // is the one place it promises never to look.
+    if let Some(d) = util::nonblank(env.get("AFI_HOME").map(String::as_str)) {
         return PathBuf::from(d);
     }
     dirs::home_dir()

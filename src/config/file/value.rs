@@ -57,6 +57,26 @@ pub(super) fn count(value: &Value) -> Result<String, String> {
         .ok_or_else(|| expected(&format!("a whole number from 0 to {}", u32::MAX), value))
 }
 
+/// A whole number, zero or more, for a reader that holds one wider than `u32`.
+pub(super) fn wide_count(value: &Value) -> Result<String, String> {
+    value
+        .as_u64()
+        .map(|n| n.to_string())
+        .ok_or_else(|| expected("a whole number, zero or more", value))
+}
+
+/// A percentage, which its reader clamps rather than rejects.
+///
+/// The clamp is why this is its own converter: `env_u32(...).min(100)` takes
+/// `5000` as `100`, so a value the file merely bounded to `u32` would still be
+/// silently substituted - the drop every converter here exists to end.
+pub(super) fn percent(value: &Value) -> Result<String, String> {
+    match value.as_u64() {
+        Some(n) if n <= 100 => Ok(n.to_string()),
+        _ => Err(expected("a whole number from 0 to 100", value)),
+    }
+}
+
 /// A whole number, negative allowed, that fits the `i64` its reader parses.
 ///
 /// Separate from [`count`] because these readers are signed and the sign means

@@ -37,6 +37,7 @@ use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
 use crate::sessions::afi_home;
+use crate::util;
 
 mod lower;
 mod schema;
@@ -51,54 +52,32 @@ const FILE_NAME: &str = "config.json";
 /// The variable naming one file in place of the default.
 const CONFIG_ENV: &str = "AFI_CONFIG";
 
-/// Which files a run reads its settings from, lowest precedence first.
+/// The file a run reads its settings from: the one that was named, or the
+/// default when it holds one.
 ///
-/// A list rather than one path because the layer is built to merge several and
-/// only the search is restricted to one; a caller that has its own idea of where
-/// settings live - a test, or a future gated per-project file - hands over as
-/// many as it means.
+/// `named` is `--config`; `AFI_CONFIG` stands in when the flag is absent, and
+/// either replaces the default rather than joining it - a caller pointing at one
+/// file means that file. A blank value names nothing and leaves the default
+/// alone, which is what an exported-but-unset shell variable looks like.
 ///
-/// Every path here has to be readable. [`Self::discover`] lists the default
-/// location only when it holds a file, so a missing one never reaches this -
-/// which is what leaves "no config file" as an ordinary run configured by
-/// environment and flags, while a path someone typed and that holds no file
-/// refuses to start.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ConfigFiles {
-    /// The paths, lowest precedence first.
-    pub paths: Vec<PathBuf>,
-}
-
-impl ConfigFiles {
-    /// Find the file to read: the one that was named, or the default when it
-    /// exists.
-    ///
-    /// `named` is `--config`; `AFI_CONFIG` stands in when the flag is absent, and
-    /// either replaces the default rather than joining it - a caller pointing at
-    /// one file means that file. A blank value names nothing and leaves the
-    /// default alone, which is what an exported-but-unset shell variable looks
-    /// like.
-    ///
-    /// `env` supplies `AFI_HOME`, so it wants the env map after any env file has
-    /// been merged - see `Runtime::resolve_env`.
-    #[must_use]
-    pub fn discover<S: BuildHasher>(named: Option<&str>, env: &HashMap<String, String, S>) -> Self {
-        let named = named
-            .or_else(|| env.get(CONFIG_ENV).map(String::as_str))
-            .map(str::trim)
-            .filter(|path| !path.is_empty());
-        if let Some(path) = named {
-            // Unchecked on purpose: a path someone typed and that holds no file
-            // is a mistake, and starting anyway would run with settings nobody
-            // chose.
-            return Self {
-                paths: vec![PathBuf::from(path)],
-            };
-        }
-        let user = afi_home(env).join(FILE_NAME);
-        let paths = if user.is_file() { vec![user] } else { vec![] };
-        Self { paths }
+/// A named path is returned without checking that it exists, because a path
+/// someone typed and that holds no file is a mistake and starting anyway would
+/// run with settings nobody chose. The default is returned only when it holds a
+/// file, which is what leaves "no config file" as an ordinary run configured by
+/// environment and flags.
+///
+/// `env` supplies `AFI_HOME`, so it wants the env map after any env file has been
+/// merged - see `Runtime::resolve_env`.
+#[must_use]
+pub fn config_path<S: BuildHasher>(
+    named: Option<&str>,
+    env: &HashMap<String, String, S>,
+) -> Option<PathBuf> {
+    if let Some(path) = util::nonblank(named.or_else(|| env.get(CONFIG_ENV).map(String::as_str))) {
+        return Some(PathBuf::from(path));
     }
+    let user = afi_home(env).join(FILE_NAME);
+    user.is_file().then_some(user)
 }
 
 /// What a run's config files say, lowered to the variable names every setting
@@ -110,22 +89,19 @@ pub struct FileSettings {
 }
 
 impl FileSettings {
-    /// Read every file, lowest precedence first.
-    ///
-    /// A later file's key replaces an earlier one's, key by key rather than file
-    /// by file, so a caller that hands over two files keeps the rest of the first
-    /// one standing. `discover` only ever finds one.
+    /// Read `file`, or nothing when there is none to read.
     #[must_use]
-    pub fn load(files: &ConfigFiles) -> Self {
+    pub fn load(file: Option<&Path>) -> Self {
         let mut settings = Self::default();
-        for path in &files.paths {
+        if let Some(path) = file {
             settings.read(path);
         }
         settings
     }
 
     /// Why the run must not start: a file that would not read, a key nothing
-    /// reads, a value of the wrong shape. Empty when every file read cleanly.
+    /// reads, a value of the wrong shape. Empty when the file read cleanly, and
+    /// when there was none.
     #[must_use]
     pub fn refusals(&self) -> &[String] {
         &self.refusals
@@ -135,13 +111,14 @@ impl FileSettings {
     /// makes a variable, and the flags written into the map before this, beat the
     /// file.
     ///
-    /// A variable that is set to nothing is a gap. `export AFI_X="$UNSET"` is how
-    /// a blank arrives, and almost every reader already discards one - approval,
-    /// effort, the summary path and the tool lists all treat it as unset - so
-    /// letting it shadow the file would land on the built-in default rather than
-    /// on either of the two things that were written. For the tool policy that
-    /// default is every tool, which is a silent widening of the one setting that
-    /// must never widen quietly.
+    /// A variable set to nothing counts as set, blank though it is. Several of
+    /// these read a blank as a value rather than as an absence, and it is the
+    /// value that turns the setting off: `AFI_SUMMARY_FILE=` names no file,
+    /// `AFI_SYSTEM_PROMPT_FILE=` sends afi's own prompt, a blank source
+    /// `API_KEY` sends no credential. Filling those would make the run do more
+    /// than was asked for - write a file that was suppressed, send instructions
+    /// that were switched off - so a blank keeps beating the file, as the
+    /// precedence rule says on its face.
     ///
     /// A file with anything wrong in it applies nothing at all. The run is about
     /// to refuse to start, and a half-applied file is a worse thing to hand to a
@@ -151,12 +128,7 @@ impl FileSettings {
             return;
         }
         for (name, value) in &self.values {
-            match env.get(name) {
-                Some(set) if !set.trim().is_empty() => {}
-                _ => {
-                    env.insert(name.clone(), value.clone());
-                }
-            }
+            env.entry(name.clone()).or_insert_with(|| value.clone());
         }
     }
 

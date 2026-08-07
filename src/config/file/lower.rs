@@ -14,6 +14,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
+use super::super::sources;
 use super::schema;
 use super::suggest::nearest;
 use super::value::{self, Convert};
@@ -59,16 +60,8 @@ impl Lowered<'_> {
                 "sources" => self.sources(value),
                 "prices" => self.prices(value),
                 "anthropic" => self.anthropic(value),
-                _ => self.top(key, value),
+                _ => self.field("", schema::TOP, &schema::BLOCKS, key, value),
             }
-        }
-    }
-
-    /// One root-level setting.
-    fn top(&mut self, key: &str, value: &Value) {
-        match schema::find(schema::TOP, key) {
-            Some(setting) => self.set(key, setting.env, setting.convert, value),
-            None => self.unknown("", key, &schema::keys(schema::TOP, &schema::BLOCKS)),
         }
     }
 
@@ -123,7 +116,7 @@ impl Lowered<'_> {
             );
             return None;
         }
-        Some(format!("AFI_SOURCE_{}_", name.to_uppercase()))
+        Some(sources::source_prefix(name))
     }
 
     /// The `prices` table, checked entry by entry and then written back whole.
@@ -198,12 +191,9 @@ impl Lowered<'_> {
         value: &Value,
     ) {
         match schema::find(table, key) {
-            Some(setting) => self.set(
-                &format!("{prefix}.{key}"),
-                setting.env,
-                setting.convert,
-                value,
-            ),
+            Some(setting) => {
+                self.set(&key_path(prefix, key), setting.env, setting.convert, value);
+            }
             None => self.unknown(prefix, key, &schema::keys(table, nested)),
         }
     }
@@ -240,14 +230,19 @@ impl Lowered<'_> {
 
     /// A key nothing reads, with the nearest one that is read.
     fn unknown(&mut self, prefix: &str, key: &str, candidates: &[&str]) {
-        let path = if prefix.is_empty() {
-            key.to_string()
-        } else {
-            format!("{prefix}.{key}")
-        };
+        let path = key_path(prefix, key);
         let hint = nearest(key, candidates)
             .map_or_else(String::new, |near| format!(" (did you mean \"{near}\"?)"));
         self.bad_file(&format!("unknown key \"{path}\"{hint}"));
+    }
+}
+
+/// `prefix.key`, or bare `key` at the root, which has no prefix to join.
+fn key_path(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() {
+        key.to_string()
+    } else {
+        format!("{prefix}.{key}")
     }
 }
 

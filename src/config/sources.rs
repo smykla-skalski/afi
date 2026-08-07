@@ -57,13 +57,22 @@ fn source_names<S: BuildHasher>(env: &HashMap<String, String, S>) -> Vec<String>
     found
 }
 
+/// The `AFI_SOURCE_<NAME>_` prefix a named source's variables carry.
+///
+/// Shared with the config file, which writes the variables this module reads. Two
+/// spellings of the convention would let the file emit names nothing reads, and
+/// the failure would be silent - keys accepted, no refusal, setting absent.
+pub(super) fn source_prefix(name: &str) -> String {
+    format!("AFI_SOURCE_{}_", name.to_uppercase())
+}
+
 /// Build a `Source` for `name` from its `AFI_SOURCE_<NAME>_*` vars, or `None`
 /// when no `BASE_URL` is set.
 fn configured_source<S: BuildHasher>(
     env: &HashMap<String, String, S>,
     name: &str,
 ) -> Option<Source> {
-    let p = format!("AFI_SOURCE_{}_", name.to_uppercase());
+    let p = source_prefix(name);
     let base_url = env.get(&format!("{p}BASE_URL"))?.clone();
     let api_key =
         envfile::resolve_api_key(env, env.get(&format!("{p}API_KEY")).map(String::as_str));

@@ -41,8 +41,17 @@ released() {
 
 # Whether CHANGELOG.md carries a section for a version. Used to catch
 # `set-version` moving a heading instead of adding one - see below.
+#
+# A literal prefix match, not a pattern. Interpolating the version into a regex
+# makes every `.` in it match any character, so `0.6.0` also answers yes to a
+# heading reading `0x6y0`. That direction matters: the caller reads a yes for the
+# *previous* version as "its section survived", so a false positive would wave
+# through exactly the destructive rename this exists to stop.
 changelog_has() {
-    grep -q "^## \[$1\]" "$repo_root/CHANGELOG.md"
+    awk -v want="## [$1]" '
+        index($0, want) == 1 { found = 1; exit }
+        END { exit !found }
+    ' "$repo_root/CHANGELOG.md"
 }
 
 before=$("$repo_root/scripts/cargo-version.sh")

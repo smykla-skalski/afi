@@ -18,6 +18,7 @@ fn summary(ok: bool, answer: &str, usage: UsageTotals) -> RunSummary<'_> {
     RunSummary {
         ok,
         error: None,
+        error_kind: None,
         source: Some("anthropic"),
         model: Some("claude-sonnet-5"),
         answer,
@@ -114,9 +115,76 @@ fn missing_usage_is_null_not_a_row_of_zeros() {
 fn a_failed_run_says_so_and_carries_the_reason() {
     let mut run = summary(false, "", UsageTotals::default());
     run.error = Some("HTTP 401: authentication_error");
+    run.error_kind = Some(ErrorKind::Auth);
     let json = run.to_json();
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"], "HTTP 401: authentication_error");
+    // The free text is for a human; this is what a workflow branches on.
+    assert_eq!(json["error_kind"], "auth");
+}
+
+#[test]
+fn the_reported_reason_is_the_pair_a_failure_carries() {
+    // The two travel together, so a caller reporting the failure and a caller
+    // deciding what to do about it read the same object.
+    let error = RunError::new("HTTP 429: rate_limit_error", ErrorKind::ProviderHttp);
+    assert_eq!(error.message, "HTTP 429: rate_limit_error");
+    assert_eq!(error.kind.as_str(), "provider_http");
+}
+
+#[test]
+fn a_successful_run_has_no_error_kind() {
+    let json = summary(true, "done", totals(1)).to_json();
+    assert_eq!(json["error_kind"], Value::Null);
+}
+
+#[test]
+fn every_kind_has_a_stable_wire_value() {
+    // Callers branch on these strings, so renaming one silently breaks a
+    // workflow's retry rule - the failure this field exists to prevent.
+    let pairs = [
+        (ErrorKind::Auth, "auth"),
+        (ErrorKind::Policy, "policy"),
+        (ErrorKind::Input, "input"),
+        (ErrorKind::ProviderHttp, "provider_http"),
+        (ErrorKind::ProviderStream, "provider_stream"),
+        (ErrorKind::Timeout, "timeout"),
+        (ErrorKind::NoAnswer, "no_answer"),
+        (ErrorKind::Internal, "internal"),
+    ];
+    for (kind, wire) in pairs {
+        assert_eq!(kind.as_str(), wire);
+    }
+    // The set is closed, so a kind added without a row here would go undocumented
+    // and unasserted - which is how a caller's `case` arm silently stops matching.
+    assert_eq!(pairs.len(), 8, "every kind needs a pinned wire value");
+}
+
+#[test]
+fn a_refused_policy_reports_itself_without_naming_a_tool() {
+    // The run never started, so the wide set the mistyped policy resolved to must
+    // not be reported as what it was permitted to call - publishing that set is
+    // exactly what refusing to start avoids.
+    let json = RunSummary::refused("--disallowed-tools needs a value", ErrorKind::Policy).to_json();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"], "--disallowed-tools needs a value");
+    assert_eq!(json["error_kind"], "policy");
+    assert_eq!(json["tools"], json!([]));
+    assert_eq!(json["usage"], Value::Null);
+    assert_eq!(json["answer"], "");
+}
+
+#[test]
+fn a_refusal_reports_the_kind_it_was_given() {
+    // The two refusals are not the same failure: a policy that cannot be honoured
+    // would have run wider than asked, and an unwritable summary file is a path
+    // the invocation named that this machine has no answer for.
+    let json = RunSummary::refused(
+        "can't write the run summary to /nope/run.json",
+        ErrorKind::Input,
+    )
+    .to_json();
+    assert_eq!(json["error_kind"], "input");
 }
 
 #[test]

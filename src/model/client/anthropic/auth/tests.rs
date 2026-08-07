@@ -1,4 +1,5 @@
 use super::*;
+use crate::summary::ErrorKind;
 
 fn federated_protocol() -> Protocol {
     Protocol::AnthropicFederated(Box::new(Federation {
@@ -81,24 +82,34 @@ fn a_token_with_invalid_header_characters_is_rejected_without_leaking_it() {
 
 // --- error classification -----------------------------------------------------
 
-/// Every failure reachable before a request goes out is the user's own config,
-/// so none of them may surface as `Parse`. `turn.rs` renders `Parse` as a
-/// malformed-response problem, which points the blame at the server.
+/// Nothing reachable before a request goes out may surface as `Parse`, which
+/// `turn.rs` renders as a malformed response and so blames the server for. The
+/// credential cases classify as `auth` besides: a caller must never retry one.
 #[test]
-fn failures_before_the_wire_are_config_errors() {
+fn a_credential_rejected_before_the_wire_is_an_auth_failure() {
     let cases = [
-        auth_headers(&Protocol::OpenAiCompat, "sk-x", None),
         auth_headers(&Protocol::AnthropicApiKey, NOOP_KEY, None),
         auth_headers(&Protocol::AnthropicOAuth, NOOP_KEY, Some("bad\nvalue")),
     ];
     for case in cases {
         let err = case.expect_err("must fail before any request");
-        assert!(matches!(err, ClientError::Config(_)), "got {err:?}");
+        assert!(matches!(err, ClientError::Auth(_)), "got {err:?}");
+        assert_eq!(err.kind(), ErrorKind::Auth);
     }
 }
 
+#[test]
+fn anthropic_headers_for_a_non_anthropic_source_are_a_bug_not_a_credential() {
+    // No configuration produces this, so reporting it as an auth failure would
+    // send someone hunting for a credential that was never the problem.
+    let err = auth_headers(&Protocol::OpenAiCompat, "sk-x", None)
+        .expect_err("must fail before any request");
+    assert!(matches!(err, ClientError::Internal(_)), "got {err:?}");
+    assert_eq!(err.kind(), ErrorKind::Internal);
+}
+
 #[tokio::test]
-async fn a_bearer_for_a_non_bearer_source_is_a_config_error() {
+async fn a_bearer_for_a_non_bearer_source_is_an_internal_error() {
     let source = Source::new(
         "local",
         "http://localhost:8080/v1".to_string(),
@@ -111,7 +122,7 @@ async fn a_bearer_for_a_non_bearer_source_is_a_config_error() {
         .bearer(&Client::new(), &source)
         .await
         .expect_err("an OpenAI-compatible source has no bearer to mint");
-    assert!(matches!(err, ClientError::Config(_)), "got {err:?}");
+    assert!(matches!(err, ClientError::Internal(_)), "got {err:?}");
 }
 
 // --- identity token -----------------------------------------------------------
@@ -128,7 +139,7 @@ async fn a_blank_identity_token_file_names_the_file() {
         .await
         .expect_err("an empty token file must not reach the exchange");
     let text = err.to_string();
-    assert!(matches!(err, ClientError::Config(_)), "wrong variant");
+    assert!(matches!(err, ClientError::Auth(_)), "wrong variant");
     assert!(text.contains("is empty"), "{text}");
     assert!(text.contains(&path.display().to_string()), "{text}");
 }
@@ -140,7 +151,7 @@ async fn a_blank_literal_identity_token_is_rejected() {
     let err = fetch_identity_token(&Client::new(), &IdentitySource::Literal("  ".to_string()))
         .await
         .expect_err("a blank literal token must not reach the exchange");
-    assert!(matches!(err, ClientError::Config(_)), "got {err:?}");
+    assert!(matches!(err, ClientError::Auth(_)), "got {err:?}");
 }
 
 #[tokio::test]
@@ -200,4 +211,42 @@ fn the_federation_beta_header_requests_both_betas() {
     // The exchange endpoint needs the oidc-federation beta in addition to oauth.
     assert!(FEDERATION_BETA.contains("oauth-2025-04-20"));
     assert!(FEDERATION_BETA.contains("oidc-federation-2026-04-01"));
+}
+
+#[test]
+fn a_refused_identity_exchange_is_an_auth_failure_not_a_transport_one() {
+    // The one auth failure that arrives as an HTTP status. A federation rule that
+    // turns the claims down - an unprotected ref, most often - answers 400 or 401,
+    // and classifying that as the provider's trouble would make a caller retry
+    // until the schedule ran out to be refused in the same words.
+    for status in [StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED] {
+        let error = refused_credential("the exchange refused it", status, "{\"error\":\"x\"}");
+        assert!(matches!(error, ClientError::Auth(_)), "got {error:?}");
+        assert_eq!(error.kind(), ErrorKind::Auth);
+    }
+}
+
+#[test]
+fn a_busy_credential_endpoint_stays_retryable() {
+    // Capacity, not the credential. This one is worth trying again, so it keeps
+    // the status it arrived with.
+    for status in [
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let error = refused_credential("busy", status, "slow down");
+        assert_eq!(error.kind(), ErrorKind::ProviderHttp, "{status}");
+    }
+}
+
+#[test]
+fn a_refusal_body_is_quoted_but_bounded() {
+    let error = refused_credential("refused", StatusCode::FORBIDDEN, &"x".repeat(1000));
+    let text = error.to_string();
+    assert!(text.contains("refused (HTTP 403)"), "{text}");
+    assert!(
+        text.matches('x').count() == BODY_PREVIEW_CHARS,
+        "the body must be trimmed to the preview length: {}",
+        text.len()
+    );
 }

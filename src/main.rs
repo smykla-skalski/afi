@@ -7,8 +7,10 @@ use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
 use std::process;
 
+use afi::Runtime;
 use afi::cli::{cli_meta, cli_sessions_with_style};
 use afi::repl::run_repl;
+use afi::summary::{ErrorKind, RunError, RunSummary, writable, write_file};
 use afi::tools::known_tool_names;
 
 fn main() {
@@ -43,15 +45,16 @@ fn main() {
     // otherwise), a summary file it could not write, or an effort level nobody
     // could have meant.
     let refusals = rt.refusals();
-    if !refusals.is_empty() {
+    if let Some(first) = refusals.first() {
         for refusal in &refusals {
-            eprintln!("  \u{2717} {refusal}");
+            eprintln!("  \u{2717} {}", refusal.message);
         }
         // The registry is the answer to a mistyped tool name and to nothing
         // else, so it is spelled out only for that refusal.
         if rt.tool_policy.unknown_names_message().is_some() {
             eprintln!("    known tools: {}", known_tool_names().join(", "));
         }
+        report_refusal(&rt, &refusals, first.kind);
         process::exit(2);
     }
 
@@ -59,5 +62,41 @@ fn main() {
     // code, and reporting success after printing an HTTP error hides the failure.
     if !run_repl(&mut rt) {
         process::exit(1);
+    }
+}
+
+/// Report a run that refused to start, wherever the caller asked for its summary.
+///
+/// A caller that asked for one gets one even here. Reporting nothing left it
+/// parsing an empty stdout, or reading a summary file still holding a previous
+/// run's object, to find out what happened - which is the substring matching the
+/// summary exists to end.
+///
+/// `kind` is the first refusal's, matching the first-wins rule a failed run
+/// already uses: the reason a run went wrong is the first thing that went wrong.
+fn report_refusal(rt: &Runtime, refusals: &[RunError], kind: ErrorKind) {
+    if !rt.summary.is_json() && rt.summary_file.is_none() {
+        return;
+    }
+    let reason = refusals
+        .iter()
+        .map(|refusal| refusal.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let summary = RunSummary::refused(&reason, kind).to_json();
+    if rt.summary.is_json() {
+        println!("{summary}");
+    }
+    // Skipped when the path is itself what the run refused over: the write would
+    // fail in the same words that are already on stderr. Probed again rather than
+    // inferred from the refusal list, so a later refusal of the same kind cannot
+    // silently suppress a write to a path that is perfectly good.
+    if let Some(path) = rt
+        .summary_file
+        .as_deref()
+        .filter(|path| writable(path).is_ok())
+        && let Err(message) = write_file(path, &summary)
+    {
+        eprintln!("  \u{2717} {message}");
     }
 }

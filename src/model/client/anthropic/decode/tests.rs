@@ -375,6 +375,7 @@ fn the_run_summary_reports_those_writes_separately() {
     let json = RunSummary {
         ok: true,
         error: None,
+        error_kind: None,
         source: Some("anthropic"),
         model: Some("claude-sonnet-5"),
         answer: "done",

@@ -11,8 +11,10 @@
 //! but for the flag - has to write the file, or "no file" would prove only that
 //! something else broke.
 
+mod common;
+
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -21,6 +23,8 @@ use std::thread::{self, JoinHandle};
 
 use serde_json::Value;
 use tempfile::TempDir;
+
+use common::{NOT_FOUND, read_request_body, sse_response};
 
 /// Every `/chat/completions` body the endpoint was sent, so the test can check
 /// what the run advertised as well as what it did.
@@ -42,24 +46,18 @@ fn tool_call_body(target: &Path) -> String {
             "function": {"name": "write_file", "arguments": arguments},
         }]
     });
-    [
-        format!(r#"data: {{"choices":[{{"delta":{delta}}}]}}"#),
-        r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
-        "data: [DONE]".to_string(),
-    ]
-    .join("\n\n")
-        + "\n\n"
+    sse_response([
+        format!(r#"{{"choices":[{{"delta":{delta}}}]}}"#),
+        r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
+    ])
 }
 
 /// A plain text answer, which ends the turn loop.
 fn final_body() -> String {
-    [
-        r#"data: {"choices":[{"delta":{"content":"finished"}}]}"#,
-        r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
-        "data: [DONE]",
-    ]
-    .join("\n\n")
-        + "\n\n"
+    sse_response([
+        r#"{"choices":[{"delta":{"content":"finished"}}]}"#,
+        r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+    ])
 }
 
 /// Answer by what the request carries, not by how many have arrived: afi probes
@@ -89,42 +87,18 @@ fn answer(mut stream: TcpStream, target: &Path, bodies: &Bodies) {
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
-    let body = read_body(&mut reader);
+    let body = read_request_body(&mut reader);
     let response = if request_line.contains("/chat/completions") {
         bodies
             .lock()
             .expect("the lock must hold")
             .push(body.clone());
-        let sse = reply_for(&body, target);
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{sse}",
-            sse.len()
-        )
+        reply_for(&body, target)
     } else {
-        // The context-window probe. 404 is a fine answer; afi falls back.
-        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+        NOT_FOUND.to_string()
     };
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
-}
-
-/// Read past the headers and whatever body they announce, so the client is not
-/// answered before it has finished sending.
-fn read_body(reader: &mut BufReader<TcpStream>) -> String {
-    let mut length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-            break;
-        }
-        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            length = value.trim().parse().unwrap_or(0);
-        }
-    }
-    let mut body = vec![0u8; length];
-    let _ = reader.read_exact(&mut body);
-    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// One-shot, auto-approving, against the fake endpoint. `--yolo` is deliberate:

@@ -3,6 +3,7 @@
 
 mod commands;
 mod core;
+mod failure;
 mod report;
 mod tui;
 
@@ -15,6 +16,7 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::approval::Level;
 use crate::config::Runtime;
+use crate::summary::{ErrorKind, RunError};
 use crate::term::plain::PlainUi;
 
 use core::{ReplCore, restore_prompt_resume, run_one_shot_async};
@@ -28,6 +30,13 @@ pub const RED: &str = "\x1b[31m";
 pub const MAGENTA: &str = "\x1b[35m";
 pub const BOLD: &str = "\x1b[1m";
 pub const RESET: &str = "\x1b[0m";
+
+/// What an interactive turn says when there is nothing to send the prompt to.
+///
+/// One string, because the REPL and `/recover` are the same situation to whoever
+/// reads it. The one-shot path says something else on purpose: a piped run has no
+/// `/source` to reach for.
+pub(crate) const NO_ACTIVE_SOURCE: &str = "no active source - use /source to select one";
 
 /// Styled one-line status retained for plain terminals and CLI consumers.
 #[must_use]
@@ -180,7 +189,13 @@ async fn run_plain(rt: Runtime) -> (Runtime, bool) {
             }
             Err(error) => {
                 use crate::term::{MessageKind, UserInterface};
-                ui.message(MessageKind::Error, format!("input error: {error}"));
+                // The input never arrived, so nothing was asked and nothing was
+                // answered. This used to end the loop quietly and report ok:true,
+                // which told CI that a run reading a truncated or non-UTF-8 stream
+                // had passed.
+                let message = format!("input error: {error}");
+                ui.message(MessageKind::Error, message.clone());
+                core.record_error(RunError::new(message, ErrorKind::Input));
                 core.shutdown(&mut ui);
                 break;
             }

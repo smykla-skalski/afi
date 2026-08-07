@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use crate::config::Source;
 use crate::model::stream::StreamChunk;
+use crate::summary::ErrorKind;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
@@ -35,6 +36,14 @@ use anthropic::thinking::strip_history;
 pub(crate) use anthropic::thinking::{THINKING_HISTORY_KEY, thinking_disabled};
 
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// How much of a failing response body to quote at a human: enough to name the
+/// cause, not enough to bury it.
+///
+/// One policy, so the sentence a rejected credential prints and the one an HTTP
+/// error prints are cut to the same length. Two spellings of the number would be
+/// kept equal only by whoever remembered both.
+pub(crate) const BODY_PREVIEW_CHARS: usize = 200;
 
 /// Bundles the parameters for a streaming chat completion request.
 #[derive(Debug, Clone)]
@@ -84,27 +93,94 @@ pub trait ChatClient: Send + Sync {
     async fn overrun_probe(&self, source: &Source, model: &str) -> Result<String, ClientError>;
 }
 
-/// Client errors: connection failures, HTTP errors, parse errors, and local
-/// misconfiguration caught before any request goes out.
+/// Client errors: transport failures, HTTP errors, unusable responses, and the
+/// credential problems caught before any request goes out.
+///
+/// The variants are cut where the [`ErrorKind`] boundaries are, so a failed run
+/// classifies itself from the error it already has. Anything coarser would leave
+/// the summary substring-matching its own message.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("connection error: {0}")]
     Connection(String),
+    /// The request outlived its deadline. Apart from [`Self::Connection`] because
+    /// a deadline says the server was reachable and slow, not absent.
+    #[error("timed out: {0}")]
+    Timeout(String),
     #[error("HTTP {status}: {body}")]
     Http { status: u16, body: String },
+    /// The response body broke off part-way. Apart from [`Self::Connection`] for
+    /// the same reason: a turn was already in flight.
+    #[error("stream error: {0}")]
+    Stream(String),
     #[error("parse error: {0}")]
     Parse(String),
-    /// Nothing was sent because the source is not usable as configured. Kept
-    /// separate so the REPL does not blame an unreachable server for what is
-    /// actually a missing credential.
+    /// The credential is missing, unusable, or was refused. Kept separate so the
+    /// REPL does not blame an unreachable server for what is actually a missing
+    /// credential, and so a caller never retries one.
     #[error("{0}")]
-    Config(String),
+    Auth(String),
+    /// afi called itself wrongly. Not reachable from any configuration, so it is
+    /// a bug rather than something a caller can fix.
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl ClientError {
+    /// Which closed-set kind this failure is, for the run summary.
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Connection(_) => ErrorKind::ProviderHttp,
+            Self::Timeout(_) => ErrorKind::Timeout,
+            Self::Http { status, .. } => http_kind(*status),
+            Self::Stream(_) | Self::Parse(_) => ErrorKind::ProviderStream,
+            Self::Auth(_) => ErrorKind::Auth,
+            Self::Internal(_) => ErrorKind::Internal,
+        }
+    }
+}
+
+/// A failing status by what a caller should do about it: 401 and 403 are the
+/// credential and will say the same thing next time, 408 and 504 are deadlines,
+/// and everything left - a 429 included - is the provider's own trouble.
+fn http_kind(status: u16) -> ErrorKind {
+    match status {
+        401 | 403 => ErrorKind::Auth,
+        408 | 504 => ErrorKind::Timeout,
+        _ => ErrorKind::ProviderHttp,
+    }
+}
+
+/// Classify a reqwest transport failure: a request that outlived its deadline is
+/// worth another attempt on a longer one, and one that never landed is the
+/// server or the network between.
+fn transport_error(error: &reqwest::Error) -> ClientError {
+    transport_error_at(None, error)
+}
+
+/// The same, naming the step that failed.
+///
+/// The identity-exchange calls need it - "connection refused" alone does not say
+/// which of the two endpoints refused, and they are operated by different people.
+/// The sentence is built from the error being classified rather than passed in
+/// beside it, so the two can never describe different failures.
+fn transport_error_at(what: Option<&str>, error: &reqwest::Error) -> ClientError {
+    let message = match what {
+        Some(what) => format!("{what}: {error}"),
+        None => error.to_string(),
+    };
+    if error.is_timeout() {
+        ClientError::Timeout(message)
+    } else {
+        ClientError::Connection(message)
+    }
 }
 
 /// The `OpenAI`-only probe endpoints have no Anthropic equivalent. None of them
 /// has a production caller today, so a clear error beats a half implementation.
 fn unsupported(source: &Source, what: &str) -> ClientError {
-    ClientError::Config(format!(
+    ClientError::Internal(format!(
         "{what} is not available on the Anthropic protocol (source {})",
         source.name
     ))

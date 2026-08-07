@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::commands::handle_slash_command;
+use super::failure::RunFailure;
 use super::report::report_run;
-use super::{CommandResult, header};
+use super::{CommandResult, NO_ACTIVE_SOURCE, header};
 use crate::approval::ApprovalState;
 use crate::cli::session_id_from_args;
 use crate::config::{Runtime, Source};
@@ -19,10 +20,11 @@ use crate::log::log_event;
 use crate::model::client::ReqwestClient;
 use crate::model::turn::{LoopRequest, run_model_turn_loop};
 use crate::model::usage_totals;
-use crate::model::{ModelConfig, TURN_FAILED};
+use crate::model::{ModelConfig, TurnOutcome};
 use crate::prompt::SYSTEM;
 use crate::risk::{HighDefaultClassifier, detect_project_root};
 use crate::sessions::{self, new_session_id, safe_title};
+use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
 
 /// Inputs for one model loop shared by REPL, one-shot, and `/recover`.
@@ -37,12 +39,12 @@ pub(crate) struct TurnParams<'a> {
 }
 
 /// Run one model loop without owning terminal/runtime lifecycle.
-/// Returns the terminal TURN_* status of the run.
+/// Returns the terminal outcome of the run.
 pub(crate) async fn run_turn_loop(
     messages: &mut Vec<Value>,
     params: &TurnParams<'_>,
     ui: &mut dyn UserInterface,
-) -> String {
+) -> TurnOutcome {
     let client = ReqwestClient::new();
     let classifier = HighDefaultClassifier;
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -73,9 +75,9 @@ pub(crate) struct ReplCore {
     dir: PathBuf,
     session_id: String,
     messages: Vec<Value>,
-    /// Sticky: set by any turn that failed outright, so the session's exit code
-    /// reflects the whole run rather than only its last turn.
-    failed: bool,
+    /// Set by any turn that failed outright, so the session's exit code and
+    /// summary reflect the whole run rather than only its last turn.
+    failure: RunFailure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +109,7 @@ impl ReplCore {
             dir,
             session_id,
             messages,
-            failed: false,
+            failure: RunFailure::default(),
         }
     }
 
@@ -128,7 +130,7 @@ impl ReplCore {
             &mut self.session_id,
             &env,
             ui,
-            &mut self.failed,
+            &mut self.failure,
         )
         .await
         {
@@ -167,13 +169,16 @@ impl ReplCore {
 
     async fn run_user_turn(&mut self, ui: &mut dyn UserInterface) {
         let (Some(source), Some(model)) = (self.rt.active_source(), self.rt.model.as_ref()) else {
-            ui.message(
-                MessageKind::Error,
-                "no active source - use /source to select one".to_string(),
-            );
+            // A turn that never ran is still a turn that never answered. This used
+            // to return quietly, so a piped run with nothing configured printed the
+            // error, reported ok:true, and exited 0 - CI read that as a pass.
+            let error = NO_ACTIVE_SOURCE.to_string();
+            ui.message(MessageKind::Error, error.clone());
+            self.failure
+                .record_error(RunError::new(error, ErrorKind::Input));
             return;
         };
-        let status = run_turn_loop(
+        let outcome = run_turn_loop(
             &mut self.messages,
             &TurnParams {
                 config: &self.config,
@@ -187,28 +192,26 @@ impl ReplCore {
             ui,
         )
         .await;
-        if status == TURN_FAILED {
-            // Remembered for the whole session, not just this turn: a piped run
-            // in CI must not exit 0 because a later turn happened to work.
-            self.failed = true;
-        }
+        // Remembered for the whole session, not just this turn: a piped run in CI
+        // must not exit 0 because a later turn happened to work.
+        self.failure.record(&outcome);
     }
 
     /// Whether any turn in this session failed outright.
     pub(crate) fn failed(&self) -> bool {
-        self.failed
+        self.failure.error().is_some()
+    }
+
+    /// Record a failure the session hit outside a turn, so the summary reports it
+    /// rather than the run ending quietly.
+    pub(crate) fn record_error(&mut self, error: RunError) {
+        self.failure.record_error(error);
     }
 
     /// Report the run, if a report was asked for. Returns whether it was
     /// delivered - see `report_run`.
     pub(crate) fn report(&self, elapsed: Duration, ui: &mut dyn UserInterface) -> bool {
-        report_run(
-            &self.rt,
-            &self.messages,
-            self.failed.then_some("a model request failed"),
-            elapsed,
-            ui,
-        )
+        report_run(&self.rt, &self.messages, self.failure.error(), elapsed, ui)
     }
 
     fn auto_save(&mut self, input: &str) {
@@ -300,8 +303,7 @@ pub(crate) async fn run_one_shot_async(
     let started = Instant::now();
     let mut messages = Vec::new();
     let outcome = one_shot_run(prompt_file, rt, ui, &mut messages).await;
-    let error = outcome.as_ref().err().map(String::as_str);
-    let reported = report_run(rt, &messages, error, started.elapsed(), ui);
+    let reported = report_run(rt, &messages, outcome.as_ref().err(), started.elapsed(), ui);
     outcome.is_ok() && reported
 }
 
@@ -311,9 +313,12 @@ async fn one_shot_run(
     rt: &Runtime,
     ui: &mut dyn UserInterface,
     messages: &mut Vec<Value>,
-) -> Result<(), String> {
-    let prompt = read_prompt_file(prompt_file).inspect_err(|error| {
+) -> Result<(), RunError> {
+    // Nothing to send, so nothing to blame the provider for: the invocation is
+    // what went wrong.
+    let prompt = read_prompt_file(prompt_file).map_err(|error| {
         ui.message(MessageKind::Error, error.clone());
+        RunError::new(error, ErrorKind::Input)
     })?;
     messages.push(json!({"role": "system", "content": SYSTEM}));
     messages.push(json!({"role": "user", "content": prompt.clone()}));
@@ -321,10 +326,10 @@ async fn one_shot_run(
     let (Some(source), Some(model)) = (rt.active_source(), rt.model.as_ref()) else {
         let error = "no active source - set AFI_BASE_URL and AFI_MODEL".to_string();
         ui.message(MessageKind::Error, error.clone());
-        return Err(error);
+        return Err(RunError::new(error, ErrorKind::Input));
     };
     let config = ModelConfig::from_env(&rt.env);
-    let status = run_turn_loop(
+    let outcome = run_turn_loop(
         messages,
         &TurnParams {
             config: &config,
@@ -338,9 +343,10 @@ async fn one_shot_run(
         ui,
     )
     .await;
-    if status == TURN_FAILED {
-        // report_client_error already printed the specific failure.
-        return Err("the model request failed".to_string());
+    if let Some(error) = outcome.error() {
+        // The same sentence report_client_error printed, so the summary names the
+        // failure rather than restating that there was one.
+        return Err(error);
     }
     Ok(())
 }

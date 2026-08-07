@@ -8,6 +8,7 @@ use std::process::{Command, Output, Stdio};
 
 use afi::model::ModelConfig;
 use afi::repl::banner;
+use afi::summary::{ErrorKind, RunError};
 use tempfile::TempDir;
 
 /// Run the real binary with a clean env so nothing leaks in from the shell.
@@ -234,8 +235,20 @@ fn a_policy_flag_swallowing_the_next_flag_refuses_to_start() {
 #[test]
 fn a_missing_value_is_recorded_rather_than_silently_widening_the_policy() {
     let rt = common::build(&["afi", "--disallowed-tools"], &[]);
-    assert_eq!(rt.flag_errors, ["--disallowed-tools needs a value"]);
-    assert!(!rt.refusals().is_empty(), "the run must be refused");
+    assert_eq!(
+        rt.flag_errors,
+        [RunError::new(
+            "--disallowed-tools needs a value",
+            ErrorKind::Policy
+        )]
+    );
+    // The kind travels with the refusal rather than being guessed from it: a
+    // policy afi cannot honour is never worth a retry.
+    let refusals = rt.refusals();
+    assert_eq!(
+        refusals.first().map(|refusal| refusal.kind),
+        Some(ErrorKind::Policy)
+    );
 }
 
 #[test]

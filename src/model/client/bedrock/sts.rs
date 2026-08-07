@@ -137,10 +137,42 @@ async fn assume_role(
 /// for - and it bites harder here than on a static credential, because afi
 /// fetched that token from the Actions endpoint itself rather than through the
 /// toolkit that would have registered it for masking.
+///
+/// The code decides retryable, not the status. [`refused_credential`] reads a
+/// 429 or a 5xx as worth another attempt and everything else in the 4xx range as
+/// a credential to go fix, which is the right rule for an endpoint that spells
+/// throttling as a 429. The Query protocol predates that convention and answers
+/// a throttled call with a 400 carrying the code, so [`transient`] gets first
+/// refusal on the body.
 fn refused(status: StatusCode, body: &str, assertion: &str) -> ClientError {
     let redact = Redactor::default().with(assertion, Credential::IdentityToken);
     let code = element(body, "Code").unwrap_or_default();
-    refused_credential(&describe(code), status, body, &redact)
+    let what = describe(code);
+    if transient(code) {
+        return ClientError::Http {
+            status: status.as_u16(),
+            body: format!("{what}: {}", redact.clean(body)),
+        };
+    }
+    refused_credential(&what, status, body, &redact)
+}
+
+/// Codes that say come back, rather than go fix something.
+///
+/// Throttling is the case worth naming: a role assumption AWS shed under load
+/// reported as an auth failure sends whoever reads the summary auditing a trust
+/// policy that was never the problem, and stops a scheduled run that a second
+/// attempt would have finished.
+///
+/// `IDPCommunicationError` is here for the same reason rather than for its
+/// status. AWS could not reach the identity provider registered on the role,
+/// which is neither the token nor the policy and which nobody holding the run
+/// can do anything about.
+fn transient(code: &str) -> bool {
+    matches!(
+        code,
+        "Throttling" | "ThrottlingException" | "RequestLimitExceeded" | "IDPCommunicationError"
+    )
 }
 
 /// What an STS error code means for whoever has to fix it.
@@ -173,6 +205,9 @@ fn describe(code: &str) -> String {
         }
         "IDPCommunicationError" => {
             "AWS could not reach the identity provider registered on the role".to_string()
+        }
+        "Throttling" | "ThrottlingException" | "RequestLimitExceeded" => {
+            "AWS is rate-limiting role assumptions on this account".to_string()
         }
         "ValidationError" => "AWS refused the role-assumption request itself (check \
              AWS_ROLE_ARN and AWS_ROLE_SESSION_NAME)"

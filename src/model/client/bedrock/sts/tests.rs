@@ -263,14 +263,47 @@ fn a_refused_assumption_is_an_auth_failure() {
     assert_eq!(error.kind(), ErrorKind::Auth);
 }
 
+/// STS answers a throttled call with a 400 rather than a 429, so the status
+/// alone would file it as a credential to go fix. The code is what says
+/// otherwise, and a run shed under load has to read as one worth repeating.
 #[test]
-fn a_throttled_exchange_stays_retryable() {
-    let error = refused(
-        StatusCode::TOO_MANY_REQUESTS,
-        &error("Throttling", "Rate exceeded"),
-        ASSERTION,
+fn a_throttled_assumption_stays_retryable_despite_its_status() {
+    for code in [
+        "Throttling",
+        "ThrottlingException",
+        "RequestLimitExceeded",
+        // Not the token and not the policy - AWS could not reach GitHub.
+        "IDPCommunicationError",
+    ] {
+        let failure = refused(
+            StatusCode::BAD_REQUEST,
+            &error(code, "Rate exceeded"),
+            ASSERTION,
+        );
+        assert!(
+            !matches!(failure, ClientError::Auth(_)),
+            "{code} is not a credential to fix: {failure:?}"
+        );
+        assert_eq!(failure.kind(), ErrorKind::ProviderHttp, "{code}");
+        assert!(
+            failure.to_string().contains("Rate exceeded"),
+            "AWS's own words must survive: {failure}"
+        );
+    }
+}
+
+/// The redaction runs on this path too. A throttled call is refused after the
+/// form body was posted, so a response echoing the request back carries the
+/// assertion exactly as a rejected one does.
+#[test]
+fn a_throttled_assumption_does_not_report_the_assertion_either() {
+    let echoed = format!(
+        "<ErrorResponse><Error><Code>Throttling</Code>\
+         <Message>Rate exceeded for {ASSERTION}</Message></Error></ErrorResponse>"
     );
-    assert_eq!(error.kind(), ErrorKind::ProviderHttp);
+    let text = refused(StatusCode::BAD_REQUEST, &echoed, ASSERTION).to_string();
+    assert!(!text.contains(ASSERTION), "{text}");
+    assert!(text.contains("[redacted OIDC identity token]"), "{text}");
 }
 
 /// The assertion was in the form body that was just posted, so a rejection

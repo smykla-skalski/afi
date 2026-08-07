@@ -107,6 +107,31 @@ fn a_source_holding_the_placeholder_reports_no_credential() {
     }
 }
 
+/// Bedrock keeps no static key, so `api_key` holds the placeholder while the run
+/// is fully credentialed. Reporting `none` for it would attribute a billed run to
+/// nobody.
+#[test]
+fn a_bedrock_source_reports_the_signature_it_billed() {
+    let source = keyless_source(Protocol::Bedrock(Box::new(Bedrock {
+        region: Some("us-east-1".to_string()),
+        access_key_id: Some("AKIDEXAMPLE".to_string()),
+        secret_access_key: Some("wJalrXUtnFEMI".to_string()),
+        session_token: Some("session".to_string()),
+    })));
+    assert_eq!(
+        source.run_auth(),
+        RunAuth::SigV4 {
+            region: "us-east-1",
+            access_key_id: "AKIDEXAMPLE",
+        }
+    );
+    // The two secrets are not identifiers and never reach the summary.
+    let rendered = RunAuth::json(Some(source.run_auth())).to_string();
+    assert!(!rendered.contains("wJalrXUtnFEMI"), "{rendered}");
+    assert!(!rendered.contains("session"), "{rendered}");
+    assert!(rendered.contains("\"mode\":\"sigv4\""), "{rendered}");
+}
+
 #[test]
 fn the_placeholder_and_a_blank_are_both_no_credential() {
     assert!(is_placeholder(NOOP_KEY));

@@ -13,14 +13,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::time::{Duration, Instant};
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::HeaderMap;
 use reqwest::{Client, StatusCode, Url};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::config::{Federation, IdentitySource, Protocol, Source, is_placeholder};
 use crate::model::client::{
-    BODY_PREVIEW_CHARS, ClientError, Credential, Redactor, transport_error, transport_error_at,
+    BODY_PREVIEW_CHARS, ClientError, Credential, Redactor, into_header_map, transport_error,
+    transport_error_at,
 };
 
 /// Pinned API version. Anthropic requires this on every request.
@@ -54,7 +55,7 @@ pub(super) fn auth_headers(
             pairs.push(("anthropic-beta", OAUTH_BETA.to_string()));
             // No `x-api-key`: see the module docs.
         }
-        Protocol::OpenAiCompat => {
+        Protocol::OpenAiCompat | Protocol::Bedrock(_) => {
             return Err(ClientError::Internal(
                 "auth_headers called for a non-Anthropic source".to_string(),
             ));
@@ -72,23 +73,6 @@ fn usable(credential: &str, label: &str) -> Result<String, ClientError> {
         )));
     }
     Ok(credential.to_string())
-}
-
-fn into_header_map(pairs: Vec<(&str, String)>) -> Result<HeaderMap, ClientError> {
-    let mut map = HeaderMap::new();
-    for (name, value) in pairs {
-        // Neither failure is a wire-parse problem, so neither is reported as one.
-        // The names are this module's own literals, so a rejected one is a bug;
-        // the values are credentials, and one copied with a trailing newline
-        // lands here.
-        let header = HeaderName::try_from(name)
-            .map_err(|e| ClientError::Internal(format!("bad header name {name}: {e}")))?;
-        // The error deliberately omits the value: it may be a credential.
-        let header_value = HeaderValue::try_from(value)
-            .map_err(|_| ClientError::Auth(format!("invalid characters in {name} value")))?;
-        map.insert(header, header_value);
-    }
-    Ok(map)
 }
 
 #[derive(Debug, Clone)]

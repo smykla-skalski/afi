@@ -34,12 +34,13 @@ Run validation in the session worktree. Do not run unrelated gates. Unit tests b
 
 ## Project map
 
-`afi` is a small coding agent for self-hosted and remote models. It speaks two wire protocols: OpenAI-compatible `/chat/completions` for llama.cpp, vLLM, SGLang, Z.ai, OpenAI, and OpenRouter, and Anthropic's native Messages API. It renders its interface with raw terminal escapes.
+`afi` is a small coding agent for self-hosted and remote models. It speaks two wire protocols: OpenAI-compatible `/chat/completions` for llama.cpp, vLLM, SGLang, Z.ai, OpenAI, OpenRouter, and Amazon Bedrock, and Anthropic's native Messages API. It renders its interface with raw terminal escapes.
 
 - **Config:** source discovery and switching, per-source protocol and auth mode, provider routing, environment-file loading, and approval state.
 - **REPL:** main loop, slash commands, banner, one-shot mode, and automatic session saves.
 - **Model:** asynchronous HTTP client, SSE parsing, context-window probing, recovery samplers, context compression, and the tool-dispatch turn loop.
 - **Anthropic protocol:** message and tool translation at the client boundary, a stateful SSE decoder normalizing events into the shared chunk type, and the workload-identity-federation token exchange.
+- **Bedrock:** AWS SigV4 request signing, credentials and Region read from the standard `AWS_*` variables, and classification of AWS rejections. Rides the OpenAI-compatible request and SSE paths otherwise.
 - **Tools:** file operations, directory listing, detached Bash execution through `setsid`, background waits, protocol parsing, tool-result sanitization, and the allow/deny tool policy enforced both in the request and at dispatch.
 - **Sessions:** atomic writes, modification-time ordering, short-ID resolution, and schema versioning.
 - **Risk:** command classification, approval gates, Esc-to-chat control flow, and project-root detection.

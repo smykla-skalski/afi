@@ -67,6 +67,7 @@ impl Lowered<'_> {
                 "sources" => self.sources(value),
                 "prices" => self.prices(value),
                 "anthropic" => self.anthropic(value),
+                "bedrock" => self.bedrock(value),
                 _ => self.field("", schema::TOP, &schema::BLOCKS, key, value),
             }
         }
@@ -163,6 +164,17 @@ impl Lowered<'_> {
             } else {
                 self.field("anthropic", schema::ANTHROPIC, &["federation"], key, field);
             }
+        }
+    }
+
+    /// The `bedrock` block: the built-in source's overrides. No sub-block, since
+    /// the credentials it signs with are read from the AWS variables only.
+    fn bedrock(&mut self, value: &Value) {
+        let Some(block) = self.object("bedrock", value) else {
+            return;
+        };
+        for (key, field) in block {
+            self.field("bedrock", schema::BEDROCK, &[], key, field);
         }
     }
 

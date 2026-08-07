@@ -10,6 +10,10 @@
 //! backend here (llama.cpp, vLLM, `SGLang`, Z.ai, `OpenAI`, `OpenRouter`) has its
 //! own extensions and afi has no list of them. The one thing that is removed is
 //! afi's own thinking-block key, which is not part of any wire format.
+//!
+//! Amazon Bedrock rides this module too. It serves the same endpoint shape and
+//! the same SSE stream, and differs only in how a request is credentialed and
+//! how a rejection reads, both of which are delegated to [`super::bedrock`].
 
 use futures::TryStreamExt;
 use regex::Regex;
@@ -22,10 +26,10 @@ use std::time::Duration;
 
 use super::sse::{OpenAiDecoder, decoded_stream};
 use super::{
-    ChatCompletionStream, ClientError, Redactor, ReqwestClient, StreamRequest, limited_error_body,
-    strip_history, transport_error,
+    ChatCompletionStream, ClientError, Redactor, ReqwestClient, StreamRequest, bedrock,
+    limited_error_body, strip_history, transport_error,
 };
-use crate::config::Source;
+use crate::config::{Protocol, Source};
 use crate::model::stream::{Usage, normalize_usage};
 use crate::model::usage_totals;
 
@@ -56,22 +60,82 @@ fn merge_extra_body(body: &mut Value, extra_body: Option<&Value>) {
     }
 }
 
-/// Build a POST with the bearer credential, then the source's own headers so
+/// Build a POST with the source's credential, then its own headers so
 /// user-configured values still win.
+///
+/// The Bedrock arm serializes the body itself: a `SigV4` signature covers exact
+/// bytes, so it signs and sends one `String` rather than letting anything
+/// downstream re-serialize. Every other source goes through
+/// `RequestBuilder::json`. The extra headers stay last for both and cannot
+/// collide with a signed one - the only two `build_headers` ever produces are
+/// `HTTP-Referer` and `X-Title`.
 fn authed_post(
     http: &Client,
     source: &Source,
     url: String,
     body: &Value,
-) -> reqwest::RequestBuilder {
-    let mut request = http
-        .post(url)
-        .header("Authorization", format!("Bearer {}", source.api_key))
-        .json(body);
+) -> Result<reqwest::RequestBuilder, ClientError> {
+    let mut request = match &source.protocol {
+        Protocol::Bedrock(bedrock) => {
+            bedrock::signed_post(http, bedrock, &source.name, &url, body.to_string())?
+        }
+        _ => http
+            .post(url)
+            .header("Authorization", format!("Bearer {}", source.api_key))
+            .json(body),
+    };
     if let Some(headers) = ReqwestClient::build_headers(source) {
         request = request.headers(headers);
     }
-    request
+    Ok(request)
+}
+
+/// The error a non-2xx response becomes.
+///
+/// Extraction only - reading the status, the AWS exception header, and a bounded
+/// body. The decision is [`classify_error`], which is separate so both arms of
+/// it are reachable from a test; a `reqwest::Response` cannot be constructed
+/// without taking `http` as a direct dependency.
+async fn http_error(
+    source: &Source,
+    model: &str,
+    tools_sent: bool,
+    response: reqwest::Response,
+    redact: &Redactor,
+) -> ClientError {
+    let status = response.status().as_u16();
+    let error_type = response
+        .headers()
+        .get("x-amzn-errortype")
+        .and_then(|value| value.to_str().ok())
+        .map(String::from);
+    let body = limited_error_body(response, redact).await;
+    classify_error(source, model, tools_sent, status, error_type, body)
+}
+
+/// Bedrock's rejections are AWS exceptions, and which one it is decides what the
+/// operator has to fix, so they are classified rather than reported as a bare
+/// status. Every other source keeps the status and the body it always had - the
+/// AWS wording must never reach one, or a plain 403 from Z.ai would claim the
+/// account is not entitled to a model in a Region.
+fn classify_error(
+    source: &Source,
+    model: &str,
+    tools_sent: bool,
+    status: u16,
+    error_type: Option<String>,
+    body: String,
+) -> ClientError {
+    if !source.protocol.is_bedrock() {
+        return ClientError::Http { status, body };
+    }
+    bedrock::rejection(&bedrock::Rejection {
+        model,
+        tools_sent,
+        status,
+        error_type,
+        body,
+    })
 }
 
 /// The streaming request body.
@@ -108,8 +172,13 @@ fn stream_body(request: &StreamRequest<'_>) -> Value {
 /// `max_completion_tokens` and 400 on the older key. Those are exactly the
 /// models `reasoning_effort` applies to, so without this the effort dialect afi
 /// advertises for that host could never produce a request it would accept.
+/// Bedrock documents the newer spelling for its models too.
+///
+/// Chosen where the key is written rather than renamed afterwards, so the
+/// source's own `extra_body` still merges over it - a rename running later would
+/// overwrite the one key it could not set.
 fn max_tokens_key(source: &Source) -> &'static str {
-    if source.is_openai() {
+    if source.is_openai() || source.protocol.is_bedrock() {
         "max_completion_tokens"
     } else {
         "max_tokens"
@@ -136,14 +205,19 @@ pub(super) async fn stream(
     let source = request.source;
     let body = stream_body(&request);
     let redact = Redactor::for_source(source);
-    let response = authed_post(http, source, chat_url(source), &body)
+    let response = authed_post(http, source, chat_url(source), &body)?
         .send()
         .await
         .map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body = limited_error_body(response, &redact).await;
-        return Err(ClientError::Http { status, body });
+        return Err(http_error(
+            source,
+            request.model,
+            request.tools.is_some(),
+            response,
+            &redact,
+        )
+        .await);
     }
     let bytes = response.bytes_stream().map_err(io::Error::other);
     Ok(decoded_stream(
@@ -163,15 +237,22 @@ pub(super) async fn complete(
     extra_body: Option<&Value>,
 ) -> Result<String, ClientError> {
     let body = completion_body(model, messages, extra_body);
-    let response = authed_post(http, source, chat_url(source), &body)
+    let response = authed_post(http, source, chat_url(source), &body)?
         .timeout(Duration::from_secs(timeout))
         .send()
         .await
         .map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body = Redactor::for_source(source).clean(&response.text().await.unwrap_or_default());
-        return Err(ClientError::Http { status, body });
+        // `/compress` offers no tools, so a rejection here cannot be about tool
+        // support.
+        return Err(http_error(
+            source,
+            model,
+            false,
+            response,
+            &Redactor::for_source(source),
+        )
+        .await);
     }
     let text = response.text().await.map_err(|e| transport_error(&e))?;
     record_completion_usage(&source.name, model, &text);
@@ -202,6 +283,13 @@ struct CompletionUsage {
 }
 
 /// `GET /models`.
+///
+/// Unsigned on the Bedrock path, where it would 403. Left that way deliberately:
+/// signing a bodyless GET is a different canonical request than [`authed_post`]
+/// builds, and the only caller this endpoint is designed for is the
+/// context-window probe, which has no production call site yet (see
+/// `unsupported` in the parent module) and falls back to another probe when one
+/// is wired up.
 pub(super) async fn list_models(http: &Client, source: &Source) -> Result<Value, ClientError> {
     let mut request = http
         .get(models_url(source))
@@ -256,7 +344,7 @@ pub(super) async fn overrun_probe(
     // Same spelling the real request uses, or the probe reads back a complaint
     // about the parameter instead of the limit it went looking for.
     body[max_tokens_key(source)] = Value::from(10_000_000);
-    let response = authed_post(http, source, chat_url(source), &body)
+    let response = authed_post(http, source, chat_url(source), &body)?
         .timeout(Duration::from_secs(30))
         .send()
         .await

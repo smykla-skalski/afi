@@ -20,11 +20,11 @@ use serde_json::{Value, json};
 /// land here: a summary gets uploaded as a build artifact, and artifacts carry
 /// no masking, so a value redacted in a log is plain text there.
 ///
-/// One enum rather than a mode string beside four optional ids, for the reason
-/// [`crate::config::Protocol`] gives for folding auth into itself: the two are
-/// not independent. Only federation has identifiers, so only that variant
-/// carries them, and a static key with an organization id is a state nothing has
-/// to test for because nothing can build it.
+/// One enum rather than a mode string beside a bag of optional ids, for the
+/// reason [`crate::config::Protocol`] gives for folding auth into itself: the
+/// two are not independent. Each variant carries only the identifiers its own
+/// credential has, so a static key with an organization id is a state nothing
+/// has to test for because nothing can build it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunAuth<'a> {
     /// A static key out of the environment, whichever header carries it.
@@ -34,6 +34,18 @@ pub enum RunAuth<'a> {
     /// No credential was configured at all - a local server that wants none.
     /// Distinct from `auth: null`, which is afi declining to attribute the run.
     NoCredential,
+    /// An AWS `SigV4` signature, computed per request rather than sent as a
+    /// header. Carries the two non-secret halves of the credential, for the
+    /// reason `Federated` carries its ids: they are what says whose budget paid.
+    ///
+    /// The access key id is safe to publish - it travels in cleartext in the
+    /// `Authorization` header of every signed request, and is the identifier
+    /// `CloudTrail` attributes a call by. The secret access key and the session
+    /// token are the secrets, and neither reaches this type.
+    SigV4 {
+        region: &'a str,
+        access_key_id: &'a str,
+    },
     /// A bearer token afi minted itself, through the workload-identity
     /// federation exchange. The only mode with identifiers of its own.
     Federated {
@@ -53,6 +65,7 @@ impl RunAuth<'_> {
             Self::ApiKey => "api_key",
             Self::OAuth => "oauth",
             Self::NoCredential => "none",
+            Self::SigV4 { .. } => "sigv4",
             Self::Federated { .. } => "federated",
         }
     }
@@ -74,6 +87,15 @@ impl RunAuth<'_> {
             return Value::Null;
         };
         let mut block = json!({ "mode": auth.mode() });
+        if let RunAuth::SigV4 {
+            region,
+            access_key_id,
+        } = auth
+            && let Some(fields) = block.as_object_mut()
+        {
+            fields.insert("region".to_string(), region.into());
+            fields.insert("access_key_id".to_string(), access_key_id.into());
+        }
         if let RunAuth::Federated {
             organization_id,
             service_account_id,

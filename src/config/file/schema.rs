@@ -162,7 +162,7 @@ pub(super) const REFUSED: [(&str, &str); 5] = [
 
 /// The blocks at the root that carry structure rather than one value. Named
 /// here so a misspelling of one is answered with the right suggestion.
-pub(super) const BLOCKS: [&str; 3] = ["sources", "prices", "anthropic"];
+pub(super) const BLOCKS: [&str; 4] = ["sources", "prices", "anthropic", "bedrock"];
 
 /// The token classes a price entry may set, from the type that deserializes
 /// them, so the file and `AFI_PRICES` cannot disagree about the set.
@@ -279,6 +279,24 @@ pub(super) const ANTHROPIC: &[Setting] = &[
     joins(
         "extra_body",
         "AFI_ANTHROPIC_EXTRA_BODY",
+        object,
+        Merge::Object,
+    ),
+];
+
+/// The built-in `bedrock` source's overrides, outside the `AFI_SOURCE_*`
+/// namespace for the same reason the Anthropic ones are.
+///
+/// The Region and the AWS credentials have no key here. Two of the four are
+/// secrets, and all four keep the un-prefixed names every AWS SDK reads, so a
+/// key for them would be a second place a credential could live - see
+/// [`REFUSED`].
+pub(super) const BEDROCK: &[Setting] = &[
+    mine("base_url", "AFI_BEDROCK_BASE_URL", text),
+    row("model", "AFI_BEDROCK_MODEL", text),
+    joins(
+        "extra_body",
+        "AFI_BEDROCK_EXTRA_BODY",
         object,
         Merge::Object,
     ),

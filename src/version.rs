@@ -14,6 +14,8 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+use crate::util::hex;
+
 #[cfg(test)]
 mod tests;
 
@@ -142,12 +144,7 @@ fn file_digest(path: &Path) -> io::Result<String> {
         }
         hasher.update(&buf[..read]);
     }
-    let mut hex = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        // Infallible: a String write cannot fail.
-        let _ = write!(hex, "{byte:02x}");
-    }
-    Ok(hex)
+    Ok(hex(&hasher.finalize()))
 }
 
 fn or_unknown(value: &str) -> &str {

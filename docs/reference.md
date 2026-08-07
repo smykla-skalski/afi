@@ -62,6 +62,8 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_TOGETHER_API_KEY`                       | auto-registers a built-in `together` source                          |
 | `AFI_OPENROUTER_API_KEY`                     | auto-registers a built-in `openrouter` source                        |
 | `ANTHROPIC_API_KEY`                          | auto-registers a built-in `anthropic` source ([details](#anthropic)) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | auto-registers a built-in `bedrock` source ([details](#bedrock))    |
+| `AWS_REGION` / `AWS_SESSION_TOKEN`           | the Region that source signs for, and an STS token ([details](#bedrock)) |
 | `AFI_BACKEND`                                | set to `vllm` to disable llama.cpp-only recovery knobs               |
 | `AFI_HOME` / `AFI_SESSIONS_DIR`              | where session JSON files are stored                                  |
 | `AFI_AUTOCOMPRESS_PERCENT`                   | auto-compress threshold (default 85, 0=off)                          |
@@ -326,7 +328,7 @@ The policy count also covers calls thrown away before dispatch could rule on the
 
 **These are attempts, not distinct intentions.** Every blocked call in a discarded batch counts, including one whose own arguments parsed, and a retried batch counts again - so a persistently truncated stream carrying two blocked calls reports six with the default two recoveries, for what a human would call one thing the model wanted. Read the count as "how many times was this run told no", and alert on whether it is zero rather than on how large it is. `AFI_MALFORMED_STREAM_RETRIES` bounds the multiplier.
 
-`auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, `federated` for one afi minted itself, and `none` for a source with no credential configured, which is the local llama.cpp case. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
+`auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, `federated` for one afi minted itself, `sigv4` for an AWS signature ([details](#bedrock)), and `none` for a source with no credential configured, which is the local llama.cpp case. `federated` and `sigv4` each carry the non-secret identifiers their credential has: the federation ids for one, `region` and `access_key_id` for the other. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
 
 It names the credential the tokens were **billed** to, not the one that happens to be active when the run ends. Those differ in a piped session that `/source`-switches after spending: `source` and `model` report where the session finished, while `auth` stays with whoever paid. A session that spent on two sources gets `"auth": null`, since no single credential paid for it - as does a run with no source at all. A run that billed nothing reports the credential it tried, which is what a failed run has to show.
 
@@ -493,9 +495,79 @@ Disabled stays the default because it is the one value every current model accep
 
 Three cases lose a block rather than risk the turn: a stream cut before the signature arrived, a `/compress` that sliced away the tool result the reasoning was aimed at, and a request that turns thinking back off. Anthropic validates the whole request, so one unusable block would fail the turn instead of being ignored.
 
+**Reasoning under either spelling now counts toward the cut.** afi reads `reasoning_content` and, when that carries no string, `reasoning`. Only the first was read before, so a source that emits the second - `OpenRouter`, and Bedrock's open-weight models - could never reach `AFI_REASONING_ONLY_CHARS` however long it reasoned. It can now, which is the intended behaviour and a change from previous releases: a turn that reasons past the limit without emitting text is cut and retried. Set `AFI_REASONING_ONLY_CHARS=0` to turn the cut off.
+
 **The reasoning-only cut is off while thinking is on.** `AFI_REASONING_ONLY_CHARS` exists for local models that loop in their scratchpad forever; Anthropic's thinking is server-side and already bounded by `max_tokens`, so cutting one of those turns short would fire on a healthy turn that was about to emit its tool call.
 
-**Other endpoints.** `AFI_SOURCE_<NAME>_PROTOCOL` takes `anthropic` or `anthropic-oauth`. It defaults to `openai`, so existing sources keep working.
+**Other endpoints.** `AFI_SOURCE_<NAME>_PROTOCOL` takes `anthropic`, `anthropic-oauth`, or `aws-bedrock-openai` ([details](#bedrock)). It defaults to `openai`, so existing sources keep working.
+
+## Bedrock
+
+Amazon Bedrock's open-weight models are reached through its OpenAI-compatible `/v1/chat/completions`, so afi sends the same request shape and reads the same SSE stream it does everywhere else. What differs is the credential: Bedrock takes no static key header and signs each request with AWS SigV4 instead.
+
+Set AWS credentials and a Region and a `bedrock` source registers itself, defaulting to `https://bedrock-runtime.<region>.amazonaws.com/v1` and `zai.glm-5`.
+
+| env var                                        | what it does                                                    |
+| ------------------------------------------------ | --------------------------------------------------------------- |
+| `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | the signing credential; both required                           |
+| `AWS_REGION`, else `AWS_DEFAULT_REGION`       | names the endpoint host and scopes the signature; required      |
+| `AWS_SESSION_TOKEN`                           | sent and signed when set; absent for a long-lived IAM user      |
+| `AFI_BEDROCK_MODEL`                           | the default model, instead of `zai.glm-5`                       |
+| `AFI_BEDROCK_BASE_URL`                        | the endpoint, instead of the one the Region derives             |
+| `AFI_BEDROCK_EXTRA_BODY`                      | request-body keys this source should send                       |
+
+These are the variable names every AWS SDK and the `aws` CLI already read, so a shell that can run `aws bedrock` needs nothing else. afi reads them from its own merged environment, which means `~/.env` and `AFI_ENV_FILE` count too. Nothing else is consulted: no shared credentials file, no profile, no instance metadata. Export them, or put them in the env file.
+
+Bedrock hosts many models, so `/source` takes an optional model override:
+
+```
+/source bedrock                                  # -> zai.glm-5 (the default)
+/source bedrock moonshotai.kimi-k2.5
+/source bedrock qwen.qwen3-coder-30b-a3b-v1:0
+/source bedrock openai.gpt-oss-20b-1:0
+```
+
+Those four are the open-weight models this was built for, and AWS's API-compatibility matrix lists all four as Chat Completions models. Which of them will actually call tools through Bedrock has not been confirmed against the live service; the refusal below is how that resolves, so nothing needs dropping to find out.
+
+**A half-set of credentials refuses the run.** A signature needs a Region and both credential halves at once, so any that are missing are named before the first request:
+
+```
+✗ source bedrock signs for Bedrock but AWS_SECRET_ACCESS_KEY is not set
+```
+
+Only the source the run starts on is checked. A stray `AWS_ACCESS_KEY_ID` in the shell registers a `bedrock` source nobody switches to, and that costs a run against some other source nothing.
+
+**A model that cannot call tools ends the run, and afi says what that would mean.** An agent turn is tool calls, so a model that cannot make them has nothing to do. Every rejection ends the run either way, and when Bedrock turns down a request that offered tools without explaining itself, the reason is named as the possibility it is:
+
+```
+HTTP 400: This model does not support tool use. (if zai.glm-5 cannot call
+tools, an agent turn has nothing to dispatch)
+```
+
+afi does not claim to know which happened. Bedrock answers a tool-incapable model and a malformed tool schema with the same `ValidationException`, the same status, and the same header, so the only difference is prose, and reading that prose is a trap: afi's own system prompt contains the sentence "does NOT support native tool calls", and any AWS error that quotes the request back carries it. So the hint rides along on an ordinary malformed-request 400 too. AWS's own sentence always leads, and nothing is lost by not guessing: a wrong tool schema and a model that cannot call tools are equally terminal here.
+
+**AWS rejections are told apart.** Every one ends the run with a non-zero exit, and the message AWS wrote is always quoted:
+
+| what happened                                                   | how it reads                                        |
+| ----------------------------------------------------------------- | ----------------------------------------------------- |
+| `ExpiredTokenException`, `InvalidSignatureException`, and kin  | `AWS rejected the credentials (expired or wrong; afi reads them at startup, so a refresh needs a restart)` |
+| `ThrottlingException`, or any 429                              | `AWS throttled the request`                         |
+| `AccessDeniedException`                                        | `the account is not entitled to <model> in this Region` |
+
+The kind is read from `x-amzn-errortype` and the status, never from the body, because AWS echoes the request into a validation message and a turn whose prompt discussed throttling would otherwise classify itself. A 429 needs no header, meaning the same thing whoever sent it. Anything else arriving without one did not come from Bedrock's API layer - a proxy or a VPC endpoint refusing on the way - so it stays unclassified and its body is reported as it came, rather than a headerless 403 being called an entitlement problem.
+
+**Anthropic models on Bedrock are out of scope.** afi reaches those directly through the [Anthropic](#anthropic) protocol, which gets prompt caching and thinking blocks that this path does not. Cross-region inference profiles and provisioned throughput are not handled either; point `AFI_BEDROCK_BASE_URL` somewhere else if you need them.
+
+**Other endpoints.** `AFI_SOURCE_<NAME>_PROTOCOL=aws-bedrock-openai` puts any named source on this protocol. It needs no `AFI_SOURCE_<NAME>_BASE_URL` - the Region supplies one - which is the one case where a source is discovered from its `_PROTOCOL` alone.
+
+```bash
+AFI_SOURCE_AWS_PROTOCOL=aws-bedrock-openai
+AFI_SOURCE_AWS_MODEL=openai.gpt-oss-20b-1:0
+```
+
+Bedrock takes `max_completion_tokens` rather than the older `max_tokens`, and afi writes that spelling for this protocol, so `AFI_MAX_TOKENS` and `AFI_BEDROCK_EXTRA_BODY` both reach it under the name Bedrock documents.
+
+Requests are signed for service `bedrock` against `bedrock-runtime`, scoped to `AWS_REGION`. A base url pointed at a differently-named AWS endpoint will not authenticate, and neither will one naming a Region other than the one being signed for.
 
 ## Subcommands
 

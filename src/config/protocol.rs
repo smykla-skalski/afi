@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::path::PathBuf;
 
+use super::Bedrock;
+
 /// Placeholder stored when a source has no API key. It must never reach the
 /// wire as an Anthropic `x-api-key`: the Messages API validates that header in
 /// preference to a bearer token, so a non-empty wrong value fails the request
@@ -119,6 +121,12 @@ pub enum Protocol {
     /// Anthropic Messages API, minting a bearer token via workload identity
     /// federation before each expiry. `x-api-key` is never sent.
     AnthropicFederated(Box<Federation>),
+    /// Amazon Bedrock's `OpenAI`-compatible `/chat/completions`, with each
+    /// request signed with AWS `SigV4`. The same wire shape as
+    /// [`OpenAiCompat`](Self::OpenAiCompat), so the SSE decoder is shared;
+    /// only the credential differs, and it is computed per request rather
+    /// than sent as a static header.
+    Bedrock(Box<Bedrock>),
 }
 
 impl Protocol {
@@ -126,7 +134,55 @@ impl Protocol {
     /// `OpenAI`-compatible chat completions.
     #[must_use]
     pub fn is_anthropic(&self) -> bool {
-        !matches!(self, Self::OpenAiCompat)
+        matches!(
+            self,
+            Self::AnthropicApiKey | Self::AnthropicOAuth | Self::AnthropicFederated(_)
+        )
+    }
+
+    /// True when requests to this source are signed with AWS `SigV4` instead of
+    /// carrying a credential header.
+    #[must_use]
+    pub fn is_bedrock(&self) -> bool {
+        matches!(self, Self::Bedrock(_))
+    }
+
+    /// Why a source on this protocol cannot be used as configured, naming what
+    /// is absent. `None` when it can.
+    ///
+    /// Checked before the run starts. Bedrock is the only protocol with more
+    /// than one thing to get wrong: the others carry a single credential, and
+    /// a source with none of it is never registered in the first place.
+    #[must_use]
+    pub fn config_error(&self, source_name: &str) -> Option<String> {
+        match self {
+            Self::Bedrock(bedrock) => bedrock.incomplete(source_name),
+            Self::OpenAiCompat
+            | Self::AnthropicApiKey
+            | Self::AnthropicOAuth
+            | Self::AnthropicFederated(_) => None,
+        }
+    }
+
+    /// The endpoint a source on this protocol derives for itself, for a source
+    /// that configured none. Only Bedrock does: its Region names the host.
+    ///
+    /// `Some` means "this protocol supplies its own endpoint", and nothing
+    /// weaker - a Bedrock source with no Region still answers `Some`, with the
+    /// empty string. That source has to exist for `Runtime::refusals` to name
+    /// `AWS_REGION` against it, and the refusal stops the run before anything
+    /// reads the url. Were the two folded into one `None`, the caller would
+    /// have to ask `is_bedrock()` to tell them apart, and this would only look
+    /// like a general mechanism.
+    #[must_use]
+    pub fn default_base_url(&self) -> Option<String> {
+        match self {
+            Self::Bedrock(bedrock) => Some(bedrock.base_url().unwrap_or_default()),
+            Self::OpenAiCompat
+            | Self::AnthropicApiKey
+            | Self::AnthropicOAuth
+            | Self::AnthropicFederated(_) => None,
+        }
     }
 
     /// True when auth rides on `Authorization: Bearer` and `x-api-key` must be
@@ -139,24 +195,29 @@ impl Protocol {
     /// The values [`Self::from_env_value`] understands, so a caller that has to
     /// refuse anything else - the config file - and the warning below both read
     /// the same list.
-    pub const NAMES: [&str; 5] = [
+    pub const NAMES: [&str; 6] = [
         "openai",
         "openai-compat",
         "anthropic",
         "anthropic-api-key",
         "anthropic-oauth",
+        "aws-bedrock-openai",
     ];
 
     /// Parse an `AFI_SOURCE_<NAME>_PROTOCOL` value. Unknown values warn to
     /// stderr and fall back to `OpenAiCompat` so a typo never silently
     /// reroutes a source. Federated auth is not reachable from this knob - it
     /// needs the federation ids, which only the built-in source resolves.
+    ///
+    /// `env` is the merged env map, which `aws-bedrock-openai` reads its Region
+    /// and credentials from; every other value ignores it.
     #[must_use]
-    pub fn from_env_value(raw: &str) -> Self {
+    pub fn from_env_value<S: BuildHasher>(raw: &str, env: &HashMap<String, String, S>) -> Self {
         match raw.trim().to_lowercase().as_str() {
             "" | "openai" | "openai-compat" => Self::OpenAiCompat,
             "anthropic" | "anthropic-api-key" => Self::AnthropicApiKey,
             "anthropic-oauth" => Self::AnthropicOAuth,
+            "aws-bedrock-openai" => Self::Bedrock(Box::new(Bedrock::from_env(env))),
             other => {
                 eprintln!(
                     "afi: unknown AFI_SOURCE_*_PROTOCOL {other:?}, using openai; \

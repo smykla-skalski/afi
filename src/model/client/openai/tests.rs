@@ -3,6 +3,7 @@
 //! endpoint on this protocol.
 
 use super::*;
+use crate::config::Bedrock;
 use crate::model::client::THINKING_HISTORY_KEY;
 use serde_json::json;
 
@@ -15,6 +16,113 @@ fn source() -> Source {
         None,
         None,
     )
+}
+
+fn bedrock_source() -> Source {
+    Source::new(
+        "bedrock",
+        "https://bedrock-runtime.us-east-1.amazonaws.com/v1".to_string(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .with_protocol(Protocol::Bedrock(Box::new(Bedrock {
+        region: Some("us-east-1".to_string()),
+        access_key_id: Some("AKIDEXAMPLE".to_string()),
+        secret_access_key: Some("wJalrXUtnFEMI".to_string()),
+        session_token: None,
+    })))
+}
+
+/// Bedrock documents `max_completion_tokens`, and the spelling is chosen where
+/// the key is written so the source's own `extra_body` still merges over it.
+#[test]
+fn a_bedrock_request_sends_the_token_limit_under_the_key_bedrock_documents() {
+    let bedrock = bedrock_source();
+    let body = stream_body(&StreamRequest {
+        source: &bedrock,
+        model: "zai.glm-5",
+        messages: &[json!({"role": "user", "content": "hi"})],
+        tools: None,
+        tool_choice: None,
+        max_tokens: Some(4096),
+        extra_body: None,
+        recovery_sampling: false,
+    });
+    assert_eq!(body["max_completion_tokens"], 4096);
+    assert!(body.get("max_tokens").is_none());
+}
+
+/// The one key this protocol introduces must still be settable by `extra_body`,
+/// which every other key on this protocol is.
+#[test]
+fn an_extra_body_limit_wins_over_the_one_afi_asked_for() {
+    let bedrock = bedrock_source();
+    let body = stream_body(&StreamRequest {
+        source: &bedrock,
+        model: "zai.glm-5",
+        messages: &[json!({"role": "user", "content": "hi"})],
+        tools: None,
+        tool_choice: None,
+        max_tokens: Some(16000),
+        extra_body: Some(&json!({"max_completion_tokens": 512})),
+        recovery_sampling: false,
+    });
+    assert_eq!(body["max_completion_tokens"], 512);
+}
+
+#[test]
+fn every_other_source_keeps_sending_max_tokens() {
+    let local = source();
+    let body = stream_body(&StreamRequest {
+        source: &local,
+        model: "qwen3",
+        messages: &[json!({"role": "user", "content": "hi"})],
+        tools: None,
+        tool_choice: None,
+        max_tokens: Some(4096),
+        extra_body: None,
+        recovery_sampling: false,
+    });
+    assert_eq!(body["max_tokens"], 4096);
+    assert!(body.get("max_completion_tokens").is_none());
+}
+
+/// The AWS wording must never reach a source that is not on Bedrock. A plain
+/// 403 from Z.ai or Together is a 403, not a Region entitlement problem.
+#[test]
+fn a_rejection_from_another_source_is_not_read_as_an_aws_one() {
+    let error = classify_error(
+        &source(),
+        "qwen3",
+        true,
+        403,
+        None,
+        r#"{"error":{"message":"invalid api key"}}"#.to_string(),
+    );
+    let message = error.to_string();
+    assert_eq!(
+        message, r#"HTTP 403: {"error":{"message":"invalid api key"}}"#,
+        "the status and body pass through untouched"
+    );
+}
+
+/// The other arm of the same split: a Bedrock source does get the AWS reading.
+#[test]
+fn a_rejection_from_a_bedrock_source_is_classified() {
+    let error = classify_error(
+        &bedrock_source(),
+        "zai.glm-5",
+        true,
+        403,
+        Some("ExpiredTokenException".to_string()),
+        r#"{"message":"The security token included in the request is expired"}"#.to_string(),
+    );
+    assert!(
+        error.to_string().contains("rejected the credentials"),
+        "got {error}"
+    );
 }
 
 /// An assistant turn as `turn_finalize` writes it once Anthropic thinking is

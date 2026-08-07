@@ -78,6 +78,10 @@ fn build<'a>(
         effort: rt.active_source().and_then(Source::resolved_effort),
         refused_tool_calls: usage_totals::refused_tool_calls(),
         auth: billing_source(rt, &billed).map(Source::run_auth),
+        // A run that reaches here resolved its prompt; the refusal path reports
+        // `None` instead - see `RunSummary::refused`.
+        system_prompt_mode: Some(rt.prompt().mode()),
+        system_prompt_file: rt.prompt().file(),
     }
 }
 

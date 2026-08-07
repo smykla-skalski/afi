@@ -31,6 +31,8 @@ fn summary(ok: bool, answer: &str, usage: UsageTotals) -> RunSummary<'_> {
         effort: None,
         refused_tool_calls: RefusedToolCalls::default(),
         auth: Some(RunAuth::ApiKey),
+        system_prompt_mode: Some("builtin"),
+        system_prompt_file: None,
     }
 }
 
@@ -85,6 +87,32 @@ fn the_effort_the_requests_carried_is_reported_beside_the_tools() {
         summary(true, "x", totals(1)).to_json()["effort"],
         Value::Null
     );
+}
+
+#[test]
+fn the_prompt_the_run_used_is_named() {
+    // The whole point of reporting it: a job told to review under its own
+    // instructions and one that quietly used afi's are otherwise identical here.
+    let unconfigured = summary(true, "done", totals(1)).to_json();
+    assert_eq!(unconfigured["system_prompt"]["mode"], "builtin");
+    assert_eq!(unconfigured["system_prompt"]["file"], Value::Null);
+
+    let mut run = summary(true, "done", totals(1));
+    run.system_prompt_mode = Some("replace");
+    run.system_prompt_file = Some("ci/review.md");
+    let configured = run.to_json();
+    assert_eq!(configured["system_prompt"]["mode"], "replace");
+    assert_eq!(configured["system_prompt"]["file"], "ci/review.md");
+}
+
+#[test]
+fn a_refused_run_names_no_prompt_at_all() {
+    // Null rather than `builtin`, for the reason `tools` is empty and `effort` is
+    // null there: the run never started, so it sent no prompt, and reporting the
+    // built-in one would read as an ordinary unconfigured run that did.
+    let json =
+        RunSummary::refused("the system prompt at \"p.md\" is empty", ErrorKind::Input).to_json();
+    assert_eq!(json["system_prompt"], Value::Null);
 }
 
 #[test]

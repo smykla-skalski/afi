@@ -14,6 +14,7 @@ use crate::tools::policy::ToolPolicy;
 use super::args::{ParsedArgs, parse_args};
 use super::builtins::add_builtin_sources;
 use super::effort;
+use super::system_prompt::{self, SystemPrompt};
 use super::tools::apply_tool_flags;
 use super::{Protocol, Source, build_http_headers, parse_extra_body};
 
@@ -49,6 +50,14 @@ pub struct Runtime {
     pub flag_errors: Vec<RunError>,
     /// Token rates for the summary's cost, `None` when unset or unusable.
     pub pricing: Option<Pricing>,
+    /// The system prompt every turn of this run sends, resolved once here so a
+    /// file named on the command line is read before the run is paid for rather
+    /// than on the first request.
+    ///
+    /// Held as the failure rather than as a fallback, so nothing downstream can
+    /// send the built-in text to a run that named a file of its own. `refusals`
+    /// is what turns the failure into an exit.
+    pub system_prompt: Result<SystemPrompt, String>,
 }
 
 impl Runtime {
@@ -117,6 +126,16 @@ impl Runtime {
             flag_errors,
             // At startup, so a typo is heard about before the run, not after.
             pricing: Pricing::from_env(&env),
+            system_prompt: system_prompt::resolve(
+                parsed
+                    .system_prompt_file
+                    .as_deref()
+                    .or_else(|| env.get("AFI_SYSTEM_PROMPT_FILE").map(String::as_str)),
+                parsed
+                    .system_prompt_mode
+                    .as_deref()
+                    .or_else(|| env.get("AFI_SYSTEM_PROMPT_MODE").map(String::as_str)),
+            ),
             env,
         };
 
@@ -194,12 +213,12 @@ impl Runtime {
     ///
     /// Every case is a setting whose quiet fallback leaves a finished run that
     /// differs from the one the command line asked for, with nothing downstream
-    /// to notice: a wider tool grant than was asked for, or an effort nobody
-    /// chose. The summary-file case is checked here, by touching the path,
-    /// rather than left to the write at the end of the run: a caller that asked
-    /// for a file is not watching stdout for the JSON, and a run that has
-    /// already been paid for is a poor moment to learn the directory does not
-    /// exist.
+    /// to notice: a wider tool grant than was asked for, an effort nobody chose,
+    /// or afi's own prompt in place of the instructions the run was handed. The
+    /// summary-file case is checked here, by touching the path, rather than left
+    /// to the write at the end of the run: a caller that asked for a file is not
+    /// watching stdout for the JSON, and a run that has already been paid for is
+    /// a poor moment to learn the directory does not exist.
     ///
     /// Each refusal carries the kind the summary reports, decided here where the
     /// reason is known. Deriving it afterwards from which field was non-empty
@@ -219,7 +238,30 @@ impl Runtime {
                 .and_then(|p| writable(p).err())
                 .map(|m| RunError::new(m, ErrorKind::Input)),
         );
+        // `Input`: the invocation named a prompt this run cannot use, and
+        // retrying it lands in the same place.
+        out.extend(
+            self.system_prompt
+                .as_ref()
+                .err()
+                .map(|m| RunError::new(m.clone(), ErrorKind::Input)),
+        );
         out
+    }
+
+    /// The system prompt every turn of this run sends.
+    ///
+    /// The only place the unresolvable case is answered. A run whose configured
+    /// prompt failed has already been stopped by `refusals`, so the built-in
+    /// prompt here is unreachable from the binary; it is the answer rather than a
+    /// panic for a library caller who builds a `Runtime` and skips the check.
+    /// Answering it once matters more than which answer it is - the enforcing and
+    /// reporting halves of `--read-only` once disagreed exactly this way.
+    #[must_use]
+    pub fn prompt(&self) -> &SystemPrompt {
+        self.system_prompt
+            .as_ref()
+            .unwrap_or_else(|_| system_prompt::builtin())
     }
 }
 

@@ -21,7 +21,6 @@ use crate::model::client::ReqwestClient;
 use crate::model::turn::{LoopRequest, run_model_turn_loop};
 use crate::model::usage_totals;
 use crate::model::{ModelConfig, TurnOutcome};
-use crate::prompt::SYSTEM;
 use crate::risk::{HighDefaultClassifier, detect_project_root};
 use crate::sessions::{self, new_session_id, safe_title};
 use crate::summary::{ErrorKind, RunError};
@@ -97,7 +96,7 @@ impl ReplCore {
         let env = rt.env.clone();
         let dir = sessions::sessions_dir(&env);
         let mut session_id = rt.session.clone().unwrap_or_else(new_session_id);
-        let mut messages = vec![json!({"role": "system", "content": SYSTEM})];
+        let mut messages = vec![rt.prompt().message()];
         if let Some((resumed, sid)) = resume_session(&mut rt, &dir, ui) {
             messages = resumed;
             session_id = sid;
@@ -257,7 +256,10 @@ fn resume_session(
         .filter(|message| message.get("role").and_then(Value::as_str) != Some("system"))
         .cloned()
         .collect();
-    messages.insert(0, json!({"role": "system", "content": SYSTEM}));
+    // This run's prompt, not the one the session was saved under: a resumed run
+    // is still the run the operator just configured, and the stored system
+    // message was filtered out above for exactly that reason.
+    messages.insert(0, rt.prompt().message());
     if let Some(source) = data.get("source").and_then(Value::as_str) {
         rt.restore_source(Some(source), data.get("model").and_then(Value::as_str));
     }
@@ -320,7 +322,7 @@ async fn one_shot_run(
         ui.message(MessageKind::Error, error.clone());
         RunError::new(error, ErrorKind::Input)
     })?;
-    messages.push(json!({"role": "system", "content": SYSTEM}));
+    messages.push(rt.prompt().message());
     messages.push(json!({"role": "user", "content": prompt.clone()}));
     log_event("req", &json!({"prompt": prompt, "mode": "one_shot"}));
     let (Some(source), Some(model)) = (rt.active_source(), rt.model.as_ref()) else {

@@ -14,7 +14,6 @@ use crate::model::client::{ChatClient, ReqwestClient};
 use crate::model::compress::COMPRESS_KEEP;
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
 use crate::model::{ModelConfig, TurnOutcome};
-use crate::prompt::SYSTEM;
 use crate::sessions::{self, new_session_id, resolve_session};
 use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
@@ -66,7 +65,7 @@ pub(crate) async fn handle_slash_command(
 
     match cmd {
         "/quit" | "/exit" => return CommandResult::Quit,
-        "/reset" | "/clear" | "/new" => cmd_reset(messages, session_id, ui),
+        "/reset" | "/clear" | "/new" => cmd_reset(rt.prompt().message(), messages, session_id, ui),
         "/yolo" => cmd_yolo(rt, ui),
         "/approval" => cmd_approval(rt, arg, ui),
         "/source" => cmd_source(rt, arg, ui),
@@ -86,8 +85,8 @@ pub(crate) async fn handle_slash_command(
     CommandResult::Continue
 }
 
-fn cmd_reset(messages: &mut Vec<Value>, session_id: &mut String, ui: Ui<'_>) {
-    *messages = vec![json!({"role": "system", "content": SYSTEM})];
+fn cmd_reset(system: Value, messages: &mut Vec<Value>, session_id: &mut String, ui: Ui<'_>) {
+    *messages = vec![system];
     *session_id = new_session_id();
     say(ui, Info, format!("Started a fresh session ({session_id})"));
 }

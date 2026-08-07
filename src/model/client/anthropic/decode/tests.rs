@@ -386,6 +386,8 @@ fn the_run_summary_reports_those_writes_separately() {
         effort: None,
         refused_tool_calls: RefusedToolCalls::default(),
         auth: Some(RunAuth::ApiKey),
+        system_prompt_mode: Some("builtin"),
+        system_prompt_file: None,
     }
     .to_json();
     assert_eq!(json["usage"]["cache_write_tokens"], 2279);

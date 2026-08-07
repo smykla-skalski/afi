@@ -91,11 +91,38 @@ done
 
 # --- and it has to ask for filenames a release actually publishes ------------
 
+# install.sh's own templates, read out of the file. The first version of this
+# check rebuilt "afi-$target.tar.gz" here instead, which made both sides of the
+# comparison the same expression: it agreed with itself no matter what install.sh
+# said, and renaming the templates to something no release publishes still passed.
+#
+# Extracted with the literal `$target` left in, then expanded per target below,
+# so a change to the shape of the name is compared rather than assumed.
+extract_template() {
+    sed -n "s/^$1=\"\\(afi[^\"]*\\)\"[[:space:]]*$/\\1/p" \
+        "$repo_root/scripts/install.sh" \
+        | head -1
+}
+
+archive_template=$(extract_template archive)
+checksum_template=$(extract_template checksum)
+
+printf '\ninstall.sh asks for:\n'
+printf '  %s\n  %s\n' "${archive_template:-<none>}" "${checksum_template:-<none>}"
+
+# A template this cannot find is the same failure as a wrong one: the comparison
+# below would silently have nothing to check. Fail rather than pass empty.
+if [ -z "$archive_template" ] || [ -z "$checksum_template" ]; then
+    fail "could not read the archive/checksum templates from install.sh; has it changed shape?"
+fi
+
 # Any released version will do: the tarball and checksum names carry the target
 # and not the version, which is the part being compared.
 assets=$("$targets_sh" --assets 0.0.0-1)
 for target in $served; do
-    for want in "afi-$target.tar.gz" "afi-$target.sha256"; do
+    for template in "$archive_template" "$checksum_template"; do
+        [ -n "$template" ] || continue
+        want=$(printf '%s\n' "$template" | sed "s/\\\$target/$target/g")
         printf '%s\n' "$assets" | grep -qxF "$want" || \
             fail "install.sh would fetch $want, which is not a published asset name"
     done

@@ -120,6 +120,10 @@ run = "./scripts/build-archive.sh"
 description = "Unpack a release archive and prove the binary in it runs and self-reports correctly (args: archive, target, version)"
 run = "./scripts/smoke-archive.sh"
 
+[tasks."publish:crate"]
+description = "Publish the crate to crates.io, unless that version is already there"
+run = "./scripts/publish-crate.sh"
+
 [tasks."deb:version"]
 description = "Print the Debian package version derived from Cargo.toml"
 run = "./scripts/deb-version.sh"

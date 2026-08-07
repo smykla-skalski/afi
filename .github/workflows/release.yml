@@ -18,10 +18,12 @@ name: release
 #
 #   plan     work out the version and commit the bump. No tag, no release.
 #   build    compile, smoke-test, and package every target. Nothing public.
-#   release  tag, open a *draft* release, attach and attest, publish the crate.
+#   release  tag, open a *draft* release, attach and attest.
 #   apt      push the Debian packages.
 #   verify   assert the release and the apt repository agree.
-#   publish  flip the draft. This is the first moment a user can see anything.
+#   publish  flip the draft, then publish the crate. The first moment a user can
+#            see anything, and the crate is last because it is the only step of a
+#            release that cannot be undone.
 #
 # The bump is committed in `plan`, before the build, and that is deliberate even
 # though it is the one thing here that writes outside the runner early. The
@@ -139,10 +141,10 @@ jobs:
           persist-credentials: false
 
       # Everything a release needs in order to finish, asked for at the only
-      # point where the answer is still free. release-plz publishes the crate in
-      # the same step that creates the tag, and the apt push happens after the
-      # release exists, so a credential missing at either of those points leaves
-      # a half-finished release behind rather than a failed run.
+      # point where the answer is still free. The apt push and the crate publish
+      # both happen after the tag and the release exist, so a credential missing
+      # at either of those points would leave a half-finished release behind
+      # rather than a failed run.
       - name: Check the publishing configuration
         env:
           CLOUDSMITH_WORKSPACE: ${{ vars.CLOUDSMITH_WORKSPACE }}
@@ -163,12 +165,11 @@ jobs:
 
           secrets=()
           [[ -n "${APP_PRIVATE_KEY}" ]] || secrets+=(SMYKLOT_APP_PRIVATE_KEY)
-          # Only required while release-plz.toml has `publish = true`, so read
-          # that rather than assuming, and let a project that turns publishing
-          # off stop needing the secret without anyone editing this file.
-          if grep -Eq '^publish[[:space:]]*=[[:space:]]*true' release-plz.toml; then
-            [[ -n "${CARGO_REGISTRY_TOKEN}" ]] || secrets+=(CARGO_REGISTRY_TOKEN)
-          fi
+          # Needed by the publish job at the very end of the run. Asked for here,
+          # at the only point where a missing answer costs nothing: by the time
+          # publish-crate.sh runs, the tag, the release and the apt packages all
+          # exist, and stopping there would leave the crate behind the rest.
+          [[ -n "${CARGO_REGISTRY_TOKEN}" ]] || secrets+=(CARGO_REGISTRY_TOKEN)
           if (( ${#secrets[@]} )); then
             echo "::error::missing repository secrets: ${secrets[*]}"
             exit 1
@@ -342,7 +343,10 @@ jobs:
 
       # release-plz creates the tag and the GitHub release, and fills the release
       # body with this version's changelog section. `git_release_draft` in
-      # release-plz.toml keeps it unpublished until the verify job passes.
+      # release-plz.toml keeps it unpublished until the verify job passes, and
+      # `publish = false` keeps it away from crates.io: the crate is the one
+      # thing here that cannot be undone, so it is published last, by the publish
+      # job, once everything reversible has already succeeded.
       - name: Tag and open the draft release
         env:
           # release-plz reads the release credential from GIT_TOKEN, not
@@ -350,9 +354,6 @@ jobs:
           # GITHUB_TOKEN got as far as the bump commit and then failed with "git
           # release not configured", leaving a version on main with no tag.
           GIT_TOKEN: ${{ steps.token.outputs.token }}
-          # The crate is published from this same step. The plan job has already
-          # refused to get here without the token.
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         # --forge is required alongside the token; release-plz infers it only
         # when driven by its own action, and this calls the CLI directly.
         run: mise x -- release-plz release --forge github
@@ -481,9 +482,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      # The one step that makes a release visible. Everything it publishes has
-      # been built, run, packaged, installed in a clean container, pushed to apt,
-      # and counted.
+      # The step that makes the release visible. Everything it publishes has been
+      # built, run, packaged, installed in a clean container, pushed to apt, and
+      # counted.
+      #
+      # Reversible, and therefore first: a release that should not have gone out
+      # can be turned back into a draft with `gh release edit --draft=true`. The
+      # crate below cannot be taken back at all, so it goes after this, once the
+      # last thing that could still fail has succeeded.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -503,3 +509,22 @@ jobs:
           [[ "${VERSION}" == *-* ]] || args+=(--latest)
           gh release edit "${TAG}" "${args[@]}" --repo "${REPO}"
           echo "Published https://github.com/${REPO}/releases/tag/${TAG}"
+
+      # The tag, so the crate is built from exactly what shipped.
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install mise
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+
+      # Last, because it is the only publication a release cannot undo. A crate
+      # can be yanked, which stops new dependents resolving to it, but it can
+      # never be removed. publish-crate.sh is a no-op when the version is already
+      # on crates.io, so re-running a half-finished release resumes here.
+      - name: Publish the crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: mise run publish:crate

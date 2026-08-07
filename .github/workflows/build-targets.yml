@@ -83,6 +83,25 @@ jobs:
         with:
           name: ${{ inputs.bump-artifact }}
 
+      # build.rs resolves the commit as AFI_BUILD_COMMIT, then GITHUB_SHA, then
+      # `git rev-parse HEAD`. In a called workflow GITHUB_SHA is the *caller's*
+      # triggering commit, not `inputs.ref`, so without this the binaries name
+      # the wrong commit -- the bump commit's parent for a release, and today's
+      # main for a backfill of an old tag. Checked against the shipped v0.4.0
+      # assets, where the gnu tarball embeds the trigger SHA and the musl ones
+      # embed the tag commit, because `cross` does not forward GITHUB_SHA into
+      # its container and those legs fell through to the git lookup.
+      #
+      # Setting both fields from the checkout makes every leg agree, and makes
+      # `commit` and `commit-date` describe the same commit.
+      - name: Pin the build metadata to the checked-out commit
+        run: |
+          set -euo pipefail
+          {
+            echo "AFI_BUILD_COMMIT=$(git rev-parse HEAD)"
+            echo "AFI_BUILD_COMMIT_DATE=$(git log -1 --format=%cI)"
+          } >>"${GITHUB_ENV}"
+
       # Keyed on the lockfile and holding dependency artifacts only, so a hit
       # cannot mask a change to afi's own sources. Without it every leg compiled
       # all 347 lockfile entries from scratch, on five runners, every release.
@@ -110,10 +129,14 @@ jobs:
           dry-run: true
           dry-run-intended: true
 
-      # Only the arm64 Linux leg needs emulation. Both x86_64 Linux legs run
-      # their own binary natively, and the macOS legs are native or Rosetta.
+      # Every Linux leg, because which of them needs emulation depends on the
+      # runner, not on the target. `RUNNER_LABEL` is a documented override, and
+      # pointing it at an arm64 runner inverts which legs are foreign; keying
+      # this on the target instead would leave the x86_64 legs with no binfmt and
+      # break both the smoke test and the package install check. It costs about
+      # five seconds on the legs that turn out not to need it.
       - name: Set up QEMU
-        if: matrix.arch == 'arm64'
+        if: matrix.os == 'linux'
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       # Opens the archive that is about to be published and runs the binary in

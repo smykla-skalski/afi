@@ -9,13 +9,29 @@
 
 # The crates.io name `afi` belongs to an unrelated audio/video crate published in
 # 2017, so the package is `afi-cli` and the binary it installs is still `afi`.
-# A release is therefore four things: the GitHub release and its archives, the
-# Debian packages in the apt repository, and the crate.
+# A release is four things: the GitHub release and its archives, the Debian
+# packages in the apt repository, and the crate.
 #
-# This needs a CARGO_REGISTRY_TOKEN secret. The plan job checks for it before
-# anything is tagged, because release-plz publishes to crates.io in the same
-# step that creates the tag, and a missing token there would leave a tag behind.
-publish = true
+# release-plz does not publish the crate, though. The release workflow's own
+# `publish` job does, last, after the reconciliation gate has passed. Two reasons,
+# and both were found by review rather than by reasoning:
+#
+#   1. Ordering. release-plz publishes in the same step that creates the tag,
+#      which is three jobs before anything else goes public. A failure in `apt`
+#      or `verify` after that point would leave `cargo install afi-cli` serving a
+#      version worldwide while the GitHub release was still a draft -- and a
+#      crate cannot be unpublished, only yanked. The one irreversible publication
+#      belongs at the end, not in the middle.
+#
+#   2. It does not work here yet. `release-plz update` refuses to compute a next
+#      version when a package is absent from the registry but a matching git tag
+#      exists, which is exactly the state a rename creates: v0.5.0 is tagged and
+#      `afi-cli` has never been published. With `publish = true` the plan job
+#      exits 1 on every run until someone publishes by hand.
+#
+# scripts/publish-crate.sh does it instead, and is a no-op when the version is
+# already on crates.io, so a re-run of a half-finished release resumes.
+publish = false
 
 # afi exposes a lib target, but only so the binary and the tests can share code.
 # It is not an API anyone depends on, so a semver check on it would block

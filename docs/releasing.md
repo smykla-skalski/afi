@@ -13,7 +13,7 @@ Four publications, from one run:
 
 - a GitHub release, with an archive and a checksum for each of five targets
 - two Debian packages, attached to that release and pushed to the apt repository
-- the `afi-cli` crate on crates.io
+- the `afi-cli` crate on crates.io, published last by `scripts/publish-crate.sh`
 - a Sigstore build-provenance attestation for every archive and package
 
 [`scripts/release-targets.sh`](../scripts/release-targets.sh) is the definition
@@ -25,11 +25,17 @@ adding a target means editing one file.
 ```
 plan     work out the version and commit the bump. No tag, no release.
 build    compile, smoke-test and package all five targets.
-release  tag, open a DRAFT release, attach and attest, publish the crate.
+release  tag, open a DRAFT release, attach and attest.
 apt      push both Debian packages.
 verify   assert the release and the apt repository agree.
-publish  flip the draft.
+publish  flip the draft, then publish the crate.
 ```
+
+The crate goes last, on its own, because it is the only publication a release
+cannot take back. Everything ahead of it is reversible: a release can be turned
+back into a draft, a Debian package can be deleted from apt. A crate can only be
+yanked, which stops new dependents resolving to it and leaves it downloadable
+forever. So it is published once nothing else can still fail.
 
 Nothing is visible to a user until `publish`. That is deliberate, and it is the
 fix for how the first four releases went wrong:
@@ -138,7 +144,8 @@ Still nothing public. Fix the cause and re-run the workflow; it resumes:
 - `plan-release.sh` notices the manifest is at a version with no tag and
   publishes it as it stands rather than recomputing.
 - The commit step notices the bump is already on `main` and reuses that commit.
-- The upload step passes `--clobber`, and the apt push passes `--republish`.
+- The upload step passes `--clobber`, the apt push passes `--republish`, and
+  `publish-crate.sh` is a no-op when that version is already on crates.io.
 
 Re-run rather than dispatching a fresh run, so the same version is finished
 instead of a new one being started next to it.
@@ -242,7 +249,7 @@ Repository secrets:
 | secret | purpose |
 |--------|---------|
 | `SMYKLOT_APP_PRIVATE_KEY` | the app that can commit the version bump to `main` |
-| `CARGO_REGISTRY_TOKEN` | crates.io publishing |
+| `CARGO_REGISTRY_TOKEN` | crates.io publishing. A token with the `publish-update` scope. |
 
 The `plan` job checks all of them before anything is tagged, so a missing one
 costs a failed run rather than a half-finished release.

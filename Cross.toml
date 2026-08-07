@@ -1,0 +1,17 @@
+# cross configuration, used by the musl legs of the release build matrix.
+#
+# cross runs cargo inside a container and forwards almost nothing from the
+# outer environment: `CARGO_*`, `CROSS_*`, and a short fixed allowlist. The
+# build metadata variables are on none of those lists, so without this
+# passthrough `build.rs` inside the container never sees what the workflow set
+# and falls back to its own git lookup.
+#
+# That fallback is why the released v0.4.0 archives disagreed with each other:
+# the glibc leg, built without cross, took `GITHUB_SHA` and named the workflow's
+# triggering commit, while the two musl legs took the git lookup and named the
+# tag commit. Two archives from one release, claiming two different commits.
+[build.env]
+passthrough = [
+  "AFI_BUILD_COMMIT",
+  "AFI_BUILD_COMMIT_DATE",
+]

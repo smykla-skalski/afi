@@ -203,7 +203,7 @@ The same entry points report it as `--summary json` does, and an interactive TTY
 | --- | --- | --- |
 | `auth` | a credential was missing, unusable, or refused (401, 403) | no |
 | `policy` | the tool policy could not be honoured, so the run never started | no |
-| `input` | the invocation was wrong - no prompt to read, no source configured, or a summary file that cannot be written | no |
+| `input` | the invocation was wrong - no prompt to read, no source configured, an effort nothing can honour, or a summary file that cannot be written | no |
 | `provider_http` | the provider answered with a failing status, or never answered | yes |
 | `provider_stream` | the response opened and then broke, or was not a stream at all | yes |
 | `timeout` | a request outlived its deadline (including 408 and 504) | yes |
@@ -230,7 +230,7 @@ case "$(jq -r .error_kind summary.json)" in
 esac
 ```
 
-Exit codes are unchanged: 1 for a failed run, 2 for a refusal to start. A refusal reports itself wherever the summary was asked for, on stdout and in the file, with no `source`, no `model`, and an empty `tools` list - nothing ran, and naming the wide set a mistyped policy resolved to is exactly what refusing avoids. A [tool policy](#tool-policy) that cannot be honoured is `policy`; a [summary file](#writing-the-summary-to-a-file) that cannot be written is `input`, and that one is reported on stdout alone, since writing it is what failed.
+Exit codes are unchanged: 1 for a failed run, 2 for a refusal to start. A refusal reports itself wherever the summary was asked for, on stdout and in the file, with no `source`, no `model`, and an empty `tools` list - nothing ran, and naming the wide set a mistyped policy resolved to is exactly what refusing avoids. A [tool policy](#tool-policy) that cannot be honoured is `policy`, since a run that started anyway would be wider than the command line asked for. Everything else a run refuses over is `input`: a [summary file](#writing-the-summary-to-a-file) that cannot be written, or an [effort](#reasoning-effort) level no configured source can carry. The summary-file case is reported on stdout alone, since writing the file is what failed.
 
 ## Cost
 

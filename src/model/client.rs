@@ -37,6 +37,14 @@ pub(crate) use anthropic::thinking::{THINKING_HISTORY_KEY, thinking_disabled};
 
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
+/// How much of a failing response body to quote at a human: enough to name the
+/// cause, not enough to bury it.
+///
+/// One policy, so the sentence a rejected credential prints and the one an HTTP
+/// error prints are cut to the same length. Two spellings of the number would be
+/// kept equal only by whoever remembered both.
+pub(crate) const BODY_PREVIEW_CHARS: usize = 200;
+
 /// Bundles the parameters for a streaming chat completion request.
 #[derive(Debug, Clone)]
 pub struct StreamRequest<'a> {
@@ -144,9 +152,24 @@ fn http_kind(status: u16) -> ErrorKind {
     }
 }
 
-/// Classify a reqwest transport failure. `message` is what to report; the error
-/// itself decides whether the request died on its deadline or never landed.
-fn transport_error(message: String, error: &reqwest::Error) -> ClientError {
+/// Classify a reqwest transport failure: a request that outlived its deadline is
+/// worth another attempt on a longer one, and one that never landed is the
+/// server or the network between.
+fn transport_error(error: &reqwest::Error) -> ClientError {
+    transport_error_at(None, error)
+}
+
+/// The same, naming the step that failed.
+///
+/// The identity-exchange calls need it - "connection refused" alone does not say
+/// which of the two endpoints refused, and they are operated by different people.
+/// The sentence is built from the error being classified rather than passed in
+/// beside it, so the two can never describe different failures.
+fn transport_error_at(what: Option<&str>, error: &reqwest::Error) -> ClientError {
+    let message = match what {
+        Some(what) => format!("{what}: {error}"),
+        None => error.to_string(),
+    };
     if error.is_timeout() {
         ClientError::Timeout(message)
     } else {

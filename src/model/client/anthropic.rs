@@ -228,7 +228,7 @@ pub(super) async fn stream(
         .await?
         .send()
         .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+        .map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
         return Err(ClientError::Http {
@@ -272,12 +272,9 @@ pub(super) async fn complete(
         .timeout(Duration::from_secs(timeout))
         .send()
         .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+        .map_err(|e| transport_error(&e))?;
     let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+    let text = response.text().await.map_err(|e| transport_error(&e))?;
     if !status.is_success() {
         return Err(ClientError::Http {
             status: status.as_u16(),

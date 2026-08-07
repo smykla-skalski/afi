@@ -6,8 +6,10 @@
 //! test cannot see. This runs the binary against a server that reports known
 //! token counts and checks the money that comes out of stdout.
 
+mod common;
+
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -15,6 +17,8 @@ use std::thread::{self, JoinHandle};
 
 use serde_json::Value;
 use tempfile::TempDir;
+
+use common::{NOT_FOUND, read_request_body, sse_response, summary_of};
 
 /// Usage the fake endpoint reports, chosen so the arithmetic is checkable by
 /// eye: a million tokens of each kind bills at exactly the per-million rate.
@@ -33,13 +37,10 @@ fn sse_body() -> String {
     let usage = format!(
         r#"{{"prompt_tokens":{PROMPT_TOKENS},"completion_tokens":{COMPLETION_TOKENS},"prompt_tokens_details":{{"cached_tokens":{CACHED_TOKENS}}}}}"#
     );
-    [
-        r#"data: {"choices":[{"delta":{"content":"done"}}]}"#.to_string(),
-        format!(r#"data: {{"choices":[{{"delta":{{}},"finish_reason":"stop"}}],"usage":{usage}}}"#),
-        "data: [DONE]".to_string(),
-    ]
-    .join("\n\n")
-        + "\n\n"
+    sse_response([
+        r#"{"choices":[{"delta":{"content":"done"}}]}"#.to_string(),
+        format!(r#"{{"choices":[{{"delta":{{}},"finish_reason":"stop"}}],"usage":{usage}}}"#),
+    ])
 }
 
 /// Serve `count` requests, then stop. Anything that is not a chat completion
@@ -61,36 +62,14 @@ fn answer(mut stream: TcpStream) {
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
-    drain_body(&mut reader);
+    read_request_body(&mut reader);
     let response = if request_line.contains("/chat/completions") {
-        let body = sse_body();
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
+        sse_body()
     } else {
-        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+        NOT_FOUND.to_string()
     };
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
-}
-
-/// Read past the headers and whatever body they announce, so the client is not
-/// answered before it has finished sending.
-fn drain_body(reader: &mut BufReader<TcpStream>) {
-    let mut length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-            break;
-        }
-        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            length = value.trim().parse().unwrap_or(0);
-        }
-    }
-    let mut body = vec![0u8; length];
-    let _ = reader.read_exact(&mut body);
 }
 
 fn run_afi(
@@ -124,15 +103,6 @@ fn run_afi(
         .write_all(b"say done\n")
         .expect("the prompt must write");
     child.wait_with_output().expect("afi must exit")
-}
-
-fn summary_of(output: &Output) -> Value {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout
-        .lines()
-        .find(|line| line.trim_start().starts_with('{'))
-        .unwrap_or_else(|| panic!("no JSON summary on stdout: {stdout}"));
-    serde_json::from_str(line).expect("the summary must be JSON")
 }
 
 #[test]

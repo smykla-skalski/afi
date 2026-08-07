@@ -15,7 +15,8 @@ use crate::approval::ApprovalState;
 use crate::config::Source;
 use crate::log::log_event;
 use crate::model::client::{
-    ChatClient, ChatCompletionStream, ClientError, StreamRequest, thinking_disabled,
+    BODY_PREVIEW_CHARS, ChatClient, ChatCompletionStream, ClientError, StreamRequest,
+    thinking_disabled,
 };
 use crate::model::recovery::recovery_sampling_opts;
 use crate::model::turn_finalize::finalize_turn;
@@ -174,7 +175,7 @@ async fn fetch_stream(
         Ok(stream) => stream,
         Err(StreamOpenError::Cancelled) => {
             ui.stop_activity();
-            return Err(interrupt_generation(messages, None, ui).into());
+            return Err(interrupt_generation(messages, None, ui));
         }
         Err(StreamOpenError::Client(error)) => {
             ui.stop_activity();
@@ -188,7 +189,7 @@ async fn fetch_stream(
             item = stream.next() => item,
             () = cancel.cancelled() => {
                 ui.stop_activity();
-                return Err(interrupt_generation(messages, Some(accumulator), ui).into());
+                return Err(interrupt_generation(messages, Some(accumulator), ui));
             }
         };
         let Some(item) = item else {
@@ -268,7 +269,7 @@ fn report_client_error(
             format!("the request to {} timed out\n{message}", source.base_url)
         }
         ClientError::Http { status, body } => {
-            let body_short: String = body.chars().take(200).collect();
+            let body_short: String = body.chars().take(BODY_PREVIEW_CHARS).collect();
             format!("HTTP {status}: {body_short}")
         }
         ClientError::Stream(message) => {
@@ -289,7 +290,7 @@ fn interrupt_generation(
     messages: &mut Vec<Value>,
     accumulator: Option<StreamAccumulator>,
     ui: &mut dyn UserInterface,
-) -> String {
+) -> TurnOutcome {
     if let Some(accumulator) = accumulator {
         preserve_partial(messages, accumulator, ui);
     } else {
@@ -297,7 +298,7 @@ fn interrupt_generation(
     }
     ui.message(MessageKind::Warning, "interrupted by Esc".to_string());
     messages.push(json!({"role": "user", "content": "[User pressed Esc to interrupt generation. Acknowledge briefly and wait.]"}));
-    TURN_ESC.to_string()
+    TurnOutcome::new(TURN_ESC)
 }
 
 fn preserve_partial(

@@ -6,22 +6,27 @@
 //! the turn loop, and the summary assembly - so this drives the binary against a
 //! server that answers exactly one way and reads the JSON off stdout.
 
-use std::io::{BufRead, BufReader, Read, Write};
+mod common;
+
+use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Command, Output, Stdio};
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 use serde_json::Value;
 use tempfile::TempDir;
 
+use common::{http_response, read_request_body, sse_response, summary_of};
+
 /// Answer every connection with `response` until the listener closes. The thread
-/// is left to the process rather than joined: it parks in `accept`.
-fn serve(listener: TcpListener, response: String) -> JoinHandle<()> {
+/// is left to the process rather than joined: it parks in `accept`, so a handle
+/// would only ever be dropped.
+fn serve(listener: TcpListener, response: String) {
     thread::spawn(move || {
         while let Ok((stream, _)) = listener.accept() {
             answer(stream, &response);
         }
-    })
+    });
 }
 
 fn answer(mut stream: TcpStream, response: &str) {
@@ -30,40 +35,20 @@ fn answer(mut stream: TcpStream, response: &str) {
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
-    drain_body(&mut reader);
+    read_request_body(&mut reader);
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
 }
 
-/// Read past the headers and whatever body they announce, so the client is not
-/// answered before it has finished sending.
-fn drain_body(reader: &mut BufReader<TcpStream>) {
-    let mut length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-            break;
-        }
-        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            length = value.trim().parse().unwrap_or(0);
-        }
-    }
-    let mut body = vec![0u8; length];
-    let _ = reader.read_exact(&mut body);
-}
-
-fn http_response(status: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
+/// A canned non-stream response - what every failing status here answers with.
+fn json_response(status: &str, body: &str) -> String {
+    http_response(status, "application/json", body)
 }
 
 /// A turn that only ever calls a tool, so a forced final gets a tool call where
 /// an answer belongs.
 fn tool_call_body() -> String {
-    sse([
+    sse_response([
         r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"list_dir","arguments":"{\"path\":\".\"}"}}]}}]}"#,
         r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
     ])
@@ -71,7 +56,7 @@ fn tool_call_body() -> String {
 
 /// A turn that answers with an empty `final_answer`.
 fn empty_answer_body() -> String {
-    sse([
+    sse_response([
         r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"final_answer","arguments":"{\"answer\":\"\"}"}}]}}]}"#,
         r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
     ])
@@ -79,7 +64,7 @@ fn empty_answer_body() -> String {
 
 /// A turn whose tool-call arguments are not JSON.
 fn malformed_args_body() -> String {
-    sse([
+    sse_response([
         r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"list_dir","arguments":"{\"path\": "}}]}}]}"#,
         r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
     ])
@@ -87,25 +72,10 @@ fn malformed_args_body() -> String {
 
 /// A turn that streams nothing at all.
 fn empty_body() -> String {
-    sse([
+    sse_response([
         r#"{"choices":[{"delta":{"content":""}}]}"#,
         r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
     ])
-}
-
-fn sse<const N: usize>(events: [&str; N]) -> String {
-    let mut body = String::new();
-    for event in events {
-        body.push_str("data: ");
-        body.push_str(event);
-        body.push_str("\n\n");
-    }
-    body.push_str("data: [DONE]\n\n");
-    format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
 }
 
 /// Run the binary against `base_url`, one prompt on stdin, summary on stdout.
@@ -138,15 +108,6 @@ fn run_afi_with(home: &TempDir, base_url: &str, args: &[&str], env: &[(&str, &st
     child.wait_with_output().expect("afi must exit")
 }
 
-fn summary_of(output: &Output) -> Value {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout
-        .lines()
-        .find(|line| line.trim_start().starts_with('{'))
-        .unwrap_or_else(|| panic!("no JSON summary on stdout: {stdout}"));
-    serde_json::from_str(line).expect("the summary must be JSON")
-}
-
 /// Drive one canned HTTP response through a real run and return its summary.
 fn summary_for(response: String) -> Value {
     summary_for_with(response, &[])
@@ -157,7 +118,7 @@ fn summary_for(response: String) -> Value {
 fn summary_for_with(response: String, env: &[(&str, &str)]) -> Value {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a port must bind");
     let addr: SocketAddr = listener.local_addr().expect("the port must be readable");
-    let _server = serve(listener, response);
+    serve(listener, response);
     let home = TempDir::new().unwrap();
     let output = run_afi_with(&home, &format!("http://{addr}/v1"), &["-f", "-"], env);
     assert_eq!(
@@ -173,7 +134,7 @@ fn summary_for_with(response: String, env: &[(&str, &str)]) -> Value {
 fn a_rejected_credential_is_reported_as_auth() {
     // The failure a caller must never retry. Substring-matching the sentence is
     // what this field replaces, so the assertion is on the field alone.
-    let summary = summary_for(http_response(
+    let summary = summary_for(json_response(
         "401 Unauthorized",
         r#"{"error":{"type":"authentication_error"}}"#,
     ));
@@ -190,7 +151,7 @@ fn a_rejected_credential_is_reported_as_auth() {
 fn a_rate_limit_is_reported_as_the_providers_own_trouble() {
     // The same shape of failure as the 401 on the wire, and the opposite decision:
     // this one is worth another attempt.
-    let summary = summary_for(http_response(
+    let summary = summary_for(json_response(
         "429 Too Many Requests",
         r#"{"error":{"type":"rate_limit_error"}}"#,
     ));
@@ -199,7 +160,7 @@ fn a_rate_limit_is_reported_as_the_providers_own_trouble() {
 
 #[test]
 fn a_gateway_timeout_is_reported_as_a_timeout() {
-    let summary = summary_for(http_response("504 Gateway Timeout", "upstream gone"));
+    let summary = summary_for(json_response("504 Gateway Timeout", "upstream gone"));
     assert_eq!(summary["error_kind"], "timeout");
 }
 
@@ -207,7 +168,7 @@ fn a_gateway_timeout_is_reported_as_a_timeout() {
 fn a_success_that_is_not_a_stream_is_reported_against_the_stream() {
     // A proxy answering 200 with a JSON error body. The request was accepted, so
     // the fault is in what came back rather than in reaching the server.
-    let summary = summary_for(http_response("200 OK", r#"{"error":"proxy failure"}"#));
+    let summary = summary_for(json_response("200 OK", r#"{"error":"proxy failure"}"#));
     assert_eq!(summary["error_kind"], "provider_stream");
 }
 

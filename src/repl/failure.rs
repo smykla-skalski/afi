@@ -30,14 +30,7 @@ impl RunFailure {
     pub(crate) fn record_error(&mut self, error: RunError) {
         // First one wins. An auth failure repeats on every later turn, and the
         // reason the run went wrong is the first thing that went wrong.
-        if self.error.is_none() {
-            self.error = Some(error);
-        }
-    }
-
-    /// Whether any turn failed outright.
-    pub(crate) fn failed(&self) -> bool {
-        self.error.is_some()
+        self.error.get_or_insert(error);
     }
 
     /// The failure as the summary reports it, or `None` for a clean run.
@@ -49,14 +42,13 @@ impl RunFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{TURN_DONE, TURN_FAILED};
+    use crate::model::TURN_DONE;
     use crate::summary::ErrorKind;
 
     #[test]
     fn a_clean_session_reports_nothing() {
         let mut failure = RunFailure::default();
         failure.record(&TurnOutcome::new(TURN_DONE));
-        assert!(!failure.failed());
         assert!(failure.error().is_none());
     }
 
@@ -77,17 +69,5 @@ mod tests {
         let error = failure.error().expect("the run failed");
         assert_eq!(error.kind, ErrorKind::Auth);
         assert_eq!(error.message, "HTTP 401: authentication_error");
-    }
-
-    #[test]
-    fn a_failure_with_no_reason_still_reports_one() {
-        // Only reachable through an afi bug - a TURN_FAILED built without one.
-        // Leaving the fields null would send a caller back to substring matching.
-        let mut failure = RunFailure::default();
-        failure.record(&TurnOutcome::new(TURN_FAILED));
-        assert!(failure.failed());
-        let error = failure.error().expect("the run failed");
-        assert_eq!(error.kind, ErrorKind::Internal);
-        assert!(!error.message.is_empty());
     }
 }

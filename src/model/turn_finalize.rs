@@ -27,7 +27,6 @@ use crate::model::usage_totals;
 use crate::model::{
     TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL, TurnOutcome,
 };
-use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, StreamKind, UserInterface};
 use crate::tools::protocol::parse_text_calls;
 use tokio_util::sync::CancellationToken;
@@ -169,7 +168,7 @@ fn emit_forced_final(
             .unwrap_or("")
             .trim();
         if answer.is_empty() {
-            return no_answer("FORCED FINAL ANSWER EMPTY".to_string(), ui);
+            return TurnOutcome::no_answer(ui, "FORCED FINAL ANSWER EMPTY".to_string());
         }
         ui.stream(StreamKind::Assistant, answer.to_string());
         ui.finish_stream();
@@ -180,21 +179,10 @@ fn emit_forced_final(
         .iter()
         .map(|c| c.name.as_deref().unwrap_or("tool"))
         .collect();
-    no_answer(
-        format!("FORCED FINAL FAILED - model emitted {}", names.join(", ")),
+    TurnOutcome::no_answer(
         ui,
+        format!("FORCED FINAL FAILED - model emitted {}", names.join(", ")),
     )
-}
-
-/// Report a turn that ended with no answer to show.
-///
-/// The sentence goes to the ui and to the run summary at once, so the log and the
-/// JSON name the same thing. `answer` in the summary is whatever the run last
-/// managed to say, which on one of these is an earlier turn's text - `ok: false` is
-/// what keeps a workflow from posting it.
-fn no_answer(message: String, ui: &mut dyn UserInterface) -> TurnOutcome {
-    ui.message(MessageKind::Error, message.clone());
-    TurnOutcome::failed(RunError::new(message, ErrorKind::NoAnswer))
 }
 
 /// The parts of a streamed turn that a structured tool dispatch needs.
@@ -243,12 +231,12 @@ fn malformed_tool_retry(
     if tr.malformed_stream_cut_count >= retry_limit {
         // Out of recoveries with nothing dispatched and nothing pushed: the turn
         // produced no answer, whatever the model meant to call.
-        return no_answer(
+        return TurnOutcome::no_answer(
+            ui,
             format!(
                 "malformed tool call after {} recoveries",
                 tr.malformed_stream_cut_count
             ),
-            ui,
         );
     }
     ui.message(
@@ -403,17 +391,17 @@ fn handle_empty_or_final(
         // answer to save. Named separately from the case below because the cause
         // is usually a `max_tokens` spent entirely on reasoning, which is
         // something the caller can act on.
-        return no_answer(
+        return TurnOutcome::no_answer(
+            ui,
             "FORCED FINAL RETURNED NO ANSWER - raise AFI_MAX_TOKENS, or lower the effort"
                 .to_string(),
-            ui,
         );
     }
     // No text, no tool call, and no nudge left to spend: empty-turn retries are
     // exhausted or switched off. Silent until now, which is how a run with
     // nothing to show reported success.
-    no_answer(
-        "NO ANSWER - the turn produced no text and no tool call".to_string(),
+    TurnOutcome::no_answer(
         ui,
+        "NO ANSWER - the turn produced no text and no tool call".to_string(),
     )
 }

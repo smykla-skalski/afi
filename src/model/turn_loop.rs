@@ -125,7 +125,7 @@ pub async fn run_model_turn_loop(
             return outcome;
         }
         steps += 1;
-        transition(&outcome.status, &mut c);
+        transition(outcome.status, &mut c);
     }
 
     if steps >= max_turns && !c.force_final {

@@ -5,14 +5,37 @@ use afi::sessions::write_session;
 use serde_json::json;
 use tempfile::TempDir;
 
+/// The default env: a source that resolves but points at a dead port, so a turn
+/// fails on the connection rather than on having nowhere to go.
+const LIVE_SOURCE: &[(&str, &str)] = &[
+    ("AFI_BASE_URL", "http://127.0.0.1:9/v1"),
+    ("AFI_MODEL", "test-model"),
+];
+
+/// `AFI_ACTIVE` naming a source nobody defined - the shape a workflow takes when
+/// it sets the variable and forgets the `AFI_SOURCE_*` block. Nothing is active,
+/// so a turn has nowhere to go.
+const NO_SOURCE: &[(&str, &str)] = &[("AFI_ACTIVE", "never-configured")];
+
 fn run_afi(home: &TempDir, args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_afi"))
+    run_afi_with(home, args, LIVE_SOURCE, input.as_bytes())
+}
+
+/// Run afi with an explicit env and raw stdin bytes.
+///
+/// Bytes rather than `&str` because one case feeds stdin something that is not
+/// UTF-8 at all, which is the input the session has to refuse.
+fn run_afi_with(home: &TempDir, args: &[&str], env: &[(&str, &str)], input: &[u8]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_afi"));
+    command
         .args(args)
         .env_clear()
         .env("AFI_HOME", home.path())
-        .env("AFI_BASE_URL", "http://127.0.0.1:9/v1")
-        .env("AFI_MODEL", "test-model")
-        .env("HOME", home.path())
+        .env("HOME", home.path());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -22,39 +45,7 @@ fn run_afi(home: &TempDir, args: &[&str], input: &str) -> Output {
     // a broken pipe means "the child already finished", not a test failure. Only
     // the empty-input `sessions` case reaches that here today, and an empty
     // `write_all` never touches the fd - so harden it before it does bite.
-    let write = child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(input.as_bytes());
-    match write {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
-        Err(error) => panic!("input must write: {error}"),
-    }
-    child.wait_with_output().expect("afi must exit")
-}
-
-/// The same run with `AFI_ACTIVE` naming a source nobody defined - the shape a
-/// workflow takes when it sets the variable and forgets the `AFI_SOURCE_*` block.
-/// Nothing is active, so a turn has nowhere to go.
-fn run_afi_without_a_source(home: &TempDir, args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_afi"))
-        .args(args)
-        .env_clear()
-        .env("AFI_HOME", home.path())
-        .env("HOME", home.path())
-        .env("AFI_ACTIVE", "never-configured")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("afi must start");
-    let write = child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(input.as_bytes());
+    let write = child.stdin.take().expect("piped stdin").write_all(input);
     match write {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
@@ -177,7 +168,7 @@ fn a_turn_with_no_source_to_send_it_to_fails_the_run() {
     // The turn never went anywhere. This used to print the error and exit 0 with
     // ok:true, which told a workflow the review passed.
     let home = TempDir::new().unwrap();
-    let output = run_afi_without_a_source(&home, &["--summary", "json"], "hello\n/quit\n");
+    let output = run_afi_with(&home, &["--summary", "json"], NO_SOURCE, b"hello\n/quit\n");
     let stdout = String::from_utf8(output.stdout).unwrap();
     let summary: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("summary must be valid json");
@@ -200,25 +191,7 @@ fn an_input_the_session_cannot_read_fails_the_run() {
     // A non-UTF-8 byte on stdin. Nothing was asked, so nothing was answered - and
     // this used to end the loop quietly with ok:true and exit 0.
     let home = TempDir::new().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_afi"))
-        .args(["--summary", "json"])
-        .env_clear()
-        .env("AFI_HOME", home.path())
-        .env("HOME", home.path())
-        .env("AFI_BASE_URL", "http://127.0.0.1:9/v1")
-        .env("AFI_MODEL", "test-model")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("afi must start");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(b"\xff\xfe\n")
-        .expect("the bytes must write");
-    let output = child.wait_with_output().expect("afi must exit");
+    let output = run_afi_with(&home, &["--summary", "json"], LIVE_SOURCE, b"\xff\xfe\n");
     let stdout = String::from_utf8(output.stdout).unwrap();
     let summary: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("summary must be valid json");

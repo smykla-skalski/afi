@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
 use crate::envfile;
 use crate::pricing::Pricing;
-use crate::summary::{SummaryFormat, summary_path, writable};
+use crate::summary::{ErrorKind, RunError, SummaryFormat, summary_path, writable};
 use crate::tools::policy::ToolPolicy;
 
 use super::args::{ParsedArgs, parse_args};
@@ -44,8 +44,9 @@ pub struct Runtime {
     /// header renders it on every frame; `ModelConfig::from_env` reads the same
     /// env vars, so the two cannot disagree.
     pub tool_policy: ToolPolicy,
-    /// Flags given wrongly on the command line. See `refusals`.
-    pub flag_errors: Vec<String>,
+    /// Flags given wrongly on the command line, each with its kind. See
+    /// `refusals`.
+    pub flag_errors: Vec<RunError>,
     /// Token rates for the summary's cost, `None` when unset or unusable.
     pub pricing: Option<Pricing>,
 }
@@ -79,7 +80,10 @@ impl Runtime {
             env.get("AFI_EFFORT").map(String::as_str),
         )
         .unwrap_or_else(|refusal| {
-            flag_errors.push(refusal);
+            // `Input`: an effort level afi cannot use is the invocation naming
+            // something this source has no answer for, and retrying it lands in
+            // the same place.
+            flag_errors.push(RunError::new(refusal, ErrorKind::Input));
             None
         });
 
@@ -196,11 +200,25 @@ impl Runtime {
     /// for a file is not watching stdout for the JSON, and a run that has
     /// already been paid for is a poor moment to learn the directory does not
     /// exist.
+    ///
+    /// Each refusal carries the kind the summary reports, decided here where the
+    /// reason is known. Deriving it afterwards from which field was non-empty
+    /// would put the caller's classification back at one remove from the thing
+    /// being classified, which is what `error_kind` exists to end.
     #[must_use]
-    pub fn refusals(&self) -> Vec<String> {
+    pub fn refusals(&self) -> Vec<RunError> {
         let mut out = self.flag_errors.clone();
-        out.extend(self.tool_policy.unknown_names_message());
-        out.extend(self.summary_file.as_deref().and_then(|p| writable(p).err()));
+        out.extend(
+            self.tool_policy
+                .unknown_names_message()
+                .map(|m| RunError::new(m, ErrorKind::Policy)),
+        );
+        out.extend(
+            self.summary_file
+                .as_deref()
+                .and_then(|p| writable(p).err())
+                .map(|m| RunError::new(m, ErrorKind::Input)),
+        );
         out
     }
 }

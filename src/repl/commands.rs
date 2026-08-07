@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 use super::failure::RunFailure;
-use super::{TurnParams, header, run_turn_loop};
+use super::{NO_ACTIVE_SOURCE, TurnParams, header, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
 use crate::config::{Runtime, Source};
 use crate::memory::{list_memories, remember_memories};
@@ -358,7 +358,7 @@ async fn cmd_recover(
     let nudge = format!("{MANUAL_RECOVERY_NUDGE}{note}");
     messages.push(json!({"role": "user", "content": format!("[Runtime note: {nudge}]")}));
     let (Some(source), Some(model)) = (rt.active_source(), rt.model.as_ref()) else {
-        let error = "no active source - use /source to select one";
+        let error = NO_ACTIVE_SOURCE;
         say(ui, Error, error);
         return TurnOutcome::failed(RunError::new(error, ErrorKind::Input));
     };

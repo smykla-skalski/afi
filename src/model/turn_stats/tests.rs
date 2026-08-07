@@ -1,5 +1,6 @@
 use super::*;
 use crate::risk::ApprovalChoice;
+use crate::summary::ErrorKind;
 use crate::term::OutputEvent;
 use tokio_util::sync::CancellationToken;
 

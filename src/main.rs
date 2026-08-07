@@ -10,7 +10,7 @@ use std::process;
 use afi::Runtime;
 use afi::cli::{cli_meta, cli_sessions_with_style};
 use afi::repl::run_repl;
-use afi::summary::{ErrorKind, RunSummary, writable, write_file};
+use afi::summary::{ErrorKind, RunError, RunSummary, writable, write_file};
 use afi::tools::known_tool_names;
 
 fn main() {
@@ -45,17 +45,16 @@ fn main() {
     // otherwise), a summary file it could not write, or an effort level nobody
     // could have meant.
     let refusals = rt.refusals();
-    if !refusals.is_empty() {
+    if let Some(first) = refusals.first() {
         for refusal in &refusals {
-            eprintln!("  \u{2717} {refusal}");
+            eprintln!("  \u{2717} {}", refusal.message);
         }
         // The registry is the answer to a mistyped tool name and to nothing
         // else, so it is spelled out only for that refusal.
-        let mistyped = rt.tool_policy.unknown_names_message().is_some();
-        if mistyped {
+        if rt.tool_policy.unknown_names_message().is_some() {
             eprintln!("    known tools: {}", known_tool_names().join(", "));
         }
-        report_refusal(&rt, &refusals, mistyped);
+        report_refusal(&rt, &refusals, first.kind);
         process::exit(2);
     }
 
@@ -72,26 +71,26 @@ fn main() {
 /// parsing an empty stdout, or reading a summary file still holding a previous
 /// run's object, to find out what happened - which is the substring matching the
 /// summary exists to end.
-fn report_refusal(rt: &Runtime, refusals: &[String], mistyped: bool) {
+///
+/// `kind` is the first refusal's, matching the first-wins rule a failed run
+/// already uses: the reason a run went wrong is the first thing that went wrong.
+fn report_refusal(rt: &Runtime, refusals: &[RunError], kind: ErrorKind) {
     if !rt.summary.is_json() && rt.summary_file.is_none() {
         return;
     }
-    // A tool policy that cannot be honoured is the graver of the two refusals,
-    // since a run that started anyway would have been wider than the command line
-    // asked for. A summary file that cannot be written is the invocation naming a
-    // path this machine has no answer for.
-    let kind = if mistyped || !rt.flag_errors.is_empty() {
-        ErrorKind::Policy
-    } else {
-        ErrorKind::Input
-    };
-    let reason = refusals.join("; ");
+    let reason = refusals
+        .iter()
+        .map(|refusal| refusal.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
     let summary = RunSummary::refused(&reason, kind).to_json();
     if rt.summary.is_json() {
         println!("{summary}");
     }
     // Skipped when the path is itself what the run refused over: the write would
-    // fail in the same words that are already on stderr.
+    // fail in the same words that are already on stderr. Probed again rather than
+    // inferred from the refusal list, so a later refusal of the same kind cannot
+    // silently suppress a write to a path that is perfectly good.
     if let Some(path) = rt
         .summary_file
         .as_deref()

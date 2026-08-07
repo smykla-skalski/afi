@@ -31,6 +31,13 @@ pub const MAGENTA: &str = "\x1b[35m";
 pub const BOLD: &str = "\x1b[1m";
 pub const RESET: &str = "\x1b[0m";
 
+/// What an interactive turn says when there is nothing to send the prompt to.
+///
+/// One string, because the REPL and `/recover` are the same situation to whoever
+/// reads it. The one-shot path says something else on purpose: a piped run has no
+/// `/source` to reach for.
+pub(crate) const NO_ACTIVE_SOURCE: &str = "no active source - use /source to select one";
+
 /// Styled one-line status retained for plain terminals and CLI consumers.
 #[must_use]
 pub fn banner(rt: &Runtime) -> String {

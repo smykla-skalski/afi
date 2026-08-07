@@ -6,6 +6,7 @@
 //! recovery, and compression) lands across phases 5-8.
 
 use crate::summary::{ErrorKind, RunError};
+use crate::term::{MessageKind, UserInterface};
 
 pub mod client;
 pub mod compress;
@@ -43,7 +44,10 @@ pub const TURN_FAILED: &str = "failed";
 /// then - rendered to the ui and dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnOutcome {
-    pub status: String,
+    /// One of the `TURN_*` constants. Borrowed rather than owned, so a status
+    /// can only ever be one of them - and so a turn costs no allocation to
+    /// describe.
+    pub status: &'static str,
     /// Private, so nothing can set a reason without a failing status or the
     /// reverse. [`Self::error`] is the only read, and it covers a `TURN_FAILED`
     /// that reached here by some other route.
@@ -53,9 +57,14 @@ pub struct TurnOutcome {
 impl TurnOutcome {
     /// A turn that ended on `status` without failing.
     #[must_use]
-    pub fn new(status: impl Into<String>) -> Self {
+    pub fn new(status: &'static str) -> Self {
+        // `failed` is the only way to reach TURN_FAILED, so that a status and a
+        // reason cannot disagree. Debug-only because the release fallback in
+        // `error` already covers it, and losing the summary is worse than
+        // reporting it as `internal`.
+        debug_assert_ne!(status, TURN_FAILED, "a failure must carry its reason");
         Self {
-            status: status.into(),
+            status,
             error: None,
         }
     }
@@ -64,9 +73,25 @@ impl TurnOutcome {
     #[must_use]
     pub fn failed(error: RunError) -> Self {
         Self {
-            status: TURN_FAILED.to_string(),
+            status: TURN_FAILED,
             error: Some(error),
         }
+    }
+
+    /// Fail a turn and say so on the ui, in one sentence sent to both.
+    ///
+    /// The log line and the summary's `error` are the same string by
+    /// construction. Reporting them separately is how they drift, and a CI job
+    /// correlating a JSON field against a log line is the work `error_kind`
+    /// exists to remove.
+    pub fn report(ui: &mut dyn UserInterface, message: String, kind: ErrorKind) -> Self {
+        ui.message(MessageKind::Error, message.clone());
+        Self::failed(RunError::new(message, kind))
+    }
+
+    /// Fail a turn the model was paid for but produced no answer from.
+    pub fn no_answer(ui: &mut dyn UserInterface, message: String) -> Self {
+        Self::report(ui, message, ErrorKind::NoAnswer)
     }
 
     /// Whether the turn failed outright.
@@ -92,9 +117,29 @@ impl TurnOutcome {
     }
 }
 
-impl From<String> for TurnOutcome {
-    fn from(status: String) -> Self {
-        Self::new(status)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failure_with_no_reason_still_reports_one() {
+        // Built as a literal because `new` refuses this state and `failed` cannot
+        // produce it - the point is what a release build does if an afi bug ever
+        // gets one past the debug assertion. Reporting `ok: false` with a null
+        // reason would send a caller back to the substring matching `error_kind`
+        // exists to end.
+        let outcome = TurnOutcome {
+            status: TURN_FAILED,
+            error: None,
+        };
+        let error = outcome.error().expect("a failure explains itself");
+        assert_eq!(error.kind, ErrorKind::Internal);
+        assert!(!error.message.is_empty());
+    }
+
+    #[test]
+    fn a_finished_turn_has_nothing_to_report() {
+        assert!(TurnOutcome::new(TURN_DONE).error().is_none());
     }
 }
 

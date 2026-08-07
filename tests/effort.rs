@@ -5,6 +5,7 @@ mod common;
 
 use std::process::{Command, Output, Stdio};
 
+use afi::summary::{ErrorKind, RunError};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -160,7 +161,10 @@ fn an_unknown_level_refuses_to_start() {
         let rt = common::build(&args, &[LOCAL, ANTHROPIC_KEY]);
         let refusals = rt.refusals();
         assert_eq!(refusals.len(), 1, "{args:?} -> {refusals:?}");
-        assert!(refusals[0].contains("--effort"), "{refusals:?}");
+        assert!(refusals[0].message.contains("--effort"), "{refusals:?}");
+        // An effort this source has no answer for is the invocation, not a tool
+        // policy - a caller retries the two differently.
+        assert_eq!(refusals[0].kind, ErrorKind::Input, "{refusals:?}");
         assert_eq!(rt.sources["anthropic"].extra_body, None);
     }
 }
@@ -172,13 +176,17 @@ fn an_unknown_variable_refuses_too() {
     let rt = common::build(&["afi"], &[LOCAL, ANTHROPIC_KEY, ("AFI_EFFORT", "highest")]);
     let refusals = rt.refusals();
     assert_eq!(refusals.len(), 1, "{refusals:?}");
-    assert!(refusals[0].contains("AFI_EFFORT"), "{refusals:?}");
+    assert!(refusals[0].message.contains("AFI_EFFORT"), "{refusals:?}");
+    assert_eq!(refusals[0].kind, ErrorKind::Input, "{refusals:?}");
 }
 
 #[test]
 fn a_missing_value_refuses_rather_than_being_dropped() {
     let rt = common::build(&["afi", "--effort", "--yolo"], &[LOCAL, ANTHROPIC_KEY]);
-    assert_eq!(rt.refusals(), vec!["--effort needs a value".to_string()]);
+    assert_eq!(
+        rt.refusals(),
+        vec![RunError::new("--effort needs a value", ErrorKind::Input)]
+    );
     // Not consumed, so the flag after it still applies.
     assert!(rt.approval.yolo);
 }

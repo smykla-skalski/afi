@@ -19,7 +19,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::config::{Federation, IdentitySource, NOOP_KEY, Protocol, Source};
-use crate::model::client::{ClientError, transport_error};
+use crate::model::client::{BODY_PREVIEW_CHARS, ClientError, transport_error, transport_error_at};
 
 /// Pinned API version. Anthropic requires this on every request.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -31,9 +31,6 @@ const FEDERATION_BETA: &str = "oauth-2025-04-20,oidc-federation-2026-04-01";
 const OIDC_AUDIENCE: &str = "https://api.anthropic.com";
 /// Re-mint this long before expiry so a request never races the deadline.
 const EXPIRY_SKEW: Duration = Duration::from_mins(1);
-/// How much of a refusal body to quote, matching what the REPL prints for an
-/// HTTP error: enough to name the cause, not enough to bury it.
-const BODY_PREVIEW_CHARS: usize = 200;
 
 /// Build the auth headers for an Anthropic request.
 ///
@@ -237,12 +234,9 @@ async fn github_identity_token(
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| transport_error(format!("OIDC token request failed: {e}"), &e))?;
+        .map_err(|e| transport_error_at(Some("OIDC token request failed"), &e))?;
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+    let body = response.text().await.map_err(|e| transport_error(&e))?;
     if !status.is_success() {
         // The body here is an Actions error, not a credential. A 403 is the
         // workflow lacking `permissions: id-token: write`.
@@ -282,12 +276,9 @@ async fn exchange(
         .json(&body)
         .send()
         .await
-        .map_err(|e| transport_error(format!("token exchange failed: {e}"), &e))?;
+        .map_err(|e| transport_error_at(Some("token exchange failed"), &e))?;
     let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+    let text = response.text().await.map_err(|e| transport_error(&e))?;
     if !status.is_success() {
         return Err(refused_credential(
             "the Anthropic token exchange refused the identity token",

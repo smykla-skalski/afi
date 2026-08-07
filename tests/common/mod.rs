@@ -1,10 +1,26 @@
 //! Shared test helpers: build a `Runtime` from an explicit env + args, with
-//! no leakage from the real `~/.env` or shell env.
+//! no leakage from the real `~/.env` or shell env, plus the canned HTTP server
+//! the end-to-end tests drive a real `afi` process against.
+//!
+//! The server pieces live here because every test that needs one needs the same
+//! three: read a request without answering early, frame a reply as SSE, and pull
+//! the summary back off stdout. What each test varies is which reply it sends,
+//! which is the part that stays in the test.
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read};
+use std::net::TcpStream;
 use std::path::Path;
+use std::process::Output;
 
 use afi::Runtime;
+use serde_json::Value;
+
+/// The answer a context-window probe gets. afi asks on the side and falls back
+/// when the endpoint is not there, so a canned server need not implement it.
+#[allow(dead_code)]
+pub const NOT_FOUND: &str =
+    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 /// Build a runtime with a clean env (only the vars you pass in).
 ///
@@ -34,4 +50,69 @@ pub fn build_with_env_file(
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     Runtime::build(&args, env_map, env_file)
+}
+
+/// Read past a request's headers and the body they announce, returning the body.
+///
+/// Draining matters even when the body is unwanted: answering before the client
+/// has finished sending races the write, and the failure looks like a broken
+/// stream rather than a test that replied too early.
+#[allow(dead_code)]
+pub fn read_request_body(reader: &mut BufReader<TcpStream>) -> String {
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0u8; length];
+    let _ = reader.read_exact(&mut body);
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+/// One HTTP response with an explicit length, so the client never waits on EOF.
+#[allow(dead_code)]
+pub fn http_response(status: &str, content_type: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// A 200 carrying `events` as an SSE stream, terminated the way a provider ends
+/// one.
+#[allow(dead_code)]
+pub fn sse_response<I>(events: I) -> String
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let mut body = String::new();
+    for event in events {
+        body.push_str("data: ");
+        body.push_str(event.as_ref());
+        body.push_str("\n\n");
+    }
+    body.push_str("data: [DONE]\n\n");
+    http_response("200 OK", "text/event-stream", &body)
+}
+
+/// The run summary from a finished process's stdout.
+///
+/// Found by looking for the JSON line rather than by taking the last one: the
+/// rendered run shares stdout, and a run that printed nothing else would be the
+/// only case a positional rule got right.
+#[allow(dead_code)]
+pub fn summary_of(output: &Output) -> Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .unwrap_or_else(|| panic!("no JSON summary on stdout: {stdout}"));
+    serde_json::from_str(line).expect("the summary must be JSON")
 }

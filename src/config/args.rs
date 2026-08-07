@@ -4,6 +4,8 @@
 //! session state it feeds. The `sessions` subcommand and the in-REPL slash
 //! commands are parsed elsewhere.
 
+use crate::summary::{ErrorKind, RunError};
+
 /// Parsed CLI args - the subset that affects initial state. The `sessions`
 /// subcommand and in-REPL slash commands are handled separately.
 #[derive(Debug, Default, Clone)]
@@ -23,7 +25,11 @@ pub struct ParsedArgs {
     pub effort: Option<String>,
     /// Flags that were given wrongly. Only the flags whose silent fallback
     /// loses something the caller asked for record here - see `set_required`.
-    pub flag_errors: Vec<String>,
+    ///
+    /// Each carries the kind the summary reports, decided by the flag that
+    /// raised it: a tool policy that would end up wider than the command line
+    /// asked for is `Policy`, and a path this run cannot use is `Input`.
+    pub flag_errors: Vec<RunError>,
 }
 
 /// Parse argv into the subset that affects runtime construction.
@@ -95,9 +101,18 @@ fn apply_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
 /// and is left unconsumed so the following flag still applies. A bare `-` is
 /// refused here as well, unlike on the `set_opt` path: none of these flags
 /// takes one, and a summary file literally named `-` is a typo every time.
-fn set_required(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> Option<String> {
+///
+/// `kind` is what the summary reports for this flag, since the flags that reach
+/// here fail for different reasons and a caller retries them differently.
+fn set_required(
+    out: &mut ParsedArgs,
+    flag: &str,
+    value: Option<&str>,
+    kind: ErrorKind,
+) -> Option<String> {
     let Some(v) = value.filter(|v| !v.starts_with('-')) else {
-        out.flag_errors.push(format!("{flag} needs a value"));
+        out.flag_errors
+            .push(RunError::new(format!("{flag} needs a value"), kind));
         return None;
     };
     Some(v.to_string())
@@ -119,12 +134,14 @@ fn set_required(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> Option
 /// tool-policy flags keep the looser rule too, because a blank list there is
 /// documented as "every tool" rather than as a mistake.
 fn set_summary_file(out: &mut ParsedArgs, value: Option<&str>) -> bool {
-    let Some(path) = set_required(out, "--summary-file", value) else {
+    let Some(path) = set_required(out, "--summary-file", value, ErrorKind::Input) else {
         return false;
     };
     if path.trim().is_empty() {
-        out.flag_errors
-            .push("--summary-file needs a value".to_string());
+        out.flag_errors.push(RunError::new(
+            "--summary-file needs a value",
+            ErrorKind::Input,
+        ));
         // Consumed all the same: the argument was there, it just said nothing.
         return true;
     }
@@ -137,7 +154,9 @@ fn set_summary_file(out: &mut ParsedArgs, value: Option<&str>) -> bool {
 /// The level itself is validated later, against the sources it has to reach -
 /// see `config::effort`. All this decides is that one was given.
 fn set_effort(out: &mut ParsedArgs, value: Option<&str>) -> bool {
-    let Some(level) = set_required(out, "--effort", value) else {
+    // `Input`: an effort with no level is the invocation being wrong, not a tool
+    // policy afi cannot honour, and a caller retries the two differently.
+    let Some(level) = set_required(out, "--effort", value, ErrorKind::Input) else {
         return false;
     };
     out.effort = Some(level);
@@ -146,7 +165,7 @@ fn set_effort(out: &mut ParsedArgs, value: Option<&str>) -> bool {
 
 /// Set one of the two tool-policy flags. Returns whether a value was consumed.
 fn set_tool_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> bool {
-    let Some(v) = set_required(out, flag, value) else {
+    let Some(v) = set_required(out, flag, value, ErrorKind::Policy) else {
         return false;
     };
     if flag == "--allowed-tools" {

@@ -138,7 +138,7 @@ pub(super) async fn stream(
     let response = authed_post(http, source, chat_url(source), &body)
         .send()
         .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+        .map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let body = limited_error_body(response).await;
@@ -165,16 +165,13 @@ pub(super) async fn complete(
         .timeout(Duration::from_secs(timeout))
         .send()
         .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+        .map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
         return Err(ClientError::Http { status, body });
     }
-    let text = response
-        .text()
-        .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+    let text = response.text().await.map_err(|e| transport_error(&e))?;
     record_completion_usage(model, &text);
     Ok(text)
 }
@@ -220,10 +217,7 @@ pub(super) async fn get_props(http: &Client, source: &Source) -> Result<Value, C
 }
 
 async fn json_response(request: reqwest::RequestBuilder) -> Result<Value, ClientError> {
-    let response = request
-        .send()
-        .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+    let response = request.send().await.map_err(|e| transport_error(&e))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
@@ -254,7 +248,7 @@ pub(super) async fn overrun_probe(
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| transport_error(e.to_string(), &e))?;
+        .map_err(|e| transport_error(&e))?;
     // The probe expects a 400 with the context limit in the error, so the body
     // is returned either way for the caller to parse.
     Ok(response.text().await.unwrap_or_default())

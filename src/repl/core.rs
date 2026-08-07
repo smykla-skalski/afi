@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use super::commands::handle_slash_command;
 use super::failure::RunFailure;
 use super::report::report_run;
-use super::{CommandResult, header};
+use super::{CommandResult, NO_ACTIVE_SOURCE, header};
 use crate::approval::ApprovalState;
 use crate::cli::session_id_from_args;
 use crate::config::{Runtime, Source};
@@ -172,7 +172,7 @@ impl ReplCore {
             // A turn that never ran is still a turn that never answered. This used
             // to return quietly, so a piped run with nothing configured printed the
             // error, reported ok:true, and exited 0 - CI read that as a pass.
-            let error = "no active source - use /source to select one".to_string();
+            let error = NO_ACTIVE_SOURCE.to_string();
             ui.message(MessageKind::Error, error.clone());
             self.failure
                 .record_error(RunError::new(error, ErrorKind::Input));
@@ -199,7 +199,7 @@ impl ReplCore {
 
     /// Whether any turn in this session failed outright.
     pub(crate) fn failed(&self) -> bool {
-        self.failure.failed()
+        self.failure.error().is_some()
     }
 
     /// Record a failure the session hit outside a turn, so the summary reports it

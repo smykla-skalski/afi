@@ -36,7 +36,13 @@ pub fn discover_sources<S: BuildHasher>(
 }
 
 /// The configured source names: an explicit `AFI_SOURCES` list, else
-/// auto-discovered from `AFI_SOURCE_*_BASE_URL` keys (sorted).
+/// auto-discovered from `AFI_SOURCE_*_BASE_URL` and `AFI_SOURCE_*_PROTOCOL`
+/// keys (sorted, deduplicated).
+///
+/// `_PROTOCOL` counts as evidence of a source because a Bedrock one needs no
+/// url - its Region names the endpoint. A source discovered by `_PROTOCOL`
+/// alone on any other protocol still has no url, and `configured_source` drops
+/// it, so nothing new is registered.
 fn source_names<S: BuildHasher>(env: &HashMap<String, String, S>) -> Vec<String> {
     if let Some(raw) = env.get("AFI_SOURCES").filter(|r| !r.trim().is_empty()) {
         return raw
@@ -48,12 +54,14 @@ fn source_names<S: BuildHasher>(env: &HashMap<String, String, S>) -> Vec<String>
     let mut found: Vec<String> = env
         .keys()
         .filter_map(|k| {
-            k.strip_prefix("AFI_SOURCE_")
-                .and_then(|rest| rest.strip_suffix("_BASE_URL"))
+            let rest = k.strip_prefix("AFI_SOURCE_")?;
+            rest.strip_suffix("_BASE_URL")
+                .or_else(|| rest.strip_suffix("_PROTOCOL"))
                 .map(str::to_lowercase)
         })
         .collect();
     found.sort();
+    found.dedup();
     found
 }
 
@@ -67,13 +75,21 @@ pub(super) fn source_prefix(name: &str) -> String {
 }
 
 /// Build a `Source` for `name` from its `AFI_SOURCE_<NAME>_*` vars, or `None`
-/// when no `BASE_URL` is set.
+/// when it has neither a `BASE_URL` nor a protocol that supplies one.
 fn configured_source<S: BuildHasher>(
     env: &HashMap<String, String, S>,
     name: &str,
 ) -> Option<Source> {
     let p = source_prefix(name);
-    let base_url = env.get(&format!("{p}BASE_URL"))?.clone();
+    let protocol = env
+        .get(&format!("{p}PROTOCOL"))
+        .map_or_else(Protocol::default, |raw| Protocol::from_env_value(raw, env));
+    // A source with no url of its own is only a source if its protocol derives
+    // one, which today means Bedrock, where the Region names the endpoint.
+    let base_url = env
+        .get(&format!("{p}BASE_URL"))
+        .cloned()
+        .or_else(|| protocol.default_base_url())?;
     let api_key =
         envfile::resolve_api_key(env, env.get(&format!("{p}API_KEY")).map(String::as_str));
     let model = env.get(&format!("{p}MODEL")).cloned();
@@ -82,9 +98,6 @@ fn configured_source<S: BuildHasher>(
         env.get(&format!("{p}APP_NAME")).map(String::as_str),
         env.get(&format!("{p}APP_URL")).map(String::as_str),
     );
-    let protocol = env
-        .get(&format!("{p}PROTOCOL"))
-        .map_or(Protocol::default(), |raw| Protocol::from_env_value(raw));
     Some(
         Source::new(name, base_url, api_key, model, extra_body, http_headers)
             .with_protocol(protocol),

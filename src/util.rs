@@ -1,6 +1,8 @@
-//! Small env-var helpers (`_env_int` / `_env_float` in the Python original).
+//! Small env-var helpers (`_env_int` / `_env_float` in the Python original),
+//! plus the hex encoding two digest call sites share.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::hash::BuildHasher;
 
 use chrono::Local;
@@ -45,4 +47,16 @@ pub fn env_float<S: BuildHasher>(
         Some(n) => n,
         None => default,
     }
+}
+
+/// Lowercase hex, the encoding both digest call sites need - the `--version`
+/// self-digest and `SigV4`'s payload hash and signature.
+#[must_use]
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // Infallible: a String write cannot fail.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }

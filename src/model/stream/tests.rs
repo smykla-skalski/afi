@@ -157,6 +157,33 @@ fn parse_sse_line_reasoning() {
     assert_eq!(chunk.reasoning_content, Some("thinking...".to_string()));
 }
 
+/// `reasoning` is the spelling `OpenRouter` and Bedrock's open-weight models
+/// use for the same thing.
+#[test]
+fn parse_sse_line_reasoning_under_the_other_spelling() {
+    let line = r#"data: {"choices":[{"delta":{"reasoning":"thinking..."}}]}"#;
+    let chunk = parse_sse_line(line).unwrap();
+    assert_eq!(chunk.reasoning_content, Some("thinking...".to_string()));
+}
+
+/// A serializer that emits every delta field writes an explicit null for the
+/// spelling it does not use. Taking that as an answer would drop the reasoning
+/// of any provider that sends both keys.
+#[test]
+fn an_explicit_null_does_not_shadow_the_other_spelling() {
+    let line = r#"data: {"choices":[{"delta":{"content":null,"reasoning_content":null,"reasoning":"thinking..."}}]}"#;
+    let chunk = parse_sse_line(line).unwrap();
+    assert_eq!(chunk.reasoning_content, Some("thinking...".to_string()));
+}
+
+/// A provider that makes `reasoning` an object is skipped, not rendered as JSON.
+#[test]
+fn a_non_string_reasoning_field_is_ignored() {
+    let line = r#"data: {"choices":[{"delta":{"reasoning":{"summary":"x"}}}]}"#;
+    let chunk = parse_sse_line(line).unwrap();
+    assert_eq!(chunk.reasoning_content, None);
+}
+
 #[test]
 fn parse_sse_line_usage() {
     let line = r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}"#;

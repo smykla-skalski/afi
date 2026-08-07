@@ -8,6 +8,7 @@ use regex::Regex;
 use serde_json::{Map, Value};
 
 mod args;
+mod bedrock;
 mod builtins;
 mod effort;
 mod file;
@@ -17,6 +18,7 @@ mod sources;
 mod system_prompt;
 mod tools;
 pub use args::{ParsedArgs, parse_args};
+pub use bedrock::Bedrock;
 pub use effort::Effort;
 pub use file::{FileSettings, Origin, config_files};
 pub use protocol::{Federation, IdentitySource, NOOP_KEY, Protocol, is_placeholder};
@@ -174,6 +176,13 @@ impl Source {
                 workspace_id: federation.workspace_id.as_deref(),
                 federation_rule_id: &federation.rule_id,
             },
+            // Ahead of the placeholder guard below: this protocol has no static
+            // key to store, so `api_key` holds the placeholder even though the
+            // run is fully credentialed and billed to an AWS account.
+            Protocol::Bedrock(bedrock) => RunAuth::SigV4 {
+                region: bedrock.region.as_deref().unwrap_or_default(),
+                access_key_id: bedrock.access_key_id.as_deref().unwrap_or_default(),
+            },
             // The llama.cpp case: `Source::new` stores the placeholder when
             // nothing was configured, so a keyless local server would otherwise
             // claim a credential it never had.
@@ -183,6 +192,13 @@ impl Source {
             // `AnthropicApiKey` only in which header carries it.
             Protocol::AnthropicApiKey | Protocol::OpenAiCompat => RunAuth::ApiKey,
         }
+    }
+
+    /// Why this source cannot be used as configured, naming what is absent.
+    /// `None` when it can.
+    #[must_use]
+    pub fn config_error(&self) -> Option<String> {
+        self.protocol.config_error(&self.name)
     }
 
     /// True if this source points at a host on the local machine or LAN

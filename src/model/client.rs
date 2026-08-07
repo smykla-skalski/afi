@@ -4,7 +4,9 @@
 //! Two wire protocols live in submodules - [`openai`] for `/chat/completions`
 //! and [`anthropic`] for the Messages API. Which one serves a request is
 //! resolved per call from `Source::protocol`, because `/source` can switch
-//! endpoints mid-session.
+//! endpoints mid-session. Amazon Bedrock is the first, with an AWS `SigV4`
+//! signature in place of a credential header; [`bedrock`] holds only that
+//! difference.
 //!
 //! A `ChatClient` trait abstracts the interface so tests can mock it without
 //! a live server.
@@ -28,6 +30,7 @@ pub type ChatCompletionStream =
     Pin<Box<dyn Stream<Item = Result<StreamChunk, ClientError>> + Send>>;
 
 mod anthropic;
+mod bedrock;
 mod openai;
 mod redact;
 mod sse;
@@ -190,6 +193,29 @@ fn unsupported(source: &Source, what: &str) -> ClientError {
         "{what} is not available on the Anthropic protocol (source {})",
         source.name
     ))
+}
+
+/// Turn credential-bearing name/value pairs into a `HeaderMap`.
+///
+/// Shared by both protocols that build their auth headers by hand - Anthropic's
+/// `x-api-key`/bearer set and Bedrock's `SigV4` set - so the rule that a
+/// rejected value is never echoed holds in one place rather than two.
+fn into_header_map(pairs: Vec<(&str, String)>) -> Result<HeaderMap, ClientError> {
+    let mut map = HeaderMap::new();
+    for (name, value) in pairs {
+        // Neither failure is a wire-parse problem, so neither is reported as one.
+        // The names are afi's own literals, so a rejected one is a bug; the
+        // values are credentials, and one copied with a trailing newline lands
+        // here. Left to reqwest, both would surface at `send` and be blamed on an
+        // unreachable server.
+        let header = HeaderName::try_from(name)
+            .map_err(|e| ClientError::Internal(format!("bad header name {name}: {e}")))?;
+        // The error deliberately omits the value: it may be a credential.
+        let header_value = HeaderValue::try_from(value)
+            .map_err(|_| ClientError::Auth(format!("invalid characters in {name} value")))?;
+        map.insert(header, header_value);
+    }
+    Ok(map)
 }
 
 /// Read a failing response's body, bounded, with the credentials the request

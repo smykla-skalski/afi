@@ -1,5 +1,5 @@
-//! `Runtime` session state and source discovery. Argument parsing lives in
-//! `args`.
+//! `Runtime` session state. Source discovery lives in `discovery`, argument
+//! parsing in `args`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -217,7 +217,7 @@ impl Runtime {
         let start = parsed
             .source
             .or_else(|| rt.env.get("AFI_ACTIVE").cloned())
-            .or_else(|| rt.source_order.first().cloned());
+            .or_else(|| rt.default_source());
         if let Some(name) = start {
             rt.switch_source(&name, None);
         }
@@ -229,6 +229,31 @@ impl Runtime {
         effort::apply_to_sources(&mut rt, effort);
 
         rt
+    }
+
+    /// The source to start on when nothing named one: the first in
+    /// `AFI_SOURCES` order that can actually be used, else the first outright.
+    ///
+    /// Skipping the unusable ones matters because a source that cannot be used
+    /// refuses the whole run, and the startup default is a guess afi makes
+    /// rather than an instruction it was given. A Bedrock source whose Region
+    /// and keys are not exported - an ordinary shell before `aws sso login` -
+    /// sorts ahead of `local` on name alone, and without this it would take
+    /// every other configured source down with it.
+    ///
+    /// An *explicit* `--source` or `AFI_ACTIVE` is never second-guessed: asking
+    /// for a source that cannot sign is answered with the refusal naming what
+    /// is missing, which is the whole point of that check.
+    fn default_source(&self) -> Option<String> {
+        self.source_order
+            .iter()
+            .find(|name| {
+                self.sources
+                    .get(*name)
+                    .is_some_and(|source| source.config_error().is_none())
+            })
+            .or_else(|| self.source_order.first())
+            .cloned()
     }
 
     /// Swap the active source. Reassigns `active` + `model`. Returns `false`
@@ -300,6 +325,11 @@ impl Runtime {
     /// reason is known. Deriving it afterwards from which field was non-empty
     /// would put the caller's classification back at one remove from the thing
     /// being classified, which is what `error_kind` exists to end.
+    ///
+    /// Only the *active* source is checked for a credential it cannot assemble.
+    /// A half-configured source nobody switches to costs the run nothing, and
+    /// refusing to start over one would make an unused `AWS_ACCESS_KEY_ID` in
+    /// the shell enough to block every run.
     #[must_use]
     pub fn refusals(&self) -> Vec<RunError> {
         let mut out = self.flag_errors.clone();
@@ -321,6 +351,13 @@ impl Runtime {
                 .as_ref()
                 .err()
                 .map(|m| RunError::new(m.clone(), ErrorKind::Input)),
+        );
+        // `Auth`: the source the run starts on cannot assemble a credential, and
+        // no retry assembles one either.
+        out.extend(
+            self.active_source()
+                .and_then(Source::config_error)
+                .map(|m| RunError::new(m, ErrorKind::Auth)),
         );
         out
     }

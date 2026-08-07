@@ -11,7 +11,7 @@ use std::hash::BuildHasher;
 
 use crate::envfile;
 
-use super::{Federation, Protocol, Source, build_http_headers, parse_extra_body};
+use super::{Bedrock, Federation, Protocol, Source, build_http_headers, parse_extra_body};
 
 /// Anthropic's API root. Deliberately without a `/v1` suffix; the client
 /// normalizes either form.
@@ -19,6 +19,10 @@ const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 /// Current Sonnet generation: near-Opus quality on coding and agentic work at
 /// Sonnet pricing. Override with `AFI_ANTHROPIC_MODEL`.
 const ANTHROPIC_MODEL: &str = "claude-sonnet-5";
+/// The strongest coder among Bedrock's open-weight models, and the same family
+/// the `together` and `openrouter` built-ins default to. Override with
+/// `AFI_BEDROCK_MODEL`.
+const BEDROCK_MODEL: &str = "zai.glm-5";
 
 /// Register every built-in source whose credentials are configured.
 pub(super) fn add_builtin_sources<S: BuildHasher>(
@@ -29,6 +33,43 @@ pub(super) fn add_builtin_sources<S: BuildHasher>(
     add_together_source(env, sources, order);
     add_openrouter_source(env, sources, order);
     add_anthropic_source(env, sources, order);
+    add_bedrock_source(env, sources, order);
+}
+
+/// Register the built-in `bedrock` source when the environment carries any
+/// part of an AWS credential.
+///
+/// Deliberately not gated on a *complete* credential, unlike every other
+/// built-in. The others hold one secret, so "absent" and "unusable" are the
+/// same state and a source that cannot work is better left unregistered. A
+/// Bedrock source needs a Region and two credential halves, and half a set is
+/// a mistake worth naming - which `Runtime::refusals` can only do for a source
+/// that exists.
+fn add_bedrock_source<S: BuildHasher>(
+    env: &HashMap<String, String, S>,
+    sources: &mut HashMap<String, Source>,
+    order: &mut Vec<String>,
+) {
+    if sources.contains_key("bedrock") {
+        return;
+    }
+    let bedrock = Bedrock::from_env(env);
+    if !bedrock.has_any_credential() {
+        return;
+    }
+    // Empty only when no Region is set either, which the refusal names before
+    // anything reads it.
+    let base_url = env_value(env, &["AFI_BEDROCK_BASE_URL"])
+        .or_else(|| bedrock.base_url())
+        .unwrap_or_default();
+    let model = env_value(env, &["AFI_BEDROCK_MODEL"]).unwrap_or_else(|| BEDROCK_MODEL.to_string());
+    let extra_body = parse_extra_body(env.get("AFI_BEDROCK_EXTRA_BODY").map(String::as_str));
+    // No api key: SigV4 computes the credential per request, and `Source::new`
+    // stores the `sk-noop` placeholder, which this protocol never sends.
+    let src = Source::new("bedrock", base_url, None, Some(model), extra_body, None)
+        .with_protocol(Protocol::Bedrock(Box::new(bedrock)));
+    sources.insert("bedrock".to_string(), src);
+    order.push("bedrock".to_string());
 }
 
 /// Register the built-in `anthropic` source when any credential resolves.

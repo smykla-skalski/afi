@@ -60,30 +60,50 @@ fn protocol_defaults_to_openai_compat() {
 
 #[test]
 fn protocol_from_env_value_parses_known_names() {
-    assert_eq!(Protocol::from_env_value(""), Protocol::OpenAiCompat);
-    assert_eq!(Protocol::from_env_value("openai"), Protocol::OpenAiCompat);
     assert_eq!(
-        Protocol::from_env_value("openai-compat"),
+        Protocol::from_env_value("", &env_map(&[])),
         Protocol::OpenAiCompat
     );
     assert_eq!(
-        Protocol::from_env_value("anthropic"),
+        Protocol::from_env_value("openai", &env_map(&[])),
+        Protocol::OpenAiCompat
+    );
+    assert_eq!(
+        Protocol::from_env_value("openai-compat", &env_map(&[])),
+        Protocol::OpenAiCompat
+    );
+    assert_eq!(
+        Protocol::from_env_value("anthropic", &env_map(&[])),
         Protocol::AnthropicApiKey
     );
     assert_eq!(
-        Protocol::from_env_value("anthropic-api-key"),
+        Protocol::from_env_value("anthropic-api-key", &env_map(&[])),
         Protocol::AnthropicApiKey
     );
     assert_eq!(
-        Protocol::from_env_value("anthropic-oauth"),
+        Protocol::from_env_value("anthropic-oauth", &env_map(&[])),
         Protocol::AnthropicOAuth
     );
 }
 
 #[test]
+fn protocol_from_env_value_reads_bedrock_credentials_out_of_the_same_map() {
+    let env = env_map(&[
+        ("AWS_REGION", "us-east-1"),
+        ("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE"),
+        ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"),
+    ]);
+    let Protocol::Bedrock(bedrock) = Protocol::from_env_value("aws-bedrock-openai", &env) else {
+        panic!("aws-bedrock-openai must select the Bedrock protocol");
+    };
+    assert_eq!(bedrock.region.as_deref(), Some("us-east-1"));
+    assert_eq!(bedrock.missing(), Vec::<&str>::new());
+}
+
+#[test]
 fn protocol_from_env_value_is_case_and_space_insensitive() {
     assert_eq!(
-        Protocol::from_env_value("  Anthropic-OAuth "),
+        Protocol::from_env_value("  Anthropic-OAuth ", &env_map(&[])),
         Protocol::AnthropicOAuth
     );
 }
@@ -92,7 +112,7 @@ fn protocol_from_env_value_is_case_and_space_insensitive() {
 fn protocol_from_env_value_falls_back_on_typo() {
     // A typo must never silently reroute a source to a different wire protocol.
     assert_eq!(
-        Protocol::from_env_value("anthropik"),
+        Protocol::from_env_value("anthropik", &env_map(&[])),
         Protocol::OpenAiCompat
     );
 }
@@ -118,6 +138,18 @@ fn with_protocol_round_trips_and_classifies() {
     ));
     assert!(fed.is_anthropic());
     assert!(fed.protocol.is_bearer());
+}
+
+/// Bedrock is neither Anthropic nor bearer: it speaks the OpenAI-compatible
+/// shape, and its credential is a per-request signature rather than any header
+/// afi holds.
+#[test]
+fn bedrock_is_classified_as_neither_anthropic_nor_bearer() {
+    let bedrock = mk_source("https://bedrock-runtime.us-east-1.amazonaws.com/v1")
+        .with_protocol(Protocol::Bedrock(Box::default()));
+    assert!(!bedrock.is_anthropic());
+    assert!(!bedrock.protocol.is_bearer());
+    assert!(bedrock.protocol.is_bedrock());
 }
 
 // --- Federation::from_env -----------------------------------------------------

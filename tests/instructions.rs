@@ -11,37 +11,26 @@
 //! binary only to stay under the per-file line cap.
 
 use std::fs;
-use std::net::{SocketAddr, TcpListener};
-use std::sync::Arc;
+use std::net::SocketAddr;
 
 use tempfile::TempDir;
 
 mod common;
 
-use common::endpoint::{Bodies, sent_with_roles, serve, system_sent, text_answer};
+use common::endpoint::{Bodies, FIRST, endpoint, sent_with_roles, system_sent, text_answer};
 use common::{DEEP_RULE, OUTSIDE_RULE, ROOT_RULE, checkout, instruction_paths, repo, run_afi_in};
-
-/// The first request is the only one these runs make.
-const FIRST: usize = 0;
 
 /// One server for the runs that need one, sequential so each reads back the body
 /// it alone sent.
 #[test]
 fn the_instructions_a_run_asks_for_are_what_it_sends() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
-    let addr = listener
-        .local_addr()
-        .expect("the endpoint must have an addr");
-    let bodies: Bodies = Arc::default();
-    let server = serve(listener, &bodies, |_| text_answer("finished"));
+    let (addr, bodies) = endpoint(|_| text_answer("finished"));
 
     standing_in_a_checkout_and_asking_for_nothing_reads_nothing(addr, &bodies);
     the_walk_sends_both_files_deepest_last(addr, &bodies);
     the_operator_file_leads_the_project_chain(addr, &bodies);
     named_files_are_sent_and_the_tree_is_not_walked(addr, &bodies);
     the_variable_works_and_none_turns_it_off(addr, &bodies);
-
-    drop(server);
 }
 
 /// The claim the whole setting rests on. These files are written by whoever wrote

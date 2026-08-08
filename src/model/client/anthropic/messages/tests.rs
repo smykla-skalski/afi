@@ -1,5 +1,5 @@
 //! Translator tests. Inputs are copied from the real producer shapes in
-//! `turn_finalize`, `turn_dispatch`, `repl/core`, and `apply_compression` so
+//! `turn_finalize`, `turn_dispatch`, `repl/core`, and `CompressionPlan::apply` so
 //! they stay honest about what afi actually puts in history.
 
 use super::*;

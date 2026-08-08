@@ -8,6 +8,7 @@
 pub mod bash;
 pub mod policy;
 pub mod protocol;
+pub mod target;
 
 use std::fmt::Write as _;
 use std::fs;

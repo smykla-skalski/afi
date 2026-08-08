@@ -8,8 +8,8 @@
 // none of this.
 #![allow(dead_code)]
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -164,15 +164,54 @@ fn messages_of(bodies: &Bodies, nth: usize) -> Vec<serde_json::Value> {
         .clone()
 }
 
+/// Read the first recorded request, which is the only one a single-turn run sends.
+pub const FIRST: usize = 0;
+
 /// Read the last recorded request rather than a numbered one.
 pub const LAST: usize = usize::MAX;
+
+/// A bound endpoint answering with `reply`, and the bodies it records.
+///
+/// The join handle stays here rather than going back to the caller, because dropping
+/// one does not stop a thread: it detaches it. Every caller that took the handle only
+/// to `drop` it at the end of the test was writing a line that did nothing, and the
+/// line read like a shutdown. The thread parks on `accept` until the test binary exits,
+/// which is what these tests want - the runs are sequential and each reads back the
+/// body it alone sent.
+pub fn endpoint<R>(reply: R) -> (SocketAddr, Bodies)
+where
+    R: Fn(&str) -> String + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
+    let addr = listener
+        .local_addr()
+        .expect("the endpoint must have an addr");
+    let bodies: Bodies = Arc::default();
+    drop(serve(listener, &bodies, reply));
+    (addr, bodies)
+}
+
+/// Answers every user turn with a `read_file` on the api crate's source, which is what
+/// the subtree-loading tests drive.
+pub fn reads_the_api_crate(body: &str) -> String {
+    tool_call_per_user_turn(
+        body,
+        "read_file",
+        &serde_json::json!({"path": "crates/api/src/lib.rs"}),
+    )
+}
+
+/// The contents of every tool result and user message in the last recorded request.
+pub fn tool_results(bodies: &Bodies) -> Vec<String> {
+    sent_with_roles(bodies, LAST, &["tool", "user"])
+}
 
 /// Answer `/chat/completions` with `reply(body)`, recording every body first.
 ///
 /// `reply` takes the request body rather than a counter: afi probes the context
 /// window on the side, and counting requests hands the probe the answer meant
 /// for the first turn.
-pub fn serve<R>(listener: TcpListener, bodies: &Bodies, reply: R) -> JoinHandle<()>
+fn serve<R>(listener: TcpListener, bodies: &Bodies, reply: R) -> JoinHandle<()>
 where
     R: Fn(&str) -> String + Send + 'static,
 {
@@ -190,7 +229,7 @@ fn answer<R: Fn(&str) -> String>(mut stream: TcpStream, bodies: &Bodies, reply: 
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
-    let body = read_body(&mut reader);
+    let body = super::read_request_body(&mut reader);
     let response = if request_line.contains("/chat/completions") {
         bodies
             .lock()
@@ -202,33 +241,11 @@ fn answer<R: Fn(&str) -> String>(mut stream: TcpStream, bodies: &Bodies, reply: 
         } else {
             "application/json"
         };
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-            answer.len()
-        )
+        super::http_response("200 OK", kind, &answer)
     } else {
-        // The context-window probe. 404 is a fine answer; afi falls back.
-        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+        // The context-window probe, which `NOT_FOUND` documents afi falls back from.
+        super::NOT_FOUND.to_string()
     };
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
-}
-
-/// Read past the headers and whatever body they announce, so the client is not
-/// answered before it has finished sending.
-fn read_body(reader: &mut BufReader<TcpStream>) -> String {
-    let mut length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-            break;
-        }
-        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            length = value.trim().parse().unwrap_or(0);
-        }
-    }
-    let mut body = vec![0u8; length];
-    let _ = reader.read_exact(&mut body);
-    String::from_utf8_lossy(&body).into_owned()
 }

@@ -234,17 +234,26 @@ fn discover(cwd: Option<&Path>, env: &HashMap<String, String>) -> Result<Vec<Pat
 /// an ancestor of `from` - both callers pass one - or the climb runs to the
 /// filesystem root.
 pub(super) fn chain_up<'a>(from: &'a Path, stop: &Path) -> Vec<&'a Path> {
-    let mut chain: Vec<&Path> = Vec::new();
-    let mut at = Some(from);
-    while let Some(dir) = at {
-        chain.push(dir);
-        if dir == stop {
-            break;
-        }
-        at = dir.parent();
-    }
+    // Only `stop` and its descendants pass, which is where both callers want to stop -
+    // and unlike a climb that tests for equality, a `stop` that is not an ancestor ends
+    // the walk here rather than running to the filesystem root. `ancestors` is the same
+    // walk `git_root` uses.
+    let mut chain: Vec<&Path> = from
+        .ancestors()
+        .take_while(|dir| dir.starts_with(stop))
+        .collect();
     chain.reverse();
     chain
+}
+
+/// A path resolved through links and `..` where the filesystem can say so, so two
+/// spellings of one file compare equal.
+///
+/// Shared with [`nested`], whose `sent` set is keyed on it: once-per-directory holds
+/// only while the key the walk computes and the key the set stores are the same form.
+pub(super) fn canonical<P: AsRef<Path>>(path: P) -> PathBuf {
+    let path = path.as_ref();
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The instruction files these directories hold, in order, each one once, marking
@@ -265,8 +274,7 @@ pub(super) fn files_in<'a>(
         if !path.is_file() {
             continue;
         }
-        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if seen.insert(key) {
+        if seen.insert(canonical(&path)) {
             found.push(path);
         }
     }
@@ -297,7 +305,7 @@ pub(super) fn block_for(path: &str, text: &str) -> String {
     format!("{MARKER}{path}:\n\n{text}")
 }
 
-/// What every block opens with, and what [`blocks_in`] finds it by.
+/// What every block opens with, and what [`mentions_block`] finds it by.
 const MARKER: &str = "Contents of ";
 
 /// The paths a comma-separated setting names, in the order it wrote them.
@@ -316,7 +324,12 @@ fn named(raw: &str) -> Vec<PathBuf> {
 /// What `path` weighs on disk, or `0` when that cannot be read - in which case the
 /// read that follows reports the real error rather than a guess about the size.
 pub(super) fn file_size(path: &Path) -> usize {
-    fs::metadata(path).map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX))
+    fs::metadata(path).as_ref().map_or(0, size_of)
+}
+
+/// A file's length as a `usize`, saturating rather than wrapping on a 32-bit target.
+fn size_of(meta: &fs::Metadata) -> usize {
+    usize::try_from(meta.len()).unwrap_or(usize::MAX)
 }
 
 /// Read every path, in order, or say why the run must not start.
@@ -325,21 +338,23 @@ fn load(paths: &[PathBuf], found: Found) -> Result<Instructions, String> {
     let mut total = 0usize;
     for path in paths {
         let shown = path.display().to_string();
-        // A regular file, checked before anything opens it. `metadata().len()` is 0 for
-        // a fifo and for a character device, so the weight below waves both through and
-        // the read then blocks forever on the first and never ends on the second - the
-        // walk cannot reach either, since it filters on `is_file`, but a named path can.
-        if !fs::metadata(path).is_ok_and(|meta| meta.file_type().is_file()) {
+        // One stat, answering both questions. `metadata().len()` is 0 for a fifo and
+        // for a character device, so the weight alone waves both through and the read
+        // then blocks forever on the first and never ends on the second - the walk
+        // cannot reach either, since it filters on `is_file`, but a named path can.
+        //
+        // Weighed before it is read because the cap exists to bound what every request
+        // pays, and pulling a multi-gigabyte file into memory in order to refuse it
+        // spends far more than the cap was protecting. Trimming only shrinks a file, so
+        // a chain that passes this cannot exceed the cap once read - which is why
+        // nothing re-checks the total afterwards.
+        let meta = fs::metadata(path).ok().filter(fs::Metadata::is_file);
+        let Some(meta) = meta else {
             return Err(format!(
                 "the project instructions at {shown:?} are not a regular file"
             ));
-        }
-        // Weighed before it is read. The cap exists because these bytes are paid for
-        // on every request, and pulling a multi-gigabyte file into memory in order to
-        // refuse it spends far more than the cap was protecting. Trimming can only
-        // shrink a file, so a chain that passes this check cannot exceed the cap once
-        // read - which is why nothing re-checks the total afterwards.
-        let weight = total.saturating_add(file_size(path));
+        };
+        let weight = total.saturating_add(size_of(&meta));
         if weight > MAX_BYTES {
             return Err(over_cap(&loaded, &shown, weight));
         }

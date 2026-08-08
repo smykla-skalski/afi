@@ -9,12 +9,11 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::config::{Runtime, Source};
+use crate::config::{Runtime, Source, nested};
 use crate::model::usage_totals::{self, ByModel, BySource};
 use crate::pricing::Pricing;
 use crate::summary::{self, RunError, RunSummary, SourceSpend, final_answer};
 
-use super::all_instructions;
 use crate::term::{MessageKind, UserInterface};
 
 /// Report the finished run wherever the caller asked for it. Returns whether the
@@ -88,7 +87,7 @@ fn build<'a>(
         // The startup walk's files, then whatever the model reached into later. Read
         // at the end of the run for the same reason the token totals are: a subtree
         // file loaded on the last turn still belongs in the report.
-        instructions: all_instructions(rt)
+        instructions: nested::sent(rt.prompt())
             .into_iter()
             .map(|(path, _, _)| path)
             .collect(),

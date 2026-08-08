@@ -5,18 +5,20 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
+use super::core::session_meta;
 use super::failure::RunFailure;
 use super::{NO_ACTIVE_SOURCE, Shared, TurnParams, header, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
-use crate::config::{Runtime, Source, nested};
+use crate::config::{Runtime, nested};
 use crate::memory::{list_memories, remember_memories};
-use crate::model::client::{ChatClient, ReqwestClient};
-use crate::model::compress::{COMPRESS_KEEP, completion_content};
+use crate::model::client::ReqwestClient;
+use crate::model::compress::{self, COMPRESS_KEEP, Summary, plan_compression};
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
 use crate::model::{ModelConfig, TurnOutcome};
 use crate::sessions::{self, new_session_id, resolve_session};
 use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
+use crate::util;
 use MessageKind::{Error, Info, Warning};
 
 type Env = HashMap<String, String>;
@@ -73,7 +75,7 @@ pub(crate) async fn handle_slash_command(
         "/approval" => cmd_approval(rt, arg, ui),
         "/source" => cmd_source(rt, arg, ui),
         "/compress" | "/compact" => cmd_compress(rt, messages, shared.client, ui).await,
-        "/save" => cmd_save(messages, session_id, arg, shared.env, ui),
+        "/save" => cmd_save(rt, messages, session_id, arg, ui),
         "/sessions" => cmd_sessions(session_id, shared.env, ui),
         "/delete" => cmd_delete(session_id, arg, shared.env, ui),
         "/instructions" => say(ui, Info, super::instructions_listing(rt)),
@@ -166,84 +168,42 @@ fn cmd_source(rt: &mut Runtime, arg: &str, ui: Ui<'_>) {
 }
 
 async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, client: &ReqwestClient, ui: Ui<'_>) {
-    let body_len = messages.len().saturating_sub(1);
-    if body_len <= COMPRESS_KEEP {
+    // Through the same plan the automatic fold runs, so `/compress` gets the pieces it
+    // was missing by having its own: a prompt that actually carries the conversation,
+    // a tail trimmed to something a chat template can render, and the release of the
+    // subtree instructions the summarized turns were carrying. `plan_compression`
+    // also owns "too short to fold", which this measured itself and got wrong for a
+    // history with no system message - it subtracted one regardless.
+    let Some(plan) = plan_compression(messages, COMPRESS_KEEP, false) else {
         say(ui, Info, "Nothing to compress (too few turns)");
         return;
-    }
+    };
     let (Some(source), Some(model)) = (rt.active_source(), rt.model.as_ref()) else {
         say(ui, Error, "No active source");
         return;
     };
 
     let cancel = ui.start_activity("Compressing context");
-    let result = tokio::select! {
-        result = request_compression(client, source, model) => Some(result),
-        () = cancel.cancelled() => None,
-    };
+    let summary = compress::fetch(client, source, model, plan.prompt(), &cancel).await;
     ui.stop_activity();
-    match result {
-        // An empty summary would replace the conversation and report success.
-        Some(Ok(Some(summary))) if !summary.trim().is_empty() => {
-            // No `nested::reset()` here, unlike `/reset` - see `nested::reset`.
-            apply_compression(messages, &summary);
-            say(ui, Info, "Compressed context");
-        }
-        Some(Ok(_)) => say(ui, Warning, "Compress produced no summary; kept context"),
-        Some(Err(error)) => {
-            say(ui, Error, format!("Compress failed: {error}"));
-        }
-        None => say(ui, Info, "Compression cancelled"),
+    match summary {
+        // No `nested::reset()` here, unlike `/reset` - see `nested::reset`. The plan
+        // releases what the fold actually dropped.
+        Summary::Text(text) => match plan.apply(messages, &text) {
+            Some(_) => say(ui, Info, "Compressed context"),
+            // An empty summary would replace the conversation and report success.
+            None => say(ui, Warning, "Compress produced no summary; kept context"),
+        },
+        Summary::Failed(error) => say(ui, Error, format!("Compress failed: {error}")),
+        Summary::Cancelled => say(ui, Info, "Compression cancelled"),
     }
 }
 
-/// Ask the model for a one-shot summary of the conversation so far.
-async fn request_compression(
-    client: &ReqwestClient,
-    source: &Source,
-    model: &str,
-) -> Result<Option<String>, String> {
-    let prompt = "Summarize the following conversation history for context retention.";
-    let text = client
-        .chat_completions(
-            source,
-            model,
-            &[json!({"role": "user", "content": prompt})],
-            30,
-            // The source's own body keys, unwrapped. `chat_completions` merges
-            // them at the top level of the request, same as the streaming path.
-            source.extra_body.as_ref(),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(completion_content(&text))
-}
-
-/// Replace all but the last `COMPRESS_KEEP` turns with a summary user turn.
-fn apply_compression(messages: &mut Vec<Value>, summary: &str) {
-    let header =
-        format!("[Compressed context - earlier turns summarized; last {COMPRESS_KEEP} kept]");
-    let has_sys = messages
-        .first()
-        .is_some_and(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"));
-    let split = messages.len().saturating_sub(COMPRESS_KEEP);
-    nested::forget_in(&messages[..split]);
-    let mut new_msgs = Vec::new();
-    if has_sys {
-        new_msgs.push(messages[0].clone());
-    }
-    new_msgs.push(json!({"role": "user", "content": format!("{header}\n\n{summary}")}));
-    new_msgs.extend(messages[split..].iter().cloned());
-    *messages = new_msgs;
-}
-
-fn cmd_save(messages: &mut Vec<Value>, session_id: &str, arg: &str, env: &Env, ui: Ui<'_>) {
-    let dir = sessions::sessions_dir(env);
-    let meta = if arg.is_empty() {
-        json!({})
-    } else {
-        json!({ "title": arg })
-    };
+fn cmd_save(rt: &Runtime, messages: &mut Vec<Value>, session_id: &str, arg: &str, ui: Ui<'_>) {
+    let dir = sessions::sessions_dir(&rt.env);
+    // Through the same builder the automatic saves use, so this cannot write fresh
+    // messages beside a stale record of what the model has been told.
+    let meta = session_meta(rt, util::nonblank(Some(arg)), None);
     let _ = sessions::write_session(&dir, session_id, messages, Some(&meta));
     say(ui, Info, format!("Saved session {session_id}"));
 }

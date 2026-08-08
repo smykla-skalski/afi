@@ -339,7 +339,7 @@ fn completion_usage(body: &str) -> Option<NormalizedUsage> {
 /// `OpenAI` `{"choices":[{"message":{"content":"..."}}]}`.
 ///
 /// Fails rather than returning an empty success. The only caller feeds this
-/// straight into `apply_compression`, which replaces the conversation with the
+/// straight into `CompressionPlan::apply`, which replaces the conversation with the
 /// summary and has no empty-summary guard, so a text-free response must be
 /// distinguishable from a successful empty summary. A 200 can legitimately carry
 /// no text: a pre-output refusal returns an empty `content` array, and a

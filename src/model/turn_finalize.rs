@@ -42,8 +42,8 @@ pub(crate) fn finalize_turn(
     cancel: &CancellationToken,
     ui: &mut dyn UserInterface,
 ) -> TurnOutcome {
+    let text = acc.answer_text();
     let Accumulated {
-        content_parts,
         tool_calls,
         reasoning_parts,
         thinking_blocks,
@@ -53,8 +53,8 @@ pub(crate) fn finalize_turn(
         streamed_chars,
         reasoning_only_chars,
         t_first,
+        ..
     } = acc;
-    let text = content_parts.join("");
     let elapsed = t0.elapsed().as_secs_f64();
     let prompt_tokens = usage
         .as_ref()

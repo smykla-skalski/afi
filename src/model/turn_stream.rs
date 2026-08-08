@@ -12,6 +12,7 @@ use crate::model::stream::tags::ReasoningTags;
 use crate::model::stream::{StreamChunk, ThinkingDelta, Timings, Usage};
 use crate::model::turn_dispatch::ToolCallAccum;
 use crate::term::{MessageKind, StreamKind, UserInterface};
+use crate::tools::protocol::parse_text_calls;
 
 /// The folded result of a streamed turn.
 pub(crate) struct Accumulated {
@@ -28,6 +29,33 @@ pub(crate) struct Accumulated {
     pub streamed_chars: u64,
     pub reasoning_only_chars: usize,
     pub t_first: Option<f64>,
+}
+
+impl Accumulated {
+    /// The turn's answer text, taking back a text-protocol tool call that was
+    /// classified as reasoning.
+    ///
+    /// A server with no native tool calling emits its call in the message body,
+    /// and a model on such a server can emit it inside a `<think>` span - where
+    /// the splitter, correctly for every other purpose, routes it off the
+    /// answer. `parse_text_calls` only ever reads the answer, so the call would
+    /// never be dispatched and the turn would report a reasoning stall instead.
+    ///
+    /// Only consulted when there is nothing else to run. Scanning reasoning
+    /// unconditionally would dispatch a call a model merely drafted in its
+    /// scratchpad and then thought better of.
+    pub(crate) fn answer_text(&self) -> String {
+        let text = self.content_parts.join("");
+        if !text.trim().is_empty() || !self.tool_calls.is_empty() {
+            return text;
+        }
+        let reasoning = self.reasoning_parts.join("");
+        if parse_text_calls(&reasoning).is_empty() {
+            text
+        } else {
+            reasoning
+        }
+    }
 }
 
 /// Either the folded turn, or a reasoning-only stall the caller must handle.

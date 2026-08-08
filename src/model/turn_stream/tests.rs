@@ -172,6 +172,57 @@ fn tagged_reasoning_reaches_the_cut_across_spans() {
     assert_eq!(chars, 12, "both spans counted, the whitespace did not");
 }
 
+/// A server with no native tool calling puts its call in the message body, and
+/// a model there can emit it inside a span. The splitter routes that off the
+/// answer, and `parse_text_calls` only reads the answer - so without taking it
+/// back the call is never dispatched and the turn reports a reasoning stall.
+#[test]
+fn a_tool_call_captured_as_reasoning_is_taken_back() {
+    let call =
+        "[afi_tool_call]{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}[/afi_tool_call]";
+    let mut ui = RecordingUi::default();
+    let mut accumulator = StreamAccumulator::new(0, true);
+    accumulator.push(
+        &StreamChunk {
+            content: Some(format!("<think>I should look. {call}</think>")),
+            ..StreamChunk::default()
+        },
+        Instant::now(),
+        &mut ui,
+    );
+
+    let StreamResult::Done(acc) = accumulator.finish(&mut ui) else {
+        panic!("expected a completed turn");
+    };
+    assert!(acc.content_parts.join("").is_empty(), "still reasoning");
+    assert!(
+        acc.answer_text().contains("[afi_tool_call]"),
+        "the dispatcher must see it: {:?}",
+        acc.answer_text()
+    );
+}
+
+/// Reasoning without a call is left where it is, so a turn that really did
+/// nothing but deliberate still reports as one.
+#[test]
+fn reasoning_without_a_call_is_not_taken_back() {
+    let mut ui = RecordingUi::default();
+    let mut accumulator = StreamAccumulator::new(0, true);
+    accumulator.push(
+        &StreamChunk {
+            content: Some("<think>just deliberating</think>".to_string()),
+            ..StreamChunk::default()
+        },
+        Instant::now(),
+        &mut ui,
+    );
+
+    let StreamResult::Done(acc) = accumulator.finish(&mut ui) else {
+        panic!("expected a completed turn");
+    };
+    assert_eq!(acc.answer_text(), "");
+}
+
 #[test]
 fn a_zero_limit_never_cuts() {
     // What the Anthropic path uses while thinking is on: the reasoning is

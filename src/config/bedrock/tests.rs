@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::Bedrock;
+use super::{Bedrock, dns_suffix};
 use crate::config::IdentitySource;
 
 fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -108,6 +108,22 @@ fn the_region_names_the_endpoint() {
         Some("https://bedrock-runtime.us-east-1.amazonaws.com/v1")
     );
     assert_eq!(Bedrock::default().base_url(), None);
+}
+
+/// The Region also names the partition, and one partition does not answer to the
+/// commercial suffix. `GovCloud` does, so the `cn-` prefix is the whole rule -
+/// asserted here because the alternative to naming it is a DNS failure that says
+/// nothing about which of the two names was wrong.
+#[test]
+fn a_china_region_gets_the_china_suffix() {
+    assert_eq!(dns_suffix("cn-north-1"), "amazonaws.com.cn");
+    assert_eq!(dns_suffix("us-gov-west-1"), "amazonaws.com");
+    assert_eq!(dns_suffix("us-east-1"), "amazonaws.com");
+    let bedrock = Bedrock::from_env(&env(&[("AWS_REGION", "cn-north-1")]));
+    assert_eq!(
+        bedrock.base_url().as_deref(),
+        Some("https://bedrock-runtime.cn-north-1.amazonaws.com.cn/v1")
+    );
 }
 
 #[test]

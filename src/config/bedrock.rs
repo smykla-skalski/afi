@@ -23,7 +23,7 @@ use super::{AWS_IDENTITY, Identity};
 /// `/v1` rather than the older `/openai/v1` on the same host: it is the path
 /// AWS documents a `SigV4` request against, and the one whose examples use the
 /// unversioned model ids (`zai.glm-5`). Override with `AFI_BEDROCK_BASE_URL`.
-const ENDPOINT: &str = "https://bedrock-runtime.{region}.amazonaws.com/v1";
+const ENDPOINT: &str = "https://bedrock-runtime.{region}.{suffix}/v1";
 
 /// The role session name when `AWS_ROLE_SESSION_NAME` names none. It reaches
 /// `CloudTrail` as the tail of the assumed-role identity, so a call afi made is
@@ -243,9 +243,31 @@ impl Bedrock {
     /// The endpoint for this Region, or `None` when no Region is configured.
     #[must_use]
     pub fn base_url(&self) -> Option<String> {
-        self.region
-            .as_ref()
-            .map(|region| ENDPOINT.replace("{region}", region))
+        self.region.as_ref().map(|region| {
+            ENDPOINT
+                .replace("{region}", region)
+                .replace("{suffix}", dns_suffix(region))
+        })
+    }
+}
+
+/// The DNS suffix AWS serves a Region's endpoints under.
+///
+/// One partition differs. China's hosts end in `.amazonaws.com.cn`, and the
+/// commercial name for a `cn-` Region resolves to nothing at all - so a
+/// hardcoded suffix answers a misconfiguration that afi could name with a DNS
+/// failure that it cannot. `GovCloud` shares the commercial suffix, which leaves
+/// the Region prefix as the whole rule.
+///
+/// Shared with the STS host the role assumption posts to rather than written
+/// twice: the credential and the request it signs have to land in the same
+/// partition, and a role assumed in one to sign for a host in the other is the
+/// failure this exists to avoid.
+pub(crate) fn dns_suffix(region: &str) -> &'static str {
+    if region.starts_with("cn-") {
+        "amazonaws.com.cn"
+    } else {
+        "amazonaws.com"
     }
 }
 

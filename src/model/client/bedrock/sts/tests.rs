@@ -95,6 +95,21 @@ fn the_assertion_never_reaches_the_url() {
     assert!(!endpoint("us-east-1").contains(ASSERTION));
 }
 
+/// The role is assumed in the partition the signed request will reach. A `cn-`
+/// Region posting to the commercial STS host resolves to nothing, and afi
+/// accepts an `arn:aws-cn:` role ARN, so the two have to agree.
+#[test]
+fn the_sts_host_follows_the_partition_the_bedrock_host_does() {
+    assert_eq!(
+        endpoint("cn-north-1"),
+        "https://sts.cn-north-1.amazonaws.com.cn/"
+    );
+    assert_eq!(
+        endpoint("us-gov-west-1"),
+        "https://sts.us-gov-west-1.amazonaws.com/"
+    );
+}
+
 // --- the answer ----------------------------------------------------------------
 
 #[test]

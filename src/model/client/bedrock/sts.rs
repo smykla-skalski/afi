@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
 
-use crate::config::WebIdentity;
+use crate::config::{WebIdentity, dns_suffix};
 use crate::model::client::expiry::{Expiring, deadline};
 use crate::model::client::identity::{fetch, refused_credential};
 use crate::model::client::{
@@ -84,8 +84,12 @@ impl CredentialCache {
 /// which has already checked it against the Region charset - the same check
 /// that keeps the Bedrock host from being moved by an `AWS_REGION` carrying a
 /// dot or a slash.
+///
+/// The suffix comes from [`dns_suffix`], the same function the Bedrock host is
+/// built with, so the credential is minted in whichever partition the request
+/// it signs will reach.
 fn endpoint(region: &str) -> String {
-    format!("https://sts.{region}.amazonaws.com/")
+    format!("https://sts.{region}.{}/", dns_suffix(region))
 }
 
 /// The Query-protocol request body: the action, its version, and the three

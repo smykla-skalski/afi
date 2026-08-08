@@ -186,6 +186,11 @@ pub(super) struct Rejection<'a> {
     /// that never reached the service, such as a proxy's own error page.
     pub error_type: Option<String>,
     pub body: String,
+    /// Whether this source mints its own credentials by assuming a role. AWS
+    /// turns down an expired credential the same way whichever mode produced
+    /// it, and the two modes are fixed differently, so where it came from has
+    /// to travel with the rejection rather than be guessed from it.
+    pub federating: bool,
 }
 
 /// Turn an AWS rejection into an error that says which kind it is.
@@ -262,9 +267,13 @@ fn classify(rejected: &Rejection<'_>) -> Option<String> {
     let names = |needles: &[&str]| needles.iter().any(|needle| exception.contains(needle));
 
     // Credentials first: an expired session token is a 403 like a denial is,
-    // and the fix is the opposite one. The restart is named because the
-    // credentials are read once at startup, so re-selecting the source with
-    // `/source` hands back the same expired struct.
+    // and the fix is the opposite one. Which fix, though, depends on where the
+    // credential came from. A static one is read once at startup, so
+    // re-selecting the source with `/source` hands back the same expired
+    // struct and only a restart picks up a new one. A federated source
+    // re-assumes the role on its own as the credential ages, so a restart
+    // repeats what afi already tried - what is left is the session having been
+    // revoked, or the role no longer accepting the token.
     if names(&[
         "expiredtoken",
         "invalidsignature",
@@ -273,11 +282,15 @@ fn classify(rejected: &Rejection<'_>) -> Option<String> {
         "incompletesignature",
         "missingauthenticationtoken",
     ]) {
-        return Some(
-            "AWS rejected the credentials (expired or wrong; afi reads them at \
-             startup, so a refresh needs a restart)"
-                .to_string(),
-        );
+        return Some(format!(
+            "AWS rejected the credentials (expired or wrong; {})",
+            if rejected.federating {
+                "afi re-assumes the role as they age, so a restart changes nothing - \
+                 the assumed session was revoked, or the role stopped accepting the token"
+            } else {
+                "afi reads them at startup, so a refresh needs a restart"
+            }
+        ));
     }
     if names(&["throttling", "toomanyrequests", "servicequotaexceeded"]) {
         return Some(THROTTLED.to_string());

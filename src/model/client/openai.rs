@@ -30,7 +30,7 @@ use super::{
     ChatCompletionStream, ClientError, Redactor, ReqwestClient, StreamRequest, bedrock,
     limited_error_body, strip_history, transport_error,
 };
-use crate::config::Source;
+use crate::config::{Protocol, Source};
 use crate::model::stream::{Usage, normalize_usage};
 use crate::model::usage_totals;
 
@@ -128,15 +128,16 @@ fn classify_error(
     error_type: Option<String>,
     body: String,
 ) -> ClientError {
-    if !source.protocol.is_bedrock() {
+    let Protocol::Bedrock(bedrock_config) = &source.protocol else {
         return ClientError::Http { status, body };
-    }
+    };
     bedrock::rejection(&bedrock::Rejection {
         model,
         tools_sent,
         status,
         error_type,
         body,
+        federating: bedrock_config.federating().is_some(),
     })
 }
 

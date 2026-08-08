@@ -21,6 +21,7 @@ pub mod model;
 pub mod pricing;
 pub mod prompt;
 pub mod repl;
+pub mod review_probe;
 pub mod risk;
 pub mod sessions;
 pub mod summary;

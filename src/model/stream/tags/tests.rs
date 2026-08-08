@@ -1,8 +1,8 @@
-use super::{ReasoningTags, Split, hold_partial};
+use super::{ReasoningTags, Split, hold_partial, strip};
 
 /// Feed a whole stream and return what the caller would have accumulated.
 fn run(deltas: &[&str]) -> Split {
-    let mut tags = ReasoningTags::default();
+    let mut tags = ReasoningTags::new(true);
     let mut all = Split::default();
     for delta in deltas {
         let split = tags.split(delta);
@@ -117,7 +117,53 @@ fn an_untagged_stream_is_unchanged() {
 fn whitespace_between_spans_does_not_end_the_preamble() {
     let out = run(&["<think>a</think>\n\n", "<think>b</think>", "done"]);
     assert_eq!(out.reasoning, "ab");
-    assert_eq!(out.content, "\n\ndone");
+    assert_eq!(out.content, "done");
+}
+
+/// Nothing reaches the answer before the answer starts, whether the whitespace
+/// shares a delta with a tag or arrives on its own.
+///
+/// The accumulator reads a non-empty `content_parts` as the answer having
+/// begun, and stops counting toward `AFI_REASONING_ONLY_CHARS` once it has. One
+/// newline emitted between two spans would disable that cut for the rest of the
+/// stream, which is the loop the cut exists to break.
+#[test]
+fn preamble_whitespace_never_reaches_the_answer() {
+    let mut tags = ReasoningTags::new(true);
+    for delta in ["<think>a</think>", "\n", "  ", "\n\n<think>b</think>"] {
+        assert_eq!(tags.split(delta).content, "", "on {delta:?}");
+    }
+    assert_eq!(tags.split("real").content, "real");
+}
+
+/// Whitespace the answer itself opens with is not preamble, so it survives.
+#[test]
+fn whitespace_inside_the_answer_is_kept() {
+    let out = run(&["<think>a</think>", "\n\nline one\n\nline two"]);
+    assert_eq!(out.content, "\n\nline one\n\nline two");
+}
+
+/// Disabled, every byte is the answer - the Anthropic path, where deliberation
+/// arrives as thinking blocks and a quoted tag is just text.
+#[test]
+fn a_disabled_splitter_passes_everything_through() {
+    let mut tags = ReasoningTags::new(false);
+    let out = tags.split("<think>quoted</think>answer");
+    assert_eq!(out.reasoning, "");
+    assert_eq!(out.content, "<think>quoted</think>answer");
+    assert_eq!(tags.flush(), Split::default());
+}
+
+/// `/compress` reads a whole body rather than a stream, and the wrapping is a
+/// property of the provider's serialization either way.
+#[test]
+fn strip_drops_reasoning_from_a_whole_body() {
+    assert_eq!(
+        strip("<reasoning>notes</reasoning>The summary."),
+        "The summary."
+    );
+    assert_eq!(strip("plain summary"), "plain summary");
+    assert_eq!(strip("<think>never closed"), "");
 }
 
 /// Multi-byte text must not be cut mid-character while looking for a tag tail.
@@ -140,8 +186,8 @@ fn hold_partial_keeps_only_a_real_prefix() {
 /// not be mistaken for the answer beginning.
 #[test]
 fn empty_deltas_carry_nothing_and_change_nothing() {
-    let mut tags = ReasoningTags::default();
-    assert!(tags.split("").is_empty());
+    let mut tags = ReasoningTags::new(true);
+    assert_eq!(tags.split(""), Split::default());
     let out = tags.split("<reasoning>x</reasoning>");
     assert_eq!(out.reasoning, "x");
     assert!(out.content.is_empty());

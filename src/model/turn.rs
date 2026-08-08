@@ -182,7 +182,12 @@ async fn fetch_stream(
             return Err(report_client_error(error, tr.source, ui));
         }
     };
-    let mut accumulator = StreamAccumulator::new(reasoning_only_limit(tr, params.extra_body));
+    // Anthropic streams deliberation as thinking blocks, so a tag in its text is
+    // the model quoting one rather than a channel marker.
+    let mut accumulator = StreamAccumulator::new(
+        reasoning_only_limit(tr, params.extra_body),
+        !tr.source.is_anthropic(),
+    );
     let mut chunks = 0usize;
     loop {
         let item = tokio::select! {

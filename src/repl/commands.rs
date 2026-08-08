@@ -13,7 +13,7 @@ use crate::memory::{list_memories, remember_memories};
 use crate::model::client::{ChatClient, ReqwestClient};
 use crate::model::compress::COMPRESS_KEEP;
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
-use crate::model::{ModelConfig, TurnOutcome};
+use crate::model::{ModelConfig, TurnOutcome, stream::tags};
 use crate::sessions::{self, new_session_id, resolve_session};
 use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
@@ -215,7 +215,9 @@ async fn request_compression(
     Ok(parse_completion_content(&text))
 }
 
-/// Pull `choices[0].message.content` out of a chat-completions JSON response.
+/// Pull `choices[0].message.content` out of a chat-completions JSON response,
+/// stripped of wrapped reasoning: the summary replaces the history it
+/// compressed, so a tag left here would ride every later request.
 fn parse_completion_content(text: &str) -> Option<String> {
     let v: Value = serde_json::from_str(text).ok()?;
     v.get("choices")
@@ -224,7 +226,7 @@ fn parse_completion_content(text: &str) -> Option<String> {
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .map(ToString::to_string)
+        .map(tags::strip)
 }
 
 /// Replace all but the last `COMPRESS_KEEP` turns with a summary user turn.

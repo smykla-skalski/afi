@@ -45,7 +45,7 @@ fn push(accumulator: &mut StreamAccumulator, chunk: &StreamChunk, ui: &mut Recor
 #[test]
 fn emits_live_reasoning_and_assistant_deltas() {
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT);
+    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT, true);
 
     let reasoning = StreamChunk {
         reasoning_content: Some("plan".to_string()),
@@ -81,7 +81,7 @@ fn emits_live_reasoning_and_assistant_deltas() {
 #[test]
 fn preserves_whitespace_only_content_deltas() {
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT);
+    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT, true);
     for content in ["hello", " ", "world\n\n"] {
         let chunk = StreamChunk {
             content: Some(content.to_string()),
@@ -96,7 +96,7 @@ fn preserves_whitespace_only_content_deltas() {
 #[test]
 fn merges_tool_call_deltas_incrementally() {
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT);
+    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT, true);
     for arguments in ["{\"path\":", "\"README.md\"}"] {
         let chunk = StreamChunk {
             tool_calls: vec![ToolCallDelta {
@@ -117,7 +117,7 @@ fn merges_tool_call_deltas_incrementally() {
 #[test]
 fn reasoning_limit_returns_terminal_result() {
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(4);
+    let mut accumulator = StreamAccumulator::new(4, true);
     let chunk = StreamChunk {
         reasoning_content: Some("think".to_string()),
         ..StreamChunk::default()
@@ -137,13 +137,48 @@ fn reasoning_limit_returns_terminal_result() {
     );
 }
 
+/// Reasoning wrapped in tags reaches the cut the same way the field does, and
+/// keeps reaching it across spans.
+///
+/// The whitespace between two spans is the trap: emitted as content it would
+/// fill `content_parts`, and `no_output_yet` reads that as the answer having
+/// started - so nothing would count toward the limit again and a looping model
+/// would run to stream end.
+#[test]
+fn tagged_reasoning_reaches_the_cut_across_spans() {
+    let mut ui = RecordingUi::default();
+    let mut accumulator = StreamAccumulator::new(12, true);
+    let mut push = |text: &str, accumulator: &mut StreamAccumulator| {
+        accumulator.push(
+            &StreamChunk {
+                content: Some(text.to_string()),
+                ..StreamChunk::default()
+            },
+            Instant::now(),
+            &mut ui,
+        )
+    };
+
+    // Seven characters, then five, against a limit of twelve.
+    assert!(
+        push("<think>1234567</think>\n\n", &mut accumulator).is_none(),
+        "under the limit, and the newlines are not an answer"
+    );
+    let result = push("<think>89abc</think>", &mut accumulator)
+        .expect("the second span must reach the limit");
+    let StreamResult::ReasoningStall { chars, .. } = result else {
+        panic!("expected reasoning stall");
+    };
+    assert_eq!(chars, 12, "both spans counted, the whitespace did not");
+}
+
 #[test]
 fn a_zero_limit_never_cuts() {
     // What the Anthropic path uses while thinking is on: the reasoning is
     // server-side and bounded by max_tokens, so a cut would be a false
     // positive.
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(0);
+    let mut accumulator = StreamAccumulator::new(0, true);
     let chunk = StreamChunk {
         reasoning_content: Some("a very long deliberation".to_string()),
         ..StreamChunk::default()
@@ -159,7 +194,7 @@ fn a_zero_limit_never_cuts() {
 #[test]
 fn assembles_a_signed_thinking_block_from_its_deltas() {
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT);
+    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT, true);
     for text in ["let me ", "check the file"] {
         push(
             &mut accumulator,
@@ -202,7 +237,7 @@ fn assembles_a_signed_thinking_block_from_its_deltas() {
 #[test]
 fn orders_blocks_by_content_index() {
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT);
+    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT, true);
     // Arrive out of order; Anthropic's index is what restores document order.
     for (index, signature) in [(2u32, "second"), (0u32, "first")] {
         push(
@@ -231,7 +266,7 @@ fn orders_blocks_by_content_index() {
 #[test]
 fn keeps_a_redacted_block_as_its_opaque_payload() {
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT);
+    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT, true);
     push(
         &mut accumulator,
         &StreamChunk {
@@ -257,7 +292,7 @@ fn drops_a_thinking_block_that_never_got_a_signature() {
     // A cut stream can leave one behind. Replaying it fails the whole next
     // request, so it is worth less than the text it holds.
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT);
+    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT, true);
     push(
         &mut accumulator,
         &StreamChunk {
@@ -281,7 +316,7 @@ fn drops_a_thinking_block_that_never_got_a_signature() {
 #[test]
 fn an_openai_turn_produces_no_blocks() {
     let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT);
+    let mut accumulator = StreamAccumulator::new(DEFAULT_LIMIT, true);
     push(
         &mut accumulator,
         &StreamChunk {

@@ -101,14 +101,18 @@ pub(crate) struct StreamAccumulator {
     /// what the Anthropic path uses while thinking is on.
     reasoning_only_char_limit: usize,
     /// Lifts `<think>` and `<reasoning>` spans back out of `content`, for the
-    /// endpoints that put deliberation there instead of in its own field.
+    /// endpoints that put deliberation there instead of in its own field. Idle
+    /// on the sources that cannot need it.
     tags: ReasoningTags,
     t_first: Option<f64>,
 }
 
 impl StreamAccumulator {
+    /// `split_reasoning_tags` is off for sources that report deliberation
+    /// structurally, where looking for tags could only take a quoted one out of
+    /// an answer that meant it.
     #[must_use]
-    pub(crate) fn new(reasoning_only_char_limit: usize) -> Self {
+    pub(crate) fn new(reasoning_only_char_limit: usize, split_reasoning_tags: bool) -> Self {
         Self {
             content_parts: Vec::new(),
             tool_calls: HashMap::new(),
@@ -120,7 +124,7 @@ impl StreamAccumulator {
             streamed_chars: 0,
             reasoning_only_chars: 0,
             reasoning_only_char_limit,
-            tags: ReasoningTags::default(),
+            tags: ReasoningTags::new(split_reasoning_tags),
             t_first: None,
         }
     }
@@ -216,12 +220,10 @@ impl StreamAccumulator {
         // reported it in `reasoning_content`.
         if let Some(content) = &chunk.content {
             let split = self.tags.split(content);
-            if !split.is_empty() {
-                if !split.reasoning.is_empty() && self.handle_reasoning(&split.reasoning, ui) {
-                    return Some(self.stall(ui));
-                }
-                self.handle_content(&split.content, ui);
+            if !split.reasoning.is_empty() && self.handle_reasoning(&split.reasoning, ui) {
+                return Some(self.stall(ui));
             }
+            self.handle_content(&split.content, ui);
         }
         if !chunk.tool_calls.is_empty() {
             self.handle_tool_calls(chunk);
@@ -256,10 +258,8 @@ impl StreamAccumulator {
     /// dropped. The cutoff is not consulted: the stream is already over.
     pub(crate) fn finish(mut self, ui: &mut dyn UserInterface) -> StreamResult {
         let last = self.tags.flush();
-        if !last.is_empty() {
-            self.handle_reasoning(&last.reasoning, ui);
-            self.handle_content(&last.content, ui);
-        }
+        self.handle_reasoning(&last.reasoning, ui);
+        self.handle_content(&last.content, ui);
         ui.finish_stream();
         StreamResult::Done(Box::new(self.into_accumulated()))
     }

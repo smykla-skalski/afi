@@ -31,9 +31,12 @@
 
 use std::mem::take;
 
-/// The tag pairs recognised, longest first so `find_open` cannot match a prefix
-/// of one inside another.
+/// The tag pairs recognised. Order is not load-bearing: [`find_open`] picks by
+/// position and [`hold_partial`] asks `any`.
 const PAIRS: [(&str, &str); 2] = [("<reasoning>", "</reasoning>"), ("<think>", "</think>")];
+
+/// Just the opening tags, for the scan that runs when none of them is present.
+const OPENS: [&str; 2] = [PAIRS[0].0, PAIRS[1].0];
 
 /// One delta's content, divided by where it belongs.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -42,17 +45,10 @@ pub(crate) struct Split {
     pub content: String,
 }
 
-impl Split {
-    /// Whether this delta carried nothing, so a caller can skip it entirely.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.reasoning.is_empty() && self.content.is_empty()
-    }
-}
-
 /// Fold state for one SSE stream. One per streamed response: a turn that calls
 /// tools opens a fresh stream per request, and each starts with its own
 /// reasoning.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ReasoningTags {
     /// Held back because it may be the front of a tag that the next delta
     /// finishes. Released by [`ReasoningTags::flush`] if the stream ends first.
@@ -61,30 +57,47 @@ pub(crate) struct ReasoningTags {
     open: Option<usize>,
     /// Answer content has been emitted, so every later tag is literal.
     answered: bool,
+    /// Whether to look at all. Anthropic reports deliberation as `thinking`
+    /// blocks and never wraps it in tags, so there is nothing to gain there and
+    /// a reply that opens by quoting one would be moved off the answer for no
+    /// reason.
+    enabled: bool,
 }
 
 impl ReasoningTags {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            partial: String::new(),
+            open: None,
+            answered: false,
+            enabled,
+        }
+    }
+
     /// Divide one delta's content, carrying any cut tag into the next call.
     pub(crate) fn split(&mut self, text: &str) -> Split {
+        if !self.enabled {
+            return Split {
+                reasoning: String::new(),
+                content: text.to_string(),
+            };
+        }
         let mut out = Split::default();
-        let mut rest = take(&mut self.partial);
-        rest.push_str(text);
+        let joined = take(&mut self.partial) + text;
+        let mut rest: &str = &joined;
         loop {
-            if let Some(index) = self.open {
-                if !self.take_open_span(&rest, index, &mut out) {
-                    return out;
-                }
-                rest = take(&mut self.partial);
-                continue;
-            }
+            // Reached only once the answer has begun, and `take_preamble` is the
+            // only thing that sets that - so a span is never open here.
             if self.answered {
-                out.content.push_str(&rest);
+                out.content.push_str(rest);
                 return out;
             }
-            if !self.take_preamble(&rest, &mut out) {
-                return out;
-            }
-            rest = take(&mut self.partial);
+            let advanced = match self.open {
+                Some(index) => self.take_open_span(rest, index, &mut out),
+                None => self.take_preamble(rest, &mut out),
+            };
+            let Some(after) = advanced else { return out };
+            rest = after;
         }
     }
 
@@ -92,68 +105,76 @@ impl ReasoningTags {
     ///
     /// An unterminated span is still reasoning: a model cut off deliberating
     /// produced no answer, and calling it one would put its notes in
-    /// `summary.answer` - the failure this module exists to prevent.
+    /// `summary.answer` - the failure this module exists to prevent. A dangling
+    /// tag prefix is text the model sent, so it goes back to the answer.
     pub(crate) fn flush(&mut self) -> Split {
         let held = take(&mut self.partial);
-        if held.is_empty() {
-            return Split::default();
-        }
+        let mut out = Split::default();
         if self.open.is_some() {
-            return Split {
-                reasoning: held,
-                content: String::new(),
-            };
+            out.reasoning = held;
+        } else {
+            out.content = held;
         }
-        Split {
-            reasoning: String::new(),
-            content: held,
-        }
+        out
     }
 
-    /// Consume as much of an open reasoning span as `rest` holds. Returns
-    /// whether the span closed, leaving the text after it in `self.partial`.
-    fn take_open_span(&mut self, rest: &str, index: usize, out: &mut Split) -> bool {
+    /// Consume as much of an open reasoning span as `rest` holds, returning what
+    /// follows its close.
+    fn take_open_span<'a>(
+        &mut self,
+        rest: &'a str,
+        index: usize,
+        out: &mut Split,
+    ) -> Option<&'a str> {
         let close = PAIRS[index].1;
         if let Some(at) = rest.find(close) {
             out.reasoning.push_str(&rest[..at]);
-            self.partial = rest[at + close.len()..].to_string();
             self.open = None;
-            return true;
+            return Some(&rest[at + close.len()..]);
         }
         let (emit, held) = hold_partial(rest, &[close]);
         out.reasoning.push_str(emit);
         self.partial = held.to_string();
-        false
+        None
     }
 
-    /// Consume text before the answer has started. Returns whether a tag opened,
-    /// leaving the text after it in `self.partial`.
-    fn take_preamble(&mut self, rest: &str, out: &mut Split) -> bool {
+    /// Consume text before the answer has started, returning what follows an
+    /// opening tag.
+    ///
+    /// Whitespace here is dropped rather than emitted. It sits between spans or
+    /// in front of the first one, so it is not the answer - and emitting it
+    /// would put a part in `content_parts`, which the reasoning-only cut reads
+    /// as the answer having started. One newline between two spans would
+    /// otherwise disable that cut for the rest of the stream.
+    fn take_preamble<'a>(&mut self, rest: &'a str, out: &mut Split) -> Option<&'a str> {
         if let Some((at, index)) = find_open(rest) {
-            let before = &rest[..at];
-            if before.trim().is_empty() {
-                out.content.push_str(before);
-                self.partial = rest[at + PAIRS[index].0.len()..].to_string();
+            if rest[..at].trim().is_empty() {
                 self.open = Some(index);
-                return true;
+                return Some(&rest[at + PAIRS[index].0.len()..]);
             }
-            // Content came first, so this tag is part of the reply.
-            self.answered = true;
-            out.content.push_str(rest);
-            return false;
+        } else {
+            let (emit, held) = hold_partial(rest, &OPENS);
+            if emit.trim().is_empty() {
+                self.partial = held.to_string();
+                return None;
+            }
         }
-        let opens: Vec<&str> = PAIRS.iter().map(|pair| pair.0).collect();
-        let (emit, held) = hold_partial(rest, &opens);
-        if emit.trim().is_empty() {
-            out.content.push_str(emit);
-            self.partial = held.to_string();
-            return false;
-        }
-        // Real content with no tag in front of it: nothing later can be one.
+        // Content came first, so this tag - and every later one - is the reply.
         self.answered = true;
         out.content.push_str(rest);
-        false
+        None
     }
+}
+
+/// Divide one complete, non-streamed body and keep only the answer.
+///
+/// The wrapping is a property of how the provider serializes a reply, not of
+/// streaming, so a body read in one piece carries it too.
+pub(crate) fn strip(text: &str) -> String {
+    let mut tags = ReasoningTags::new(true);
+    let mut out = tags.split(text);
+    out.content.push_str(&tags.flush().content);
+    out.content
 }
 
 /// The earliest opening tag in `text`, with its index into [`PAIRS`].
@@ -170,17 +191,15 @@ fn find_open(text: &str) -> Option<(usize, usize)> {
 ///
 /// Without this a tag cut across two deltas would be streamed to the user as
 /// text and never recognised, since neither half contains it.
+///
+/// Every tag is ASCII and starts with `<`, and none contains a second one, so
+/// only a tail starting at the last `<` can be the front of one. Callers must
+/// have established that no complete tag is present.
 fn hold_partial<'a>(text: &'a str, tags: &[&str]) -> (&'a str, &'a str) {
-    let longest = tags.iter().map(|tag| tag.len()).max().unwrap_or(0);
-    let start = text.len().saturating_sub(longest.saturating_sub(1));
-    for at in start..text.len() {
-        if !text.is_char_boundary(at) {
-            continue;
-        }
-        let tail = &text[at..];
-        if tags.iter().any(|tag| tag.starts_with(tail)) {
-            return (&text[..at], tail);
-        }
+    if let Some(at) = text.rfind('<')
+        && tags.iter().any(|tag| tag.starts_with(&text[at..]))
+    {
+        return (&text[..at], &text[at..]);
     }
     (text, "")
 }

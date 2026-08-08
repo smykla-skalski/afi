@@ -6,7 +6,7 @@
 # still `afi`, so `use afi::...` in the tests is unchanged -- and the Debian
 # package pins its own name below so the apt upgrade path is not disturbed.
 name = "afi-cli"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 authors = ["Sentdex", "smykla-skalski"]
 license = "MIT"

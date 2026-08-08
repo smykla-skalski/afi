@@ -3,6 +3,23 @@
 All notable changes to `afi`. Generated from the commit history; maintained by
 release-plz from the conventional-commit messages on `main`.
 
+## [0.9.0] - 2026-08-08
+
+### Added
+
+- **release** Publish afi through Homebrew ([#83](https://github.com/smykla-skalski/afi/pull/83))
+- **model** Federate Bedrock via GitHub OIDC ([#79](https://github.com/smykla-skalski/afi/pull/79))
+
+### Dependencies
+
+- **deps** Update rust crate async-trait to v0.1.92 ([#84](https://github.com/smykla-skalski/afi/pull/84))
+- **deps** Update rust crate thiserror to v2.0.20 ([#81](https://github.com/smykla-skalski/afi/pull/81))
+
+### Fixed
+
+- **config** Serve Bedrock from /openai/v1 ([#82](https://github.com/smykla-skalski/afi/pull/82))
+- **deps** Update rust crate hmac to 0.13 ([#77](https://github.com/smykla-skalski/afi/pull/77))
+
 ## [0.8.0] - 2026-08-08
 
 ### Added

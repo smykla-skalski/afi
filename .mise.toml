@@ -124,6 +124,10 @@ run = "./scripts/smoke-archive.sh"
 description = "Publish the crate to crates.io, unless that version is already there"
 run = "./scripts/publish-crate.sh"
 
+[tasks."publish:homebrew"]
+description = "Ask the Homebrew tap to publish a version and wait until it has (args: [--check-only] version)"
+run = "./scripts/publish-homebrew.sh"
+
 [tasks."deb:version"]
 description = "Print the Debian package version derived from Cargo.toml"
 run = "./scripts/deb-version.sh"

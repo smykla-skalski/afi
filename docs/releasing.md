@@ -115,10 +115,16 @@ Re-run rather than dispatching a fresh run, so the same version is finished inst
 
 **`verify`** — the release and the apt repository disagree. The output names every missing file. This is the gate doing its job; the release stays a draft.
 
-**`homebrew`** — everything is published and the tap is a version behind. There is nothing to undo and nothing to re-run in this repository beyond the job itself. The error says which of the two things happened: no run started, meaning `update-afi-formula.yml` is not on the tap's default branch, or a run started and the formula still does not name this version, with a link to it. Either way the tap's own workflow can be driven by hand:
+**`homebrew`** — everything is published and the tap is a version behind. Nothing to undo. The error names the tap run to read, or says no run started at all. Re-run the job, or do the same thing from a laptop:
 
 ```
-gh workflow run update-afi-formula.yml --repo smykla-skalski/homebrew-tap -f version=0.8.0
+mise run publish:homebrew 0.8.0
+```
+
+That is the job, so a hand-driven fix dispatches and then waits for the formula exactly as a release does. To ask whether the tap ever caught up, without dispatching anything:
+
+```
+mise run publish:homebrew --check-only 0.8.0
 ```
 
 ## Undoing a release
@@ -164,10 +170,10 @@ Do this and the Homebrew formula still points at the release's assets, which a d
 ### Roll the Homebrew formula back
 
 ```
-gh workflow run update-afi-formula.yml --repo smykla-skalski/homebrew-tap -f version=0.4.0
+mise run publish:homebrew 0.4.0
 ```
 
-Pointing the formula at an older release is the closest thing to an undo Homebrew has: `brew upgrade` follows the formula, so anyone who has not upgraded yet never sees the bad version and anyone who has moves back on their next upgrade. The tap refuses anything that is not a stable `X.Y.Z`.
+Pointing the formula at an older release is the closest thing to an undo Homebrew has: `brew upgrade` follows the formula, so anyone who has not upgraded yet never sees the bad version and anyone who has moves back on their next upgrade. Needs a `GH_TOKEN` that can dispatch to the tap.
 
 ## A tag with no release
 
@@ -232,15 +238,17 @@ The fallback code is still in the publish job and now has nothing to fall back t
 
 The formula and the workflow that rewrites it live in [smykla-skalski/homebrew-tap](https://github.com/smykla-skalski/homebrew-tap), next to the formulae for the other tools there. This repository only dispatches to it.
 
-The `homebrew` job sends an `afi-release` dispatch carrying the version, then waits for `Formula/afi.rb` to name it. The wait is the part worth having. A `repository_dispatch` is accepted with a 204 whether or not a workflow matches it, so a release that dispatched and moved on would report success while the tap stayed quietly behind. Reading the formula afterwards is the same move the `verify` job makes against Cloudsmith: check the outcome, not the request.
+[`scripts/publish-homebrew.sh`](../scripts/publish-homebrew.sh) sends an `afi-release` dispatch carrying the version, then waits for `Formula/afi.rb` to name it. The wait is the part worth having. A `repository_dispatch` is accepted with a 204 whether or not a workflow matches it, so a release that dispatched and moved on would report success while the tap stayed quietly behind. Reading the formula afterwards is the same move the `verify` job makes against Cloudsmith: check the outcome, not the request.
+
+It is a script rather than a `run:` block for the reason every other named step of a release is one: the `homebrew` job is not the only caller. `mise run publish:homebrew 0.8.0` is the recovery, and it dispatches and waits exactly as the release does, instead of the bare `gh workflow run` that would leave you guessing. `--check-only` asks whether the tap is current and dispatches nothing.
 
 The tap does the work. It downloads the four archives the formula serves, verifies each one with `gh attestation verify --repo smykla-skalski/afi`, pins checksums it computed from the files it just verified, installs the result on a macOS runner and makes the binary report its own version, and only then commits. So the formula can only ever pin an archive that came out of this repository's release workflow.
 
 Linux gets the musl builds on both architectures rather than the glibc build a release also publishes, for the reason `install.sh` gives: they are static and run whatever the host's glibc turns out to be.
 
-Prereleases stay out. Homebrew has no notion of one, so a formula pointing at `0.9.0-rc.1` would carry every `brew upgrade afi` onto a release candidate. The `homebrew` job skips them and the tap's workflow rejects them as well, which is deliberate duplication across a repository boundary: the tap's `workflow_dispatch` can be driven by a hand that does not know the rule.
+Prereleases stay out. Homebrew has no notion of one, so a formula pointing at `0.9.0-rc.1` would carry every `brew upgrade afi` onto a release candidate. The script reports it and exits 0 rather than refusing, so a release that cuts a prerelease is not red for doing as it was told. The tap checks the shape again at its own end, which is deliberate duplication across a repository boundary: its `workflow_dispatch` takes a version from a hand this side never sees, and interpolates it into a formula.
 
-The one setup requirement is that `update-afi-formula.yml` is on the tap's default branch, because a dispatch to a workflow that is not there goes nowhere. The job asks before it dispatches rather than waiting out its deadline to find out.
+The one setup requirement is that `update-afi-formula.yml` is on the tap's default branch, because a dispatch to a workflow that is not there goes nowhere. The script asks before it dispatches rather than waiting out its deadline to find out.
 
 ## Immutable releases
 
@@ -265,5 +273,3 @@ gh attestation verify afi-x86_64-unknown-linux-musl.tar.gz --repo smykla-skalski
 ```
 
 The published `.sha256` files sit next to the archives and are uploaded by the same job, so they prove a download arrived intact and nothing about where it came from. The attestation is the one that answers that.
-
-The tap runs the same command on every archive before it pins a checksum, so a `brew install smykla-skalski/tap/afi` has already had this check run on its behalf.

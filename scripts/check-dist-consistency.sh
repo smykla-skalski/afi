@@ -24,6 +24,12 @@ set -eu
 # tap asks for the archives by name with `gh release download --pattern`, so a
 # rename here turns its next run red rather than pinning a file that no longer
 # exists, and the release waits on that run.
+#
+# That is a worse guarantee than the two below, and knowingly so. Those fail in
+# the plan job, before a tag exists; the tap fails in the last job, after the
+# crate, which is the one publication a release cannot undo. Closing the gap
+# would mean the tap reading this file out of the tagged release at run time.
+# Not worth the coupling while the blast radius is a formula one commit behind.
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 targets_sh="$repo_root/scripts/release-targets.sh"

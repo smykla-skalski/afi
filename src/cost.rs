@@ -43,6 +43,35 @@ pub(crate) enum Verdict {
     Unpriceable(String),
 }
 
+/// Why a request may not be opened.
+///
+/// Two reasons, because they are not the same fact and a caller that reports
+/// them alike says something untrue. A run that reached its cap spent the money
+/// it was allowed to; a run that cannot be measured may have spent almost
+/// nothing, and telling its operator it is out of budget is simply wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// The cap has been reached. The run was told what it may spend, and this
+    /// is that.
+    Spent,
+    /// A budget is set and the run cannot be priced, so the cap could never
+    /// hold. Carries the sentence to report, the same one [`checkpoint`] gives
+    /// the turn loop.
+    Unmeasurable(String),
+}
+
+/// What a run afi counted itself cannot promise.
+///
+/// One sentence, shared by [`checkpoint`] and [`may_spend`], so the two cannot
+/// come to describe the same ledger differently.
+const GUESSED: &str = "the budget cannot be measured: this endpoint reported no usage, so afi \
+                       counted the tokens itself and a cap cannot hold over a guess";
+
+/// The same, for a ledger holding something afi has no rates for.
+fn cannot_price(why: &str) -> String {
+    format!("the budget cannot be measured: {why}")
+}
+
 /// The two figures a threshold message names, in whole micro-USD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Crossing {
@@ -113,16 +142,8 @@ impl Guard {
         let spent = match self.pricing.run_cost(billed) {
             Priced::Spent(micros) => micros,
             Priced::Nothing => 0,
-            Priced::Estimated(_) => {
-                return Verdict::Unpriceable(
-                    "the budget cannot be measured: this endpoint reported no usage, so afi \
-                     counted the tokens itself and a cap cannot hold over a guess"
-                        .to_string(),
-                );
-            }
-            Priced::Unpriceable(why) => {
-                return Verdict::Unpriceable(format!("the budget cannot be measured: {why}"));
-            }
+            Priced::Estimated(_) => return Verdict::Unpriceable(GUESSED.to_string()),
+            Priced::Unpriceable(why) => return Verdict::Unpriceable(cannot_price(&why)),
         };
         let at = Crossing {
             spent,
@@ -154,18 +175,20 @@ impl Guard {
     ///
     /// The flag is still consulted first, because a cap that has fired stays
     /// fired even if the ledger were somehow to read lower afterwards.
-    fn may_spend(&self, billed: &[(Billed, UsageTotals)]) -> bool {
+    fn may_spend(&self, billed: &[(Billed, UsageTotals)]) -> Result<(), Refusal> {
         if self.stopped {
-            return false;
+            return Err(Refusal::Spent);
         }
         match self.pricing.run_cost(billed) {
-            Priced::Spent(micros) => !self.budget.hard_reached(micros),
-            Priced::Nothing => true,
+            Priced::Spent(micros) if self.budget.hard_reached(micros) => Err(Refusal::Spent),
+            Priced::Spent(_) | Priced::Nothing => Ok(()),
             // Measured by nobody, or priced by nothing: a cap that cannot be
             // computed cannot be honoured, and spending anyway is the one thing
-            // it must never do. The turn loop reports this as a failed run; a
-            // caller here only needs to not send.
-            Priced::Estimated(_) | Priced::Unpriceable(_) => false,
+            // it must never do. Reported apart from a cap that fired, because a
+            // run here may have spent almost nothing and its operator is owed
+            // the reason rather than a figure that is not true.
+            Priced::Estimated(_) => Err(Refusal::Unmeasurable(GUESSED.to_string())),
+            Priced::Unpriceable(why) => Err(Refusal::Unmeasurable(cannot_price(&why))),
         }
     }
 }
@@ -222,7 +245,7 @@ pub(crate) fn checkpoint() -> Verdict {
         .map_or(Verdict::Unlimited, |guard| guard.checkpoint(&billed))
 }
 
-/// Whether a request may still be made against the run's budget.
+/// Whether a request may still be made against the run's budget, and why not.
 ///
 /// Read-only and consumes nothing, for everything that spends outside the turn
 /// loop - `/compress` today, whatever is added next. It prices the ledger
@@ -231,17 +254,16 @@ pub(crate) fn checkpoint() -> Verdict {
 ///
 /// The ledger is read before the guard is locked, the same order
 /// [`checkpoint`] uses, so the two can never deadlock against each other.
-#[must_use]
-pub(crate) fn may_spend() -> bool {
+pub(crate) fn may_spend() -> Result<(), Refusal> {
     if !ARMED.load(Ordering::Relaxed) {
-        return true;
+        return Ok(());
     }
     let billed = usage_totals::snapshot_billed();
     guard()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .as_ref()
-        .is_none_or(|guard| guard.may_spend(&billed))
+        .map_or(Ok(()), |guard| guard.may_spend(&billed))
 }
 
 /// The budget block the run summary reports, or `None` when none was set.

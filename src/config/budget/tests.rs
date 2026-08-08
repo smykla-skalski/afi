@@ -33,6 +33,29 @@ fn a_cap_is_read_as_an_exact_decimal() {
 }
 
 #[test]
+fn the_converge_point_is_never_a_run_that_has_spent_nothing() {
+    // `scale` floors, so a small enough cap put the soft threshold at zero -
+    // and `soft_reached(0)` is `0 >= 0`, so the pre-flight checkpoint fired it
+    // on an empty ledger. The converge note landed before the first request
+    // existed to converge, and burned its once-per-run latch there, so it could
+    // never arrive where it was meant to. The cap itself still held, which is
+    // why this floors rather than refusing.
+    let tiny = budget(Some("0.50"), &[("AFI_SOFT_BUDGET_RATIO", "0.000001")]);
+    assert!(
+        !tiny.soft_reached(0),
+        "a run that has spent nothing has not reached anything"
+    );
+    assert!(tiny.soft_reached(1), "and one micro-dollar is the floor");
+    assert!(
+        tiny.hard_reached(475_000) && !tiny.hard_reached(474_999),
+        "the cap it was given is untouched"
+    );
+    // The ordinary case is unchanged: 0.8 of $5.00 is $4.00 exactly.
+    let ordinary = budget(Some("5"), &[]);
+    assert!(ordinary.soft_reached(4_000_000) && !ordinary.soft_reached(3_999_999));
+}
+
+#[test]
 fn a_cap_too_small_to_have_a_threshold_is_refused() {
     // `scale` floors, so a cap whose hard threshold rounds to zero stops on the
     // pre-flight checkpoint - `hard_reached(0)` is `0 >= 0` - and the run exits

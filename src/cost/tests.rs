@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use super::{Crossing, Guard, Verdict, checkpoint, install, may_spend, money, outcome, reset};
+use super::{
+    Crossing, Guard, Refusal, Verdict, checkpoint, install, may_spend, money, outcome, reset,
+};
 use crate::config::Budget;
 use crate::config::budget::resolve_budget;
 use crate::model::stream::NormalizedUsage;
@@ -128,19 +130,25 @@ fn the_installed_guard_answers_may_spend() {
     let _run = usage_totals::run_state_lock();
     reset();
     assert!(
-        may_spend(),
+        may_spend().is_ok(),
         "a run with no budget may always spend - which is every run today"
     );
 
     install(Some(budget("5")), Pricing::parse(Some(RATES)).as_ref());
-    assert!(may_spend(), "a budget nothing has spent against yet");
+    assert!(
+        may_spend().is_ok(),
+        "a budget nothing has spent against yet"
+    );
 
     stops_spending_without_waiting_to_be_told();
     stops_spending_once_the_cap_fires();
 
     reset();
     usage_totals::reset();
-    assert!(may_spend(), "reset clears the latch for the next run");
+    assert!(
+        may_spend().is_ok(),
+        "reset clears the latch for the next run"
+    );
 }
 
 /// Spend past the cap with nobody checkpointing, which is the ordinary shape of
@@ -156,7 +164,7 @@ fn stops_spending_without_waiting_to_be_told() {
     usage_totals::reset();
     usage_totals::record("local", None, "m", &spent_usage(9_000_000));
     assert!(
-        !may_spend(),
+        may_spend() == Err(Refusal::Spent),
         "the cap must hold on the ledger, not on whether the loop looked recently"
     );
     assert!(
@@ -171,10 +179,46 @@ fn stops_spending_once_the_cap_fires() {
     usage_totals::record("local", None, "m", &spent_usage(9_000_000));
     assert!(matches!(checkpoint(), Verdict::Hard(_)));
     assert!(
-        !may_spend(),
+        may_spend() == Err(Refusal::Spent),
         "/compress must not be able to spend after the cap has fired"
     );
     assert!(outcome().is_some_and(|o| o.stopped));
+}
+
+/// A ledger afi could only guess at must not be reported as a spent budget.
+///
+/// Both answers refuse the request, which is right, but they are not the same
+/// fact: this run has spent almost nothing, and telling its operator the budget
+/// is gone sends them looking for money that was never spent. It also reaches
+/// the summary as `Input` rather than `Policy`, matching what the turn loop
+/// calls the identical ledger.
+#[test]
+fn a_run_that_cannot_be_measured_says_so_rather_than_claiming_the_budget_is_gone() {
+    let guard = guard("5");
+    match guard.may_spend(&guessed(1)) {
+        Err(Refusal::Unmeasurable(why)) => {
+            assert!(why.contains("cannot be measured"), "{why}");
+            assert!(
+                !why.contains("spent its budget"),
+                "a run that spent a millionth of its cap has not spent it: {why}"
+            );
+        }
+        other => panic!("an unmeasurable ledger must name its own reason: {other:?}"),
+    }
+    // A model with no rates at all takes the same door, which a mid-run
+    // `/source` reaches with no estimate involved.
+    let unpriced = guard.may_spend(&[(
+        Billed {
+            source: "local".to_string(),
+            provider: None,
+            model: "unpriced".to_string(),
+        },
+        UsageTotals::of(&spent_usage(1)),
+    )]);
+    assert!(
+        matches!(unpriced, Err(Refusal::Unmeasurable(_))),
+        "{unpriced:?}"
+    );
 }
 
 /// One request's worth of reported input tokens.

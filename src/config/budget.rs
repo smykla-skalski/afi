@@ -150,7 +150,20 @@ pub(crate) fn resolve_budget<S: BuildHasher>(
     }
     Ok(Some(Budget {
         limit,
-        soft: scale(limit, soft_ratio),
+        // Never zero, for the same arithmetic and a milder consequence than the
+        // refusal above. A soft threshold of nothing is reached by a run that
+        // has spent nothing, so the converge note fires on the pre-flight
+        // checkpoint - before the first request exists to converge - and burns
+        // its once-per-run latch there, which means it can never land where it
+        // was meant to. One micro-dollar is the smallest threshold that says
+        // anything at all: the model gets one honest turn, and the note arrives
+        // with real spend behind it.
+        //
+        // Floored rather than refused, unlike `hard`. A cap whose hard
+        // threshold rounds away stops a run that reports success having done
+        // nothing; this one still enforces the cap exactly, and refusing a run
+        // whose money guarantee holds would be the worse trade.
+        soft: scale(limit, soft_ratio).max(1),
         hard,
         soft_ratio,
         hard_ratio,

@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use super::{ChatClient, ChatCompletionStream, ClientError, StreamRequest};
 use crate::config::Source;
-use crate::cost;
+use crate::cost::{self, Refusal};
 
 /// Wraps any [`ChatClient`], refusing billed calls once the cap has fired.
 #[derive(Debug, Clone, Default)]
@@ -36,21 +36,26 @@ impl<C> Budgeted<C> {
     }
 }
 
-/// `Err` once the run has stopped spending, `Ok` while it may.
+/// `Err` once the run may not open another request, carrying which of the two
+/// reasons it is.
 ///
 /// [`ClientError::Auth`] would be a lie and [`ClientError::Internal`] would call
-/// a working cap a bug, so this is `Http`-free and classifies as
-/// [`crate::summary::ErrorKind::Policy`]: the run was told what it may spend,
-/// and honouring that is what refused the call. In practice the turn loop stops
-/// first and returns success, so this text reaches a person only through a
-/// command that spends outside the loop.
+/// a working cap a bug, so both arms are `Http`-free. They are told apart
+/// because they are not the same fact: a run that reached its cap spent what it
+/// was allowed to, while a run afi cannot price may have spent almost nothing -
+/// and reporting that one as "spent its budget" is false, as well as `Policy`
+/// where the turn loop calls the identical ledger `Input`.
+///
+/// In practice the loop stops first and returns success, so this text reaches a
+/// person only through a command that spends outside it.
 fn spendable() -> Result<(), ClientError> {
-    if cost::may_spend() {
-        return Ok(());
+    match cost::may_spend() {
+        Ok(()) => Ok(()),
+        Err(Refusal::Spent) => Err(ClientError::Budget(
+            "this run has spent its budget and will not open another request".to_string(),
+        )),
+        Err(Refusal::Unmeasurable(why)) => Err(ClientError::Unmeasurable(why)),
     }
-    Err(ClientError::Budget(
-        "this run has spent its budget and will not open another request".to_string(),
-    ))
 }
 
 #[async_trait]

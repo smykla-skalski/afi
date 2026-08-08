@@ -143,6 +143,13 @@ pub enum ClientError {
     /// provider failure and not a bug - the cap doing what it was asked to.
     #[error("{0}")]
     Budget(String),
+    /// A budget is set and the run cannot be priced, so no request may be
+    /// opened against a cap that could never hold. Apart from [`Self::Budget`]
+    /// because the run may have spent almost nothing: telling its operator the
+    /// budget is gone would be false, and the answer is to price the model or
+    /// drop the cap rather than to wait.
+    #[error("{0}")]
+    Unmeasurable(String),
 }
 
 impl ClientError {
@@ -160,6 +167,11 @@ impl ClientError {
             // the same shape as a tool the policy rules out, and the same answer
             // a caller wants: do not retry, the invocation said so.
             Self::Budget(_) => ErrorKind::Policy,
+            // `Input`, matching what the turn loop reports for the same ledger:
+            // the run was given a cap and something it could not price, and one
+            // of the two has to change. Not `Policy`, which would say the
+            // invocation was honoured when it could not be.
+            Self::Unmeasurable(_) => ErrorKind::Input,
         }
     }
 }

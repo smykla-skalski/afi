@@ -183,6 +183,21 @@ fn blow_the_cap() {
 }
 
 #[test]
+fn a_run_afi_cannot_price_is_not_reported_as_one_that_spent_its_budget() {
+    // The two refusals are not the same fact. A run whose endpoint reported no
+    // usage may have spent almost nothing, so "this run has spent its budget"
+    // would be false - and `Policy` would say the invocation was honoured when
+    // the cap could not be computed at all. The turn loop calls this same
+    // ledger `Input`, and so does this.
+    let error = ClientError::Unmeasurable("the budget cannot be measured: ...".to_string());
+    assert_eq!(error.kind(), ErrorKind::Input);
+    assert!(
+        !error.to_string().contains("spent its budget"),
+        "{error} would send an operator looking for money nobody spent"
+    );
+}
+
+#[test]
 fn the_refusal_is_not_blamed_on_the_provider() {
     // A caller branching on `error_kind` must not retry this, and must not read
     // it as the endpoint having a bad minute: the run was told what it may spend

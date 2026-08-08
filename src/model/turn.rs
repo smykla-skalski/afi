@@ -292,7 +292,8 @@ fn report_client_error(
         // checkpoint, which stops the run before this.
         ClientError::Auth(message)
         | ClientError::Internal(message)
-        | ClientError::Budget(message) => message,
+        | ClientError::Budget(message)
+        | ClientError::Unmeasurable(message) => message,
     };
     ui.message(MessageKind::Error, message.clone());
     // Not TURN_DONE: the run failed, and reporting it as done is what made a

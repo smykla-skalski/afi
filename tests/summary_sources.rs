@@ -39,17 +39,19 @@ fn billed_usage() -> String {
 const AWS_SECRET: &str = "aws-secret-never-published";
 const AWS_KEY_ID: &str = "AKIAEXAMPLESECOND";
 
-/// A piped session that spends on `first`, switches, and spends on `second`.
+/// A piped session against the two sources, driven by `input`.
 ///
-/// The two sources authenticate differently on purpose. Both on a static key
-/// would make every assertion about a credential pass whichever source it was
-/// read off, which is the misattribution the breakdown exists to prevent: a
-/// stored key and an AWS signature are what tell the two entries apart.
+/// The two authenticate differently on purpose. Both on a static key would make
+/// every assertion about a credential pass whichever source it was read off,
+/// which is the misattribution the breakdown exists to prevent: a stored key and
+/// an AWS signature are what tell the two entries apart.
 ///
 /// `third` is configured and never switched to, which is the case the breakdown
-/// has to leave out: a source that was available is not a source that was billed.
-fn run_switched_session(prices: Option<&str>) -> Output {
-    let addr = billing_server(&billed_usage(), 12);
+/// has to leave out: a source that was available is not a source that was
+/// billed. The AWS credentials register a built-in `bedrock` source nobody asked
+/// for, which is a second one of those and rides along for free.
+fn run_session(prices: Option<&str>, input: &str) -> Output {
+    let addr = billing_server(&billed_usage(), 16);
     let base_url = format!("http://{addr}/v1");
     let home = TempDir::new().expect("a temporary home");
     let mut env = vec![
@@ -67,12 +69,12 @@ fn run_switched_session(prices: Option<&str>) -> Output {
         ("AFI_SOURCE_THIRD_MODEL", "model-three"),
     ];
     env.extend(prices.map(|prices| ("AFI_PRICES", prices)));
-    run_afi(
-        home.path(),
-        &["--summary", "json"],
-        &env,
-        "hi\n/source second\nhi again\n/quit\n",
-    )
+    run_afi(home.path(), &["--summary", "json"], &env, input)
+}
+
+/// A session that spends on `first`, switches, and spends on `second`.
+fn run_switched_session(prices: Option<&str>) -> Output {
+    run_session(prices, "hi\n/source second\nhi again\n/quit\n")
 }
 
 /// What one entry attributes: the source, what it spent, what that cost, and
@@ -154,6 +156,46 @@ fn the_breakdown_accounts_for_the_run_and_nothing_more() {
             "the summary leaked {secret}: {stdout}"
         );
     }
+}
+
+#[test]
+fn a_source_returned_to_accumulates_rather_than_appearing_twice() {
+    // The one sequence that could silently produce a second entry for one
+    // source: `record` finds the source it already has or appends a new one, and
+    // a name that came back through the turn loop spelled differently would
+    // append. Two `first` entries would still sum to the flat totals, so nothing
+    // else in the summary would look wrong - the breakdown would just report a
+    // budget twice, at half its spend each.
+    let summary = summary_of(&run_session(
+        Some(RATES),
+        "hi\n/source second\nhi again\n/source first\nhi once more\n/quit\n",
+    ));
+    let sources = summary["sources"].as_array().expect("an array");
+    let reported: Vec<(&str, u64, u64)> = sources
+        .iter()
+        .map(|entry| {
+            (
+                entry["source"].as_str().expect("a source name"),
+                entry["usage"]["input_tokens"].as_u64().expect("a count"),
+                entry["usage"]["requests"].as_u64().expect("a count"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reported,
+        vec![
+            ("first", 2 * PROMPT_TOKENS, 2),
+            ("second", PROMPT_TOKENS, 1),
+        ],
+        "the source it came back to keeps its place and its running total: {summary}"
+    );
+    // Both turns on `first` were billed at `first`'s rates, not at whichever
+    // source the run happened to be on when the ledger was read.
+    assert_eq!(sources[0]["usage"]["cost_usd"], 2.0 * FIRST_USD);
+    assert_eq!(
+        summary["source"], "first",
+        "the session ends where it began"
+    );
 }
 
 #[test]

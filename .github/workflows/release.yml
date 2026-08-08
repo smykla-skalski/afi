@@ -22,8 +22,12 @@ name: release
 #   apt      push the Debian packages.
 #   verify   assert the release and the apt repository agree.
 #   publish  flip the draft, then publish the crate. The first moment a user can
-#            see anything, and the crate is last because it is the only step of a
-#            release that cannot be undone.
+#            see anything, and the crate comes after everything reversible
+#            because it is the one step of a release that cannot be undone.
+#   homebrew ask the tap for a formula update, and wait until it has one. After
+#            the crate, and in its own job: it publishes into another repository
+#            and is the only step here anyone can put right afterwards by hand,
+#            so it has no business standing between the release and the crate.
 #
 # The bump is committed in `plan`, before the build, and that is deliberate even
 # though it is the one thing here that writes outside the runner early. The
@@ -72,6 +76,10 @@ name: release
 #
 # The plan job refuses to publish while any of those is unset, so a missing step
 # fails before a tag exists rather than halfway through a release.
+#
+# Homebrew needs no setup here beyond the app key the plan job already checks.
+# The formula and the workflow that rewrites it live in
+# smykla-skalski/homebrew-tap; this workflow only dispatches to it and waits.
 on:
   schedule:
     # 04:17 UTC. Off the hour on purpose: GitHub queues scheduled jobs across all
@@ -602,3 +610,50 @@ jobs:
             exit 1
           fi
           mise run publish:crate
+
+  homebrew:
+    name: Update the Homebrew formula
+    needs: [plan, publish]
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
+    # The tap installs the formula on a macOS runner to prove it works, which is
+    # the slow part of what this job waits for. This is the backstop under the
+    # script's own deadline.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      # Scoped to one repository and two permissions, unlike the tokens the plan
+      # and release jobs mint. Those push to a branch whose ruleset this app
+      # bypasses, and a permission-scoped token loses the bypass; this one only
+      # sends a dispatch and reads, so no ruleset is involved. `actions: read`
+      # is for the run status the script reports on.
+      - name: Mint a token for the tap
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SMYKLOT_CLIENT_ID || 'Iv23liMyF31aNYay8IXy' }}
+          private-key: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
+          owner: smykla-skalski
+          repositories: homebrew-tap
+          permission-contents: write
+          permission-actions: read
+
+      # The workflow's own ref, not the release tag, because what is wanted here
+      # is the current tooling. A fix to publish-homebrew.sh should apply the
+      # next time this is re-run, not only to releases cut after it. Same reason
+      # build-targets.yml takes the target list and the smoke test from the
+      # caller's ref rather than from the commit it is building.
+      - name: Check out the tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The script dispatches to the tap and then waits for Formula/afi.rb to
+      # name this release, because a dispatch is accepted whether or not any
+      # workflow matches it. It skips a prerelease rather than failing on one.
+      # See its header, and update-afi-formula.yml in the tap for the other end.
+      - name: Update the Homebrew formula
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: ./scripts/publish-homebrew.sh "${VERSION}"

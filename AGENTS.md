@@ -48,7 +48,7 @@ Run validation in the session worktree. Do not run unrelated gates. Unit tests b
 - **CLI:** session listing, resume and session flag resolution, transcript printing, and the `--help` and `--version` short-circuits, the latter carrying build metadata from `build.rs` plus the running executable's own digest.
 - **Memory:** developer-memory save, remember, and list operations backed by Markdown files.
 - **Metrics:** abbreviated token counts in the statistics footer.
-- **Release:** version planning from the commit history, a build matrix that compiles, runs, and packages every target before a tag exists, draft-then-publish ordering, apt and crates.io publication, build provenance, and a reconciliation gate. `scripts/release-targets.sh` is the single definition of what a release contains; `docs/releasing.md` is the operator runbook.
+- **Release:** version planning from the commit history, a build matrix that compiles, runs, and packages every target before a tag exists, draft-then-publish ordering, apt, crates.io, and Homebrew publication, build provenance, and a reconciliation gate. `scripts/release-targets.sh` is the single definition of what a release contains; `docs/releasing.md` is the operator runbook. The Homebrew formula and the workflow that rewrites it live in `smykla-skalski/homebrew-tap`, which the release only dispatches to and then waits on.
 
 ## Rust conventions
 

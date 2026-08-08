@@ -8,6 +8,14 @@ A no-nonsense coding agent that doesn't use 50K tokens of context to say "hello.
 
 ## Install
 
+### Homebrew
+
+```
+brew install smykla-skalski/tap/afi
+```
+
+macOS on both architectures, and Linux on x86_64 and aarch64. The tap carries stable releases only. Its updater verifies each archive's build provenance before pinning the checksum the formula installs from, so a `brew upgrade afi` has already had the check described under [checking what you downloaded](#checking-what-you-downloaded) run on it.
+
 ### Ubuntu and Debian
 
 ```

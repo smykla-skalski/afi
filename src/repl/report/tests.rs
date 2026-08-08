@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use super::{billing_source, spend_by_source};
-use crate::config::Source;
+use crate::config::{Bedrock, Protocol, Source};
 use crate::model::usage_totals::{ByModel, BySource, UsageTotals};
 use crate::pricing::Pricing;
 use crate::summary::RunAuth;
@@ -34,11 +34,28 @@ fn two_sources() -> HashMap<String, Source> {
         source("first", Some("sk-first")),
         source("second", None),
         source("third", Some("sk-third")),
+        signed_source("signed"),
     ]
     .into_iter()
     .map(|source| (source.name.clone(), source))
     .collect()
 }
+
+/// A source that signs rather than sends a key. Here because a mode alone is a
+/// weak thing to assert on: `sigv4` carries identifiers, and an entry that took
+/// them from the wrong source would name the wrong AWS account.
+fn signed_source(name: &str) -> Source {
+    let bedrock = Bedrock {
+        region: Some(REGION.to_string()),
+        access_key_id: Some(ACCESS_KEY_ID.to_string()),
+        secret_access_key: Some("aws-secret-never-published".to_string()),
+        ..Bedrock::default()
+    };
+    source(name, None).with_protocol(Protocol::Bedrock(Box::new(bedrock)))
+}
+
+const REGION: &str = "us-east-1";
+const ACCESS_KEY_ID: &str = "AKIAEXAMPLESIGNED";
 
 fn rates() -> Option<Pricing> {
     Pricing::parse(Some(RATES))
@@ -106,6 +123,30 @@ fn each_entry_takes_its_counts_and_its_credential_from_its_own_source() {
     // credential off the wrong source reports the wrong mode.
     assert_eq!(spend[0].auth, Some(RunAuth::ApiKey));
     assert_eq!(spend[1].auth, Some(RunAuth::NoCredential));
+}
+
+#[test]
+fn an_entry_carries_the_identifiers_of_the_credential_that_paid_it() {
+    // A mode on its own is weak: two sources on static keys both report
+    // `api_key`, so an entry that read its credential off the wrong source would
+    // still look right. The identifiers are what name a budget, and getting them
+    // from the wrong source names the wrong AWS account beside real spend.
+    let billed: BySource = vec![
+        spent("signed", "model-one", totals(MILLION, 0, 1)),
+        spent("first", "model-one", totals(1, 0, 1)),
+    ];
+    let sources = two_sources();
+    let spend = spend_by_source(&sources, rates().as_ref(), &billed);
+    assert_eq!(
+        spend[0].auth,
+        Some(RunAuth::SigV4 {
+            region: REGION,
+            access_key_id: ACCESS_KEY_ID,
+        })
+    );
+    // The source beside it publishes nothing, so a leak of these into the second
+    // entry would be visible rather than plausible.
+    assert_eq!(spend[1].auth, Some(RunAuth::ApiKey));
 }
 
 #[test]

@@ -9,6 +9,7 @@
 mod common;
 
 use std::process::Output;
+use std::sync::LazyLock;
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -72,14 +73,19 @@ fn run_session(prices: Option<&str>, input: &str) -> Output {
     run_afi(home.path(), &["--summary", "json"], &env, input)
 }
 
-/// A session that spends on `first`, switches, and spends on `second`.
-fn run_switched_session(prices: Option<&str>) -> Output {
-    run_session(prices, "hi\n/source second\nhi again\n/quit\n")
-}
+/// A priced session that spends on `first`, switches, and spends on `second`.
+///
+/// Run once and shared, because two tests below assert different halves of the
+/// same summary: one that the entries attribute correctly, one that they account
+/// for the whole run. Splitting the assertions keeps each failure legible;
+/// sharing the process keeps that from costing a second binary and a second
+/// server thread. The value is immutable, so the tests stay order-independent.
+static SWITCHED: LazyLock<Output> =
+    LazyLock::new(|| run_session(Some(RATES), "hi\n/source second\nhi again\n/quit\n"));
 
 #[test]
 fn each_source_reports_its_own_counts_its_own_cost_and_its_own_credential() {
-    let summary = summary_of(&run_switched_session(Some(RATES)));
+    let summary = summary_of(&SWITCHED);
     assert_eq!(
         summary["auth"],
         Value::Null,
@@ -122,8 +128,7 @@ fn each_source_reports_its_own_counts_its_own_cost_and_its_own_credential() {
 
 #[test]
 fn the_breakdown_accounts_for_the_run_and_nothing_more() {
-    let output = run_switched_session(Some(RATES));
-    let summary = summary_of(&output);
+    let summary = summary_of(&SWITCHED);
     let sources = summary["sources"].as_array().expect("an array");
 
     // A breakdown that does not add up to the totals beside it is worse than no
@@ -149,7 +154,7 @@ fn the_breakdown_accounts_for_the_run_and_nothing_more() {
     // The block sits one field away from two credentials, and this JSON is what
     // CI uploads as an unmasked artifact. The AWS access key id is the one
     // identifier here that is safe to publish; its secret half is not.
-    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    let stdout = String::from_utf8_lossy(&SWITCHED.stdout);
     for secret in ["sk-first", AWS_SECRET] {
         assert!(
             !stdout.contains(secret),
@@ -203,7 +208,7 @@ fn an_unpriced_run_still_says_who_spent_what() {
     // The counts and the credential do not depend on a rate table, so a run with
     // no prices still attributes its tokens - it just reports no money, the same
     // way the flat block does.
-    let summary = summary_of(&run_switched_session(None));
+    let summary = summary_of(&run_session(None, "hi\n/source second\nhi again\n/quit\n"));
     let sources = summary["sources"].as_array().expect("an array");
     assert_eq!(sources.len(), 2);
     for entry in sources {

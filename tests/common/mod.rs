@@ -8,15 +8,17 @@
 //! which is the part that stays in the test.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::fs;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 
 use afi::Runtime;
 use afi::config::{Bedrock, Protocol};
 use serde_json::Value;
+use tempfile::TempDir;
 
 /// The answer a context-window probe gets. afi asks on the side and falls back
 /// when the endpoint is not there, so a canned server need not implement it.
@@ -68,6 +70,151 @@ pub fn build_with_env_file(
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     Runtime::build(&args, env_map, env_file)
+}
+
+// --- the instruction-loading checkout -----------------------------------------
+//
+// Here rather than in one of the two `instructions*` test files because both need
+// it: those files are separate binaries only to stay under the per-file line cap,
+// and a second copy of the tree and the spawn is how the two would drift.
+
+/// The rule a checkout's root `AGENTS.md` carries.
+#[allow(dead_code)]
+pub const ROOT_RULE: &str = "Run every command through mise.";
+/// The rule a subtree's own `AGENTS.md` carries, which has to read last.
+#[allow(dead_code)]
+pub const DEEP_RULE: &str = "In this crate, never touch the generated bindings.";
+/// The rule one directory above the checkout, which no walk may ever reach.
+#[allow(dead_code)]
+pub const OUTSIDE_RULE: &str = "Whatever the parent directory happens to say.";
+
+/// A checkout with a `.git` marker, a root `AGENTS.md`, and a deeper one, inside a
+/// directory that also holds an `AGENTS.md` the walk must never climb to.
+#[allow(dead_code)]
+pub fn checkout() -> TempDir {
+    let outer = TempDir::new().expect("the temp dir must open");
+    fs::write(outer.path().join("AGENTS.md"), OUTSIDE_RULE).expect("the outer file must write");
+    let root = outer.path().join("repo");
+    fs::create_dir_all(root.join(".git")).expect("the marker must write");
+    fs::create_dir_all(root.join("crates/api")).expect("the subtree must write");
+    fs::write(root.join("AGENTS.md"), ROOT_RULE).expect("the root file must write");
+    fs::write(root.join("crates/api/AGENTS.md"), DEEP_RULE).expect("the deep file must write");
+    outer
+}
+
+/// A [`checkout`] plus a source file inside `crates/api` for a tool call to name.
+///
+/// Here rather than in one of the `instructions*` test binaries because three of them
+/// need it, and a second copy of the tree is how they would drift.
+#[allow(dead_code)]
+pub fn workspace() -> TempDir {
+    let dir = checkout();
+    fs::create_dir_all(repo(&dir).join("crates/api/src")).expect("the subtree must write");
+    fs::write(repo(&dir).join("crates/api/src/lib.rs"), "pub fn go() {}\n")
+        .expect("the source file must write");
+    dir
+}
+
+/// The repository root inside a [`checkout`].
+#[allow(dead_code)]
+pub fn repo(dir: &TempDir) -> PathBuf {
+    dir.path().join("repo")
+}
+
+/// One-shot afi run from `cwd`, which is what these tests are about: the walk
+/// starts at the process's own working directory.
+///
+/// Points at `addr` when there is one and at a closed port when there is not - a
+/// run that refuses to start never reaches either.
+#[allow(dead_code)]
+pub fn run_afi_in(
+    home: &TempDir,
+    cwd: &Path,
+    addr: Option<SocketAddr>,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
+    let mut args = vec!["-f", "-"];
+    args.extend_from_slice(extra);
+    spawn_afi_in(home, cwd, addr, &args, env, "review the diff\n")
+}
+
+/// A piped REPL session rather than a one-shot, which is the path that reads slash
+/// commands off stdin.
+#[allow(dead_code)]
+pub fn repl_afi_in(
+    home: &TempDir,
+    cwd: &Path,
+    addr: Option<SocketAddr>,
+    extra: &[&str],
+    input: &str,
+) -> Output {
+    spawn_afi_in(home, cwd, addr, extra, &[], input)
+}
+
+/// The one spawn every helper above funnels through, so a second copy cannot drift
+/// and make the feature look like it misbehaved. Public for the test that needs its
+/// own prompt text rather than a new copy of the twelve lines below.
+#[allow(dead_code)]
+pub fn spawn_afi_in(
+    home: &TempDir,
+    cwd: &Path,
+    addr: Option<SocketAddr>,
+    args: &[&str],
+    env: &[(&str, &str)],
+    input: &str,
+) -> Output {
+    let base = addr.map_or_else(
+        || "http://127.0.0.1:9/v1".to_string(),
+        |addr| format!("http://{addr}/v1"),
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_afi"));
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("AFI_HOME", home.path())
+        .env("HOME", home.path())
+        .env("AFI_BASE_URL", base)
+        .env("AFI_MODEL", "test-model")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("afi must start");
+    let written = child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes());
+    // A run that refuses its configured instructions exits before reading stdin,
+    // so the pipe is already closed by the time this writes. That is what some of
+    // these cases assert, not a failure of the harness.
+    match written {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("the prompt must write: {error}"),
+    }
+    child.wait_with_output().expect("afi must exit")
+}
+
+/// The project instruction paths a finished run's summary lists.
+#[allow(dead_code)]
+pub fn instruction_paths(output: &Output) -> Vec<String> {
+    summary_of(output)["instructions"]
+        .as_array()
+        .expect("instructions is always an array")
+        .iter()
+        .map(|path| path.as_str().expect("a path").to_string())
+        .collect()
+}
+
+/// A finished process's stderr, where every refusal is reported.
+#[allow(dead_code)]
+pub fn stderr_of(output: &Output) -> String {
+    String::from_utf8(output.stderr.clone()).expect("stderr must be utf-8")
 }
 
 /// Read past a request's headers and the body they announce, returning the body.

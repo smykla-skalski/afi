@@ -12,6 +12,7 @@ mod bedrock;
 mod builtins;
 mod effort;
 mod file;
+mod instructions;
 mod protocol;
 mod runtime;
 mod sources;
@@ -22,6 +23,7 @@ pub(crate) use bedrock::dns_suffix;
 pub use bedrock::{Bedrock, WebIdentity};
 pub use effort::Effort;
 pub use file::{FileSettings, Origin, config_files};
+pub use instructions::nested;
 pub use protocol::{
     ANTHROPIC_IDENTITY, AWS_IDENTITY, Federation, Identity, IdentitySource, IdentityVars, NOOP_KEY,
     Protocol, is_placeholder,

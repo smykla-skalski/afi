@@ -5,22 +5,25 @@ mod commands;
 mod core;
 mod failure;
 mod report;
+mod resume;
 mod tui;
 
 pub use commands::CommandResult;
 
+use std::fmt::Write as _;
 use std::io::{self, IsTerminal};
 use std::time::Instant;
 
 use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::approval::Level;
-use crate::config::Runtime;
+use crate::config::{Runtime, nested};
 use crate::summary::{ErrorKind, RunError};
 use crate::term::plain::PlainUi;
 
-use core::{ReplCore, restore_prompt_resume, run_one_shot_async};
+use core::{ReplCore, run_one_shot_async};
 pub(crate) use core::{Shared, TurnParams, run_turn_loop};
+use resume::restore_prompt_resume;
 
 pub const DIM: &str = "\x1b[2m";
 pub const CYAN: &str = "\x1b[36m";
@@ -55,6 +58,9 @@ pub fn banner(rt: &Runtime) -> String {
     if let Some(text) = tool_policy_text(rt) {
         parts.push(format!("{YELLOW}{text}{RESET}"));
     }
+    if let Some(text) = instructions_text(rt) {
+        parts.push(format!("{DIM}{text}{RESET}"));
+    }
     if let Some(src) = rt.active_source() {
         parts.push(format!("{DIM}{}{RESET}", src.base_url));
     }
@@ -74,6 +80,9 @@ pub(crate) fn header(rt: &Runtime) -> String {
     if let Some(text) = tool_policy_text(rt) {
         parts.push(text);
     }
+    if let Some(text) = instructions_text(rt) {
+        parts.push(text);
+    }
     if let Some(src) = rt.active_source() {
         parts.push(src.base_url.clone());
     }
@@ -86,6 +95,97 @@ pub(crate) fn header(rt: &Runtime) -> String {
 fn tool_policy_text(rt: &Runtime) -> Option<String> {
     let policy = &rt.tool_policy;
     (!policy.is_unrestricted()).then(|| format!("tools:{}", policy.describe()))
+}
+
+/// An `instructions:` segment counting the project files the run loaded, and only
+/// when it loaded any.
+///
+/// The interactive half of reporting what was loaded, which the run summary does
+/// for a job nobody is watching. A count rather than the paths, because there can
+/// be several and this is one line; `/instructions` lists them with their sizes.
+fn instructions_text(rt: &Runtime) -> Option<String> {
+    let loaded = all_instructions(rt).len();
+    (loaded > 0).then(|| format!("instructions:{loaded}"))
+}
+
+/// How an instruction file came to be in front of the model.
+///
+/// Three answers rather than two, because they answer different questions about why it
+/// is behaving as it is: a rule it has had all along, one it met when it read into a
+/// subtree, and one this run never sent at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Arrival {
+    AtStartup,
+    OnDemand,
+    /// Replayed by a resumed session, sent by the run that saved it.
+    Resumed,
+}
+
+impl Arrival {
+    /// The trailing note `/instructions` prints, empty for the ordinary case.
+    fn note(self) -> &'static str {
+        match self {
+            Self::AtStartup => "",
+            Self::OnDemand => ", loaded on demand",
+            Self::Resumed => ", carried in from the resumed session",
+        }
+    }
+}
+
+/// One instruction file in front of the model: its path, its bytes, and how it got
+/// there.
+pub(crate) type LoadedInstruction = (String, usize, Arrival);
+
+/// Every project instruction file this run has sent, in the order it sent them.
+///
+/// The one place the two halves are joined. Three callers need the answer - the
+/// status line counts it, `/instructions` prints it, the run summary reports its
+/// paths - and three chains of the same two sources would be three chances for the
+/// count, the listing, and the summary to describe different runs.
+pub(crate) fn all_instructions(rt: &Runtime) -> Vec<LoadedInstruction> {
+    let tag = |arrival: Arrival| {
+        move |(path, bytes): (String, usize)| -> LoadedInstruction { (path, bytes, arrival) }
+    };
+    rt.prompt()
+        .instruction_files()
+        .into_iter()
+        .map(tag(Arrival::AtStartup))
+        .chain(nested::carried_in().into_iter().map(tag(Arrival::Resumed)))
+        .chain(nested::loaded().into_iter().map(tag(Arrival::OnDemand)))
+        .collect()
+}
+
+/// What `/instructions` prints: every project instruction file this run loaded and
+/// the bytes it put in front of the model.
+///
+/// The first thing to reach for when the model ignores a rule the repository
+/// states, which is otherwise unanswerable from inside a session: a file that was
+/// never found, a subtree file above the directory afi started in, and a rule the
+/// model simply did not follow all look identical from the outside.
+///
+/// The sizes are what was sent rather than what the files hold now, so an edit made
+/// mid-session shows up as the difference between this listing and the disk. afi
+/// reads them once, at startup, and does not watch them.
+///
+/// Beside [`instructions_text`] because the two report the same thing at different
+/// lengths, and a status line that disagreed with the listing would be worse than
+/// either alone.
+#[must_use]
+pub(crate) fn instructions_listing(rt: &Runtime) -> String {
+    let loaded = all_instructions(rt);
+    if loaded.is_empty() {
+        return "No project instructions loaded. Start afi with --instructions project \
+                to read AGENTS.md and CLAUDE.md from this checkout, or --instructions \
+                <path,...> to name files."
+            .to_string();
+    }
+    let total: usize = loaded.iter().map(|(_, bytes, _)| bytes).sum();
+    let mut out = format!("{} file(s), {total} bytes sent:", loaded.len());
+    for (path, bytes, arrival) in loaded {
+        // Infallible: a String write cannot fail.
+        let _ = write!(out, "\n  {path} ({bytes} bytes{})", arrival.note());
+    }
+    out
 }
 
 fn model_name(rt: &Runtime) -> String {

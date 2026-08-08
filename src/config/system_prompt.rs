@@ -15,6 +15,7 @@
 //! refusing every replaced run instead would make the mode unusable. See
 //! `crate::prompt`.
 
+use std::collections::HashMap;
 use std::fs;
 use std::sync::LazyLock;
 
@@ -22,6 +23,9 @@ use serde_json::{Value, json};
 
 use crate::prompt;
 use crate::util;
+
+use super::args::ParsedArgs;
+use super::instructions::{self, Instructions};
 
 /// How a supplied prompt meets the built-in one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -73,6 +77,14 @@ pub struct SystemPrompt {
     /// The file the run was given and how it was combined. `None` is afi's own
     /// prompt, unchanged.
     from: Option<(PromptMode, String)>,
+    /// The project instructions whose text is already in `text`, kept as the value
+    /// the walk produced rather than exploded into fields.
+    ///
+    /// Whole, because the exploded form lost a field: `walked` was assigned after an
+    /// early return that fired whenever the walk found no file, so a repository with
+    /// rules only in a subtree silently got neither half of the feature. A value that
+    /// is moved in one piece has nothing to drop.
+    instructions: Instructions,
 }
 
 impl SystemPrompt {
@@ -97,6 +109,43 @@ impl SystemPrompt {
         self.from.as_ref().map(|(_, path)| path.as_str())
     }
 
+    /// The project instructions this prompt carries, for the rest of `config` -
+    /// [`instructions::nested`] asks whether a walk found them and which files it
+    /// already sent.
+    pub(super) fn instructions(&self) -> &Instructions {
+        &self.instructions
+    }
+
+    /// The instruction files this prompt carries, as `(path, bytes sent)` in the
+    /// order they were appended. Empty for a run that loaded none.
+    ///
+    /// The bytes are what went in front of the model, which is what a `/instructions`
+    /// listing has to show: the file on disk may have been edited since, and the
+    /// difference between the two is the answer to "why is it ignoring my rule".
+    #[must_use]
+    pub(crate) fn instruction_files(&self) -> Vec<(String, usize)> {
+        self.instructions.files()
+    }
+
+    /// The same prompt with a project's own instructions after it.
+    ///
+    /// Last, and after a supplied prompt rather than before it, so the seam
+    /// between afi's part and the operator's is the one the two modes already
+    /// agree on. What the repository said does not become the final word by
+    /// sitting there - the block says so itself, which is the only form of
+    /// precedence a model can act on.
+    ///
+    /// A walk that found nothing still lands here, text or no text: it is the run's
+    /// answer to "read the tree", and the subtree half reads from it later.
+    pub(super) fn with(mut self, loaded: Instructions) -> Self {
+        if let Some(block) = loaded.block() {
+            self.text.push_str("\n\n");
+            self.text.push_str(&block);
+        }
+        self.instructions = loaded;
+        self
+    }
+
     /// The message a conversation opens with.
     ///
     /// The one place the shape is written down. Every entry point that starts or
@@ -118,8 +167,52 @@ pub(super) fn builtin() -> &'static SystemPrompt {
     static BUILT_IN: LazyLock<SystemPrompt> = LazyLock::new(|| SystemPrompt {
         text: prompt::system(),
         from: None,
+        instructions: Instructions::default(),
     });
     &BUILT_IN
+}
+
+/// The whole system prompt this run sends, from every flag and variable that has
+/// a say in it.
+///
+/// One result rather than two, so no path exists where a run sends a prompt
+/// missing the project rules it was told to follow. The supplied file resolves
+/// first because it is the more explicit of the two and only one refusal is
+/// reported. A flag beats its variable, as everywhere else.
+///
+/// The instruction walk reads the process's own working directory, and only when
+/// the setting asks for it. That is what keeps a `Runtime` built from a caller's
+/// own env from touching a tree nobody named - see `Runtime::resolve_env`.
+///
+/// # Errors
+///
+/// Whatever [`resolve`] or [`instructions::resolve`] refused, either of which is
+/// the run being told to follow instructions it cannot.
+pub(super) fn for_run(
+    parsed: &ParsedArgs,
+    env: &HashMap<String, String>,
+) -> Result<SystemPrompt, String> {
+    let prompt = resolve(
+        setting(
+            parsed.system_prompt_file.as_ref(),
+            env.get("AFI_SYSTEM_PROMPT_FILE"),
+        ),
+        setting(
+            parsed.system_prompt_mode.as_ref(),
+            env.get("AFI_SYSTEM_PROMPT_MODE"),
+        ),
+    )?;
+    let loaded = instructions::resolve(
+        setting(parsed.instructions.as_ref(), env.get("AFI_INSTRUCTIONS")),
+        None,
+        env,
+    )?;
+    Ok(prompt.with(loaded))
+}
+
+/// The flag if it was given, else the variable. The one rule, applied three times.
+fn setting<'a>(flag: Option<&'a String>, variable: Option<&'a String>) -> Option<&'a str> {
+    flag.or(variable).map(String::as_str)
 }
 
 /// Resolve the prompt this run sends from an already-merged file and mode.
@@ -156,6 +249,7 @@ pub fn resolve(file: Option<&str>, mode: Option<&str>) -> Result<SystemPrompt, S
         // operator wrote reads the same way whichever mode it is sent under.
         text: format!("{afi}\n\n{supplied}"),
         from: Some((mode, path.to_string())),
+        instructions: Instructions::default(),
     })
 }
 
@@ -185,7 +279,11 @@ fn read(path: &str) -> Result<String, String> {
 /// reporting instructions the model never received. Trimming rather than
 /// rejecting also drops the BOM a Windows editor puts in front of a real prompt,
 /// which is noise the model would otherwise be sent.
-fn unreadable(c: char) -> bool {
+///
+/// Shared with [`super::instructions`], which trims the same way: a repository's
+/// `AGENTS.md` holding nothing but a byte-order mark is as empty as a supplied
+/// prompt holding one.
+pub(super) fn unreadable(c: char) -> bool {
     c.is_whitespace()
         || c.is_control()
         || matches!(c,

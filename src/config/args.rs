@@ -22,6 +22,7 @@ pub struct ParsedArgs {
     pub summary_file: Option<String>,
     pub system_prompt_file: Option<String>,
     pub system_prompt_mode: Option<String>,
+    pub instructions: Option<String>,
     pub allowed_tools: Option<String>,
     pub disallowed_tools: Option<String>,
     pub effort: Option<String>,
@@ -163,6 +164,9 @@ fn apply_value_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> Op
             flag,
             value,
         ),
+        "--instructions" => {
+            set_required_value(&mut out.flag_errors, &mut out.instructions, flag, value)
+        }
         "--prompt-file" | "-f" => set_prompt_file(out, flag, value),
         _ => return None,
     })
@@ -218,9 +222,10 @@ fn set_required(
 /// written nothing to the path the next step reads, or leave a file from an
 /// earlier run standing as this run's result. `--system-prompt-file "$PROMPT"`
 /// is the same mistake and costs more: the run would send afi's own prompt while
-/// the command line says it is sending its own. The unquoted `$OUT` drops the
-/// argument entirely and was already refused; both spellings now fail the same
-/// way.
+/// the command line says it is sending its own. `--instructions "$RULES"` is that
+/// one again - a review job following none of the rules it was pointed at reads as
+/// a job with nothing to say about them. The unquoted `$OUT` drops the argument
+/// entirely and was already refused; both spellings now fail the same way.
 ///
 /// `--config` refuses both for the same reason: a run that silently forgets the
 /// file it was pointed at is configured by something other than what the command

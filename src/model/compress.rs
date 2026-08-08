@@ -224,6 +224,36 @@ mod tests {
     }
 
     #[test]
+    fn compression_keeps_the_system_message_whole() {
+        // The project instructions a run loads ride inside the system message, so
+        // this is what keeps them from being folded into a summary of themselves.
+        // Harnesses that put them in a user message have to re-read the file and
+        // re-inject after every compaction; afi has nothing to re-inject because
+        // nothing was dropped. Asserted on the whole string rather than on the role,
+        // since a summarized copy would still be role `system`.
+        //
+        // This covers `compress`, the fold `maybe_autocompress` calls. `/compress`
+        // folds through `repl::commands::apply_compression`, which holds the same
+        // property by construction - it pushes `messages[0]` unchanged - and is
+        // private to that module, so it cannot be asserted on from here.
+        let system = json!({"role": "system", "content": "afi rules\n\nContents of /r/AGENTS.md:\n\nuse mise"});
+        let mut messages = vec![system.clone()];
+        for turn in ["one", "two", "three", "four", "five", "six"] {
+            messages.push(msg("user", turn));
+        }
+        compress(&mut messages, COMPRESS_KEEP, false, |_| {
+            Some("summary".to_string())
+        })
+        .expect("this history is long enough to compress");
+
+        assert_eq!(messages[0], system, "sent unchanged after a fold");
+        assert!(
+            messages[1..].iter().all(|m| m["role"] != "system"),
+            "and only once: {messages:?}"
+        );
+    }
+
+    #[test]
     fn compress_too_short_returns_none() {
         let mut messages = vec![
             json!({"role": "system", "content": "sys"}),

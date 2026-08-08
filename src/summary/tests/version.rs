@@ -47,6 +47,7 @@ fn the_shape_the_version_stands_for_is_pinned() {
             "elapsed_secs",
             "error",
             "error_kind",
+            "instructions",
             "model",
             "ok",
             "schema_version",
@@ -94,7 +95,7 @@ fn the_types_the_shape_promises_are_pinned_too() {
     // content is: `error` and `error_kind` in `super`, `effort` beside the
     // source that resolved it.
     let json = summary(true, "done", totals(3)).to_json();
-    let pinned: [Pinned; 10] = [
+    let pinned: [Pinned; 11] = [
         ("schema_version", Value::is_u64, "a number"),
         ("ok", Value::is_boolean, "a boolean"),
         ("source", Value::is_string, "a string"),
@@ -107,6 +108,10 @@ fn the_types_the_shape_promises_are_pinned_too() {
         // iterates it without checking for null first.
         ("sources", Value::is_array, "an array"),
         ("system_prompt", Value::is_object, "an object"),
+        // An array on every run, empty included. A consumer that reads it as a
+        // list must not have to handle a null for the ordinary case of a run that
+        // loaded no project instructions.
+        ("instructions", Value::is_array, "an array"),
     ];
     for (name, holds, expected) in pinned {
         assert!(holds(&json[name]), "{name} must stay {expected}: {json}");

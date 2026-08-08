@@ -1,7 +1,7 @@
 //! Action-path extraction, path-scope classification, the classifier user
 //! message, and the `confirm` approval gate.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -38,6 +38,49 @@ pub fn extract_action_path(action: &str) -> Option<String> {
     None
 }
 
+/// The absolute path a tool call's `path` argument really acts on.
+///
+/// One definition, because every caller needs the same three things - a leading `~`
+/// expanded, a relative path joined onto the working directory, and `..` and links
+/// resolved - and a caller that skips any of them gets a path that compares as
+/// inside the project while naming something outside it.
+///
+/// `canonicalize` alone is not enough: it needs the whole path to exist, and
+/// `write_file` names a file that does not. The lexical fallback leaves `..` in place,
+/// and `Path::starts_with` is a component-wise test - `/repo/src/../../..` starts with
+/// `/repo` - so a boundary check on the joined form passes for a path landing anywhere.
+/// The components are walked instead, each `..` resolving what precedes it before
+/// stepping up, which follows a symlink rather than lexically undoing it.
+///
+/// A path whose leaf does not exist resolves only as far as the disk allows, so
+/// `link/newfile` under a symlinked `link` comes back unresolved. A caller enforcing a
+/// boundary therefore canonicalizes the *directory* it ends up with rather than
+/// trusting this to have done it - which is what the nested instruction loader does.
+#[must_use]
+pub fn resolve_action_path(path: &str, cwd: &Path) -> PathBuf {
+    let expanded = expand_tilde(path);
+    let joined = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+    if let Ok(real) = joined.canonicalize() {
+        return real;
+    }
+    let mut out = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out = out.canonicalize().unwrap_or(out);
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.canonicalize().unwrap_or(out)
+}
+
 /// Classify a path as `in_project/outside_project`, `in_cwd`, `in_downloads`, etc.
 #[must_use]
 pub fn classify_action_path(path: &str, cwd: &Path, project_root: &Path) -> serde_json::Value {
@@ -51,14 +94,7 @@ fn classify_action_path_with_home(
     project_root: &Path,
     home: &Path,
 ) -> serde_json::Value {
-    let expanded = expand_tilde(path);
-    let abs_path = if expanded.is_absolute() {
-        expanded.canonicalize().unwrap_or(expanded)
-    } else {
-        cwd.join(&expanded)
-            .canonicalize()
-            .unwrap_or_else(|_| cwd.join(&expanded))
-    };
+    let abs_path = resolve_action_path(path, cwd);
     let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
     let downloads = home.join("Downloads");
 

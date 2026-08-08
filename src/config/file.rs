@@ -150,7 +150,11 @@ fn project_file(cwd: Option<&Path>) -> Option<PathBuf> {
 
 /// The nearest ancestor holding `.git`, which is a directory in a clone and a
 /// file in a worktree - `exists` covers both.
-fn git_root(from: &Path) -> Option<PathBuf> {
+///
+/// Shared with [`super::instructions`] so "the project's boundary" is one rule
+/// rather than two that can drift: both walk up from the working directory for a
+/// file the repository wrote, and both must stop in the same place.
+pub(super) fn git_root(from: &Path) -> Option<PathBuf> {
     from.ancestors()
         .find(|dir| dir.join(".git").exists())
         .map(Path::to_path_buf)

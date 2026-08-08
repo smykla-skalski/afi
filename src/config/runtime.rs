@@ -56,7 +56,8 @@ pub struct Runtime {
     pub pricing: Option<Pricing>,
     /// The system prompt every turn of this run sends, resolved once here so a
     /// file named on the command line is read before the run is paid for rather
-    /// than on the first request.
+    /// than on the first request. The project's own instruction files are read
+    /// here too, into the same result - see [`super::instructions`].
     ///
     /// Held as the failure rather than as a fallback, so nothing downstream can
     /// send the built-in text to a run that named a file of its own. `refusals`
@@ -148,6 +149,9 @@ impl Runtime {
         let parsed = parse_args(args);
         let approval = resolve_approval(&env, &parsed);
         apply_tool_flags(&mut env, &parsed);
+        // Ahead of the struct below, and ahead of the moves that follow, because
+        // it wants the whole of `parsed` and the env after the flags landed in it.
+        let system_prompt = system_prompt::for_run(&parsed, &env);
         // The config file first: `refusals` reports in this order, and a file
         // nobody could read explains every setting that then looks unset.
         //
@@ -201,16 +205,7 @@ impl Runtime {
             flag_errors,
             // At startup, so a typo is heard about before the run, not after.
             pricing: Pricing::from_env(&env),
-            system_prompt: system_prompt::resolve(
-                parsed
-                    .system_prompt_file
-                    .as_deref()
-                    .or_else(|| env.get("AFI_SYSTEM_PROMPT_FILE").map(String::as_str)),
-                parsed
-                    .system_prompt_mode
-                    .as_deref()
-                    .or_else(|| env.get("AFI_SYSTEM_PROMPT_MODE").map(String::as_str)),
-            ),
+            system_prompt,
             env,
         };
 

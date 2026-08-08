@@ -36,7 +36,7 @@ Run validation in the session worktree. Do not run unrelated gates. Unit tests b
 
 `afi` is a small coding agent for self-hosted and remote models. It speaks two wire protocols: OpenAI-compatible `/chat/completions` for llama.cpp, vLLM, SGLang, Z.ai, OpenAI, OpenRouter, and Amazon Bedrock, and Anthropic's native Messages API. It renders its interface with raw terminal escapes.
 
-- **Config:** source discovery and switching, per-source protocol and auth mode, provider routing, environment-file loading, and approval state.
+- **Config:** source discovery and switching, per-source protocol and auth mode, provider routing, environment-file loading, opt-in discovery of a project's own `AGENTS.md` and `CLAUDE.md` - at startup for the launch directory and above, and on demand for a subtree the model reads into - and approval state.
 - **REPL:** main loop, slash commands, banner, one-shot mode, and automatic session saves.
 - **Model:** asynchronous HTTP client, SSE parsing, context-window probing, recovery samplers, context compression, and the tool-dispatch turn loop.
 - **Anthropic protocol:** message and tool translation at the client boundary, a stateful SSE decoder normalizing events into the shared chunk type, and the workload-identity-federation token exchange.

@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use super::failure::RunFailure;
 use super::{NO_ACTIVE_SOURCE, Shared, TurnParams, header, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
-use crate::config::{Runtime, Source};
+use crate::config::{Runtime, Source, nested};
 use crate::memory::{list_memories, remember_memories};
 use crate::model::client::{ChatClient, ReqwestClient};
 use crate::model::compress::COMPRESS_KEEP;
@@ -23,7 +23,7 @@ type Env = HashMap<String, String>;
 type Ui<'a> = &'a mut dyn UserInterface;
 
 const MEMORY_USAGE: &str = "Usage:\n  /memory save [focus...]   save a memory\n  /memory remember <query>  search memories\n  /memory list              list all memories";
-const HELP: &str = "Commands:\n  /source [name] [model]  list/switch sources\n  /yolo                   toggle auto-approve\n  /approval [level]       show/set approval mode\n  /sessions               list saved sessions\n  /save [title]           save current session\n  /delete [target]        delete a session\n  /compress               compress context\n  /reset                  start fresh session\n  /memory save|remember|list  manage memories\n  /quit                   exit";
+const HELP: &str = "Commands:\n  /source [name] [model]  list/switch sources\n  /yolo                   toggle auto-approve\n  /approval [level]       show/set approval mode\n  /sessions               list saved sessions\n  /save [title]           save current session\n  /delete [target]        delete a session\n  /compress               compress context\n  /reset                  start fresh session\n  /instructions           list the project instructions this run loaded\n  /memory save|remember|list  manage memories\n  /quit                   exit";
 
 /// The result of evaluating a slash command.
 pub enum CommandResult {
@@ -76,11 +76,12 @@ pub(crate) async fn handle_slash_command(
         "/save" => cmd_save(messages, session_id, arg, shared.env, ui),
         "/sessions" => cmd_sessions(session_id, shared.env, ui),
         "/delete" => cmd_delete(session_id, arg, shared.env, ui),
+        "/instructions" => say(ui, Info, super::instructions_listing(rt)),
         "/memory" => cmd_memory(arg, shared.env, ui),
         "/recover" => failure.record(&cmd_recover(rt, messages, arg, shared, ui).await),
         "/autocompress" => cmd_autocompress(arg, shared.env, ui),
         "/provider" => cmd_provider(rt, arg, ui),
-        "/help" => print_help(ui),
+        "/help" => say(ui, Info, HELP),
         _ => {
             say(ui, Warning, format!("Unknown command {cmd:?} (try /help)"));
         }
@@ -90,6 +91,7 @@ pub(crate) async fn handle_slash_command(
 
 fn cmd_reset(system: Value, messages: &mut Vec<Value>, session_id: &mut String, ui: Ui<'_>) {
     *messages = vec![system];
+    nested::reset();
     *session_id = new_session_id();
     say(ui, Info, format!("Started a fresh session ({session_id})"));
 }
@@ -183,6 +185,7 @@ async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, client: &ReqwestC
     match result {
         // An empty summary would replace the conversation and report success.
         Some(Ok(Some(summary))) if !summary.trim().is_empty() => {
+            // No `nested::reset()` here, unlike `/reset` - see `nested::reset`.
             apply_compression(messages, &summary);
             say(ui, Info, "Compressed context");
         }
@@ -231,13 +234,13 @@ fn parse_completion_content(text: &str) -> Option<String> {
 
 /// Replace all but the last `COMPRESS_KEEP` turns with a summary user turn.
 fn apply_compression(messages: &mut Vec<Value>, summary: &str) {
-    let header = format!(
-        "[Compressed context - earlier turns summarized; last {COMPRESS_KEEP} turns kept verbatim]"
-    );
+    let header =
+        format!("[Compressed context - earlier turns summarized; last {COMPRESS_KEEP} kept]");
     let has_sys = messages
         .first()
         .is_some_and(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"));
     let split = messages.len().saturating_sub(COMPRESS_KEEP);
+    nested::forget_in(&messages[..split]);
     let mut new_msgs = Vec::new();
     if has_sys {
         new_msgs.push(messages[0].clone());
@@ -374,6 +377,7 @@ async fn cmd_recover(
         messages,
         &TurnParams {
             config: &config,
+            prompt: rt.prompt(),
             source,
             model,
             approval: &rt.approval,
@@ -413,8 +417,4 @@ fn cmd_provider(rt: &Runtime, arg: &str, ui: Ui<'_>) {
     } else {
         say(ui, Info, "Provider routing updated");
     }
-}
-
-fn print_help(ui: Ui<'_>) {
-    say(ui, Info, HELP);
 }

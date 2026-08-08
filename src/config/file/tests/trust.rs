@@ -65,6 +65,10 @@ fn a_project_file_may_not_switch_off_the_gate_or_widen_the_grant() {
     for body in [
         r#"{"approval": "yolo"}"#,
         r#"{"system_prompt_file": "repo/prompt.md"}"#,
+        // The circular one: a repository voting itself the right to have its own
+        // standing instructions read into the agent's prompt.
+        r#"{"instructions": "project"}"#,
+        r#"{"instructions": ["repo/rules.md"]}"#,
         r#"{"summary_file": "/etc/afi.json"}"#,
         r#"{"home": "/tmp/elsewhere"}"#,
         r#"{"sessions_dir": "/tmp/elsewhere"}"#,

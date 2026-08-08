@@ -141,6 +141,24 @@ fn a_busy_credential_endpoint_stays_retryable() {
 }
 
 #[test]
+fn a_retryable_refusal_still_names_the_step_that_failed() {
+    // The retryable arm reports as a plain HTTP failure, which is the same shape
+    // the model call's own rejections arrive in. Without the step, a 500 from a
+    // credential exchange reads as the provider being down and sends whoever is
+    // holding the run to a status page the request never reached.
+    let error = refused_credential(
+        "the AWS role assumption failed",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "<Error><Code>InternalFailure</Code></Error>",
+        &Redactor::default(),
+    );
+    let text = error.to_string();
+    assert_eq!(error.kind(), ErrorKind::ProviderHttp);
+    assert!(text.contains("the AWS role assumption failed"), "{text}");
+    assert!(text.contains("InternalFailure"), "AWS still speaks: {text}");
+}
+
+#[test]
 fn a_refusal_body_is_quoted_but_bounded() {
     let error = refused_credential(
         "refused",

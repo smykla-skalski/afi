@@ -111,6 +111,13 @@ async fn github_token(
 /// endpoint having a bad day and keeps its status, because that one is worth
 /// another attempt.
 ///
+/// `what` leads either way. Both of these arrive mid-request, alongside the
+/// statuses the model call itself returns, and a bare `HTTP 500` says nothing
+/// about which of the two failed - where the step is the whole difference
+/// between a credential exchange worth repeating and a refusal the operator was
+/// waiting on. The transport failures at the same call sites already name their
+/// step; this is the same sentence on the path that got an answer.
+///
 /// `redact` is taken rather than left to callers because every endpoint here is
 /// handed the credential it is being asked about, and every one of them quotes
 /// what comes back. Cleaning runs before the preview is cut, so the window can
@@ -128,7 +135,7 @@ pub(super) fn refused_credential(
     }
     ClientError::Http {
         status: status.as_u16(),
-        body,
+        body: format!("{what}: {body}"),
     }
 }
 

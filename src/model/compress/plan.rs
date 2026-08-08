@@ -100,16 +100,23 @@ pub fn plan_compression(
     }
 
     let split = messages.len() - keep;
-    let head: &[Value] = &messages[body_start..split];
     let mut tail: Vec<Value> = messages[split..].to_vec();
-    let mut summarized_n = head.len();
 
     // The tail must start on a turn the chat template can render. A `tool` turn
     // with no preceding assistant(tool_calls) parent - or an assistant(tool_calls)
     // turn whose result got cut off into `head` - makes the template raise. Walk
     // from the front of the tail and drop any leading tool/half-tool-call turns
     // until we land on something safe.
-    summarized_n += trim_unrenderable_tail_head(&mut tail);
+    //
+    // Trimmed *before* the head is taken, and the head grown by what it dropped,
+    // because a turn that leaves the tail has to enter the summary. Taking the
+    // head first deleted those turns outright: they were in neither the summary
+    // prompt nor the rebuilt conversation, while the count still claimed they had
+    // been summarized. `dropped` can never exceed `keep`, so the slice below stays
+    // in bounds.
+    let dropped = trim_unrenderable_tail_head(&mut tail);
+    let head: &[Value] = &messages[body_start..split + dropped];
+    let summarized_n = head.len();
 
     let rendered = render_messages(head);
     let prompt = format!(

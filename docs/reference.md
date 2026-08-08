@@ -319,7 +319,9 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
 
 A long session eventually outgrows the model's context window. Rather than let the provider refuse a request for length, afi folds the older turns into a summary and carries on: the system message stays, roughly the last third of the conversation stays verbatim, and everything before it becomes one summary turn. `AFI_AUTOCOMPRESS_PERCENT` is how full the context has to get first, as a percentage - 85 by default, and `0` switches folding off.
 
-The fold happens after any turn whose usage crosses the threshold, so the next request already fits. It costs one request, which is billed like any other and counted in the [run summary](#run-summary)'s `requests`. Esc cancels it, and a fold that is cancelled, refused, or answered with nothing leaves the conversation exactly as it was - the next turn simply measures again.
+The fold happens after any turn whose usage crosses the threshold, so the next request already fits. It costs one request, which is billed like any other and counted in the [run summary](#run-summary)'s `requests`. Esc cancels it, and a fold that is cancelled, refused, or answered with nothing leaves the conversation exactly as it was.
+
+It then stops trying for the rest of that reply. The conversation is unchanged and still over the threshold, so asking again would send the same summary request with a slightly larger prompt and fail the same way - once per turn, for as many turns as the reply runs. The next message you type measures again from scratch.
 
 A percentage needs something to be a percentage *of*, and no provider reports its context window on the request path. afi resolves one from the first of these that answers:
 

@@ -151,20 +151,27 @@ const REGION_PREFIXES: [&str; 7] = ["us.", "eu.", "apac.", "au.", "jp.", "global
 /// folds. An id this cannot place is answered with `None`.
 #[must_use]
 pub fn context_window_for(model: &str) -> Option<u64> {
-    let normalized = normalize(model);
-    lookup(&normalized).or_else(|| lookup(without_date_stamp(&normalized)))
+    // The id as written comes first, before anything is stripped from it. A row
+    // whose own id ends in something the normalization reads as a decoration is
+    // otherwise unfindable: `deepseek-ai/deepseek-v3` loses its `-v3` to the
+    // version-suffix rule and looks up `deepseek-ai/deepseek`, which is nothing.
+    // The row would be dead and the model would silently never fold.
+    let plain = model.trim().to_ascii_lowercase();
+    lookup(&plain).or_else(|| {
+        let normalized = normalize(&plain);
+        lookup(&normalized).or_else(|| lookup(without_date_stamp(&normalized)))
+    })
 }
 
-/// Fold an id into its table key: case and surrounding space dropped, then the
-/// two decorations Bedrock adds - a Region prefix and a version suffix - taken
-/// off, so `us.anthropic.claude-opus-5-v1:0` and `anthropic.claude-opus-5` are
-/// one row rather than a dozen.
-fn normalize(model: &str) -> String {
-    let lower = model.trim().to_ascii_lowercase();
+/// Fold an already-lowercased id into its table key: the two decorations Bedrock
+/// adds - a Region prefix and a version suffix - taken off, so
+/// `us.anthropic.claude-opus-5-v1:0` and `anthropic.claude-opus-5` are one row
+/// rather than a dozen.
+fn normalize(lower: &str) -> String {
     let body = REGION_PREFIXES
         .iter()
         .find_map(|prefix| lower.strip_prefix(prefix))
-        .unwrap_or(lower.as_str());
+        .unwrap_or(lower);
     without_version_suffix(body).to_string()
 }
 
@@ -229,6 +236,24 @@ mod tests {
     }
 
     #[test]
+    fn every_row_resolves_to_itself() {
+        // A row the lookup cannot reach is a row that does not exist, and the
+        // model it names silently stops folding. Sortedness alone does not catch
+        // it: the normalization runs *before* the search, so an id carrying
+        // something that reads as a Bedrock decoration - the `-v3` of
+        // `deepseek-ai/deepseek-v3` - can be stripped into a key no row has.
+        let unreachable: Vec<&str> = WINDOWS
+            .iter()
+            .filter(|(id, window)| context_window_for(id) != Some(*window))
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(
+            unreachable.is_empty(),
+            "these rows cannot be found by their own id: {unreachable:?}"
+        );
+    }
+
+    #[test]
     fn a_native_id_resolves() {
         assert_eq!(context_window_for("claude-sonnet-5"), Some(1_000_000));
         assert_eq!(context_window_for("zai.glm-5"), Some(202_752));
@@ -281,6 +306,14 @@ mod tests {
             context_window_for("us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
             Some(200_000)
         );
+    }
+
+    #[test]
+    fn an_id_whose_own_tail_looks_like_a_version_is_still_found() {
+        // Together's DeepSeek V3 ends in `-v3`, which the Bedrock version rule
+        // reads as a revision marker and strips. Looking the id up as written
+        // first is what keeps the row reachable.
+        assert_eq!(context_window_for("deepseek-ai/DeepSeek-V3"), Some(131_072));
     }
 
     #[test]

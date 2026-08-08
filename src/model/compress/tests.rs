@@ -75,28 +75,68 @@ fn an_automatic_fold_keeps_roughly_the_last_third() {
 }
 
 #[test]
-fn a_tail_starting_on_an_orphan_tool_result_drops_it() {
+fn a_tail_starting_on_an_orphan_tool_result_drops_it_into_the_summary() {
+    // Five messages with `keep = 2` puts the split at index 3, so the tail really
+    // does start on the `tool` turn whose assistant(tool_calls) parent is cut into
+    // the head - the shape no chat template can render. The earlier version of
+    // this test split at index 4 and left the tool result in the head, so it
+    // passed with the trim stubbed out to a no-op.
     let mut messages = vec![
         json!({"role": "system", "content": "sys"}),
         msg("user", "do task"),
         tc_msg("call_1", "read_file", r#"{"path":"x"}"#),
-        tool_result("call_1", "file content"),
-        // The tail starts here (keep=2), and its first turn is a tool result
-        // whose assistant(tool_calls) parent was cut into the head - a shape no
-        // chat template can render.
-        msg("user", "next"),
+        tool_result("call_1", "the file content"),
         msg("assistant", "done"),
     ];
-    let result = fold(&mut messages, COMPRESS_KEEP, false, "summary").expect("applied");
-    // The dropped turn is summarized instead of kept, and the header counts what
-    // actually survived rather than what was asked for.
-    assert_eq!(result.kept_n, 2);
+    let plan = plan_compression(&messages, COMPRESS_KEEP, false).expect("5 messages fold");
+    // Dropped from the tail means folded into the summary, not deleted: a turn
+    // that leaves the conversation without reaching the prompt is gone for good,
+    // and the model is then summarizing a history it was never shown.
+    assert!(
+        plan.prompt().contains("the file content"),
+        "the trimmed tool result must reach the summary prompt: {}",
+        plan.prompt()
+    );
+    let result = plan.apply(&mut messages, "summary").expect("applied");
+
+    assert_eq!(result.summarized_n, 3, "user + tool_calls + tool result");
+    assert_eq!(
+        result.kept_n, 1,
+        "only the assistant turn survives verbatim"
+    );
     for m in &messages {
         assert!(
             m.get("role").and_then(|r| r.as_str()) != Some("tool"),
             "an orphan tool result must not survive into the tail"
         );
     }
+}
+
+#[test]
+fn a_tail_trimmed_away_entirely_still_summarizes_what_it_held() {
+    // A turn that ends on a batch of parallel tool results: `keep` lands inside
+    // the batch, every kept turn is an orphan, and the whole tail is trimmed. All
+    // of it has to end up in the summary.
+    let mut messages = vec![
+        json!({"role": "system", "content": "sys"}),
+        msg("user", "do task"),
+        tc_msg("call_1", "read_file", r#"{"path":"x"}"#),
+        tool_result("call_1", "first result"),
+        tool_result("call_2", "second result"),
+    ];
+    let plan = plan_compression(&messages, COMPRESS_KEEP, false).expect("5 messages fold");
+    for held in ["first result", "second result"] {
+        assert!(
+            plan.prompt().contains(held),
+            "{held} must reach the summary prompt: {}",
+            plan.prompt()
+        );
+    }
+    let result = plan.apply(&mut messages, "summary").expect("applied");
+    assert_eq!(result.kept_n, 0, "the whole tail was unrenderable");
+    assert_eq!(result.summarized_n, 4, "every body turn is in the summary");
+    // system + summary, and nothing else.
+    assert_eq!(messages.len(), 2);
 }
 
 #[test]

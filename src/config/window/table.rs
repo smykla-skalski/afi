@@ -7,8 +7,8 @@
 //! stale rate reports a wrong invoice with total confidence. A stale context
 //! window is a different kind of wrong. It moves the fold a little early or a
 //! little late, both of which a run survives, and an operator can correct it with
-//! a setting - see `crate::config::window`, which reads the declared value first
-//! and only falls back here.
+//! a setting - see the parent module, which reads the declared value first and
+//! only falls back here.
 //!
 //! What a table must not do is guess, so a model it has never heard of resolves
 //! to `None` and that run does not fold. That is the honest answer rather than a

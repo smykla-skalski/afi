@@ -55,11 +55,11 @@ pub struct TurnOutcome {
     /// reverse. [`Self::error`] is the only read, and it covers a `TURN_FAILED`
     /// that reached here by some other route.
     error: Option<RunError>,
-    /// What the provider counted as this turn's prompt, `None` for a turn that
-    /// never got an answer to count. Private for the same reason as `error`:
-    /// [`Self::with_prompt_tokens`] is the only way in, so a count can only come
-    /// from a turn that actually reported one.
-    prompt_tokens: Option<u64>,
+    /// What the provider counted as this turn's prompt, `0` for a turn it
+    /// reported nothing for. Private for the same reason as `error`:
+    /// [`Self::with_prompt_tokens`] is the only way in, and [`Self::prompt_tokens`]
+    /// is the only way out.
+    prompt_tokens: u64,
 }
 
 impl TurnOutcome {
@@ -74,7 +74,7 @@ impl TurnOutcome {
         Self {
             status,
             error: None,
-            prompt_tokens: None,
+            prompt_tokens: 0,
         }
     }
 
@@ -84,7 +84,7 @@ impl TurnOutcome {
         Self {
             status: TURN_FAILED,
             error: Some(error),
-            prompt_tokens: None,
+            prompt_tokens: 0,
         }
     }
 
@@ -95,7 +95,7 @@ impl TurnOutcome {
     /// knowing even when it produced no answer.
     #[must_use]
     pub fn with_prompt_tokens(mut self, prompt_tokens: u64) -> Self {
-        self.prompt_tokens = Some(prompt_tokens);
+        self.prompt_tokens = prompt_tokens;
         self
     }
 
@@ -107,7 +107,7 @@ impl TurnOutcome {
     /// prompt, so a zero is a provider that declined to say.
     #[must_use]
     pub fn prompt_tokens(&self) -> Option<u64> {
-        self.prompt_tokens.filter(|tokens| *tokens > 0)
+        (self.prompt_tokens > 0).then_some(self.prompt_tokens)
     }
 
     /// Fail a turn and say so on the ui, in one sentence sent to both.
@@ -163,7 +163,7 @@ mod tests {
         let outcome = TurnOutcome {
             status: TURN_FAILED,
             error: None,
-            prompt_tokens: None,
+            prompt_tokens: 0,
         };
         let error = outcome.error().expect("a failure explains itself");
         assert_eq!(error.kind, ErrorKind::Internal);

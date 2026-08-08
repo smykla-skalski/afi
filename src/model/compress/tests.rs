@@ -1,5 +1,6 @@
+use super::auto::{Decision, decide};
 use super::*;
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn msg(role: &str, content: &str) -> Value {
     json!({"role": role, "content": content})
@@ -13,6 +14,7 @@ fn tool_result(id: &str, content: &str) -> Value {
     json!({"role": "tool", "tool_call_id": id, "content": content})
 }
 
+/// A system message plus `turns` user/assistant pairs.
 fn conversation(turns: usize) -> Vec<Value> {
     let mut messages = vec![json!({"role": "system", "content": "sys"})];
     for i in 0..turns {
@@ -22,37 +24,35 @@ fn conversation(turns: usize) -> Vec<Value> {
     messages
 }
 
-#[test]
-fn compress_too_short_returns_none() {
-    let mut messages = vec![
-        json!({"role": "system", "content": "sys"}),
-        msg("user", "hi"),
-        msg("assistant", "hello"),
-    ];
-    let result = compress(&mut messages, COMPRESS_KEEP, false, |_| {
-        Some("summary".to_string())
-    });
-    assert!(result.is_none());
+/// Plan and apply in one step, which is what the two halves do either side of a
+/// live request. `None` when there was nothing to fold.
+fn fold(
+    messages: &mut Vec<Value>,
+    keep: usize,
+    auto: bool,
+    summary: &str,
+) -> Option<CompressResult> {
+    let plan = plan_compression(messages, keep, auto)?;
+    plan.apply(messages, summary)
 }
 
 #[test]
-fn compress_summarizes_head_and_keeps_tail() {
-    let mut messages = vec![
-        json!({"role": "system", "content": "sys"}),
-        msg("user", "do task"),
-        msg("assistant", "ok"),
-        msg("user", "step 2"),
-        msg("assistant", "done"),
-        msg("user", "step 3"),
-        msg("assistant", "done"),
-    ];
-    let result = compress(&mut messages, COMPRESS_KEEP, false, |prompt| {
-        assert!(prompt.contains("do task"));
-        Some("summary of earlier".to_string())
-    });
-    let result = result.unwrap();
+fn a_conversation_no_longer_than_the_kept_turns_does_not_fold() {
+    let mut messages = conversation(1);
+    assert!(fold(&mut messages, COMPRESS_KEEP, false, "summary").is_none());
+}
+
+#[test]
+fn the_head_is_summarized_and_the_tail_kept() {
+    let mut messages = conversation(3);
+    let plan = plan_compression(&messages, COMPRESS_KEEP, false).expect("7 messages fold");
+    assert!(plan.prompt().contains("turn 0"));
+    let result = plan
+        .apply(&mut messages, "summary of earlier")
+        .expect("applied");
+
     assert_eq!(result.summarized_n, 4); // 4 head messages summarized
-    // Should have system + summary + last 2 turns
+    // system + summary + the last 2 turns
     assert_eq!(messages.len(), 4);
     assert_eq!(messages[0]["role"], "system");
     assert_eq!(messages[1]["role"], "user");
@@ -65,110 +65,100 @@ fn compress_summarizes_head_and_keeps_tail() {
 }
 
 #[test]
-fn compress_auto_keeps_third() {
+fn an_automatic_fold_keeps_roughly_the_last_third() {
     let mut messages = conversation(20);
     // 1 system + 40 body = 41 total. body_len=40, keep = max(2, 40/3) = 13
-    let result = compress(&mut messages, COMPRESS_KEEP, true, |_| {
-        Some("summary".to_string())
-    });
-    assert!(result.is_some());
-    // Should keep ~13 of 40 body messages + system + summary = ~15
+    assert!(fold(&mut messages, COMPRESS_KEEP, true, "summary").is_some());
+    // ~13 of 40 body messages + system + summary = ~15
     assert!(messages.len() <= 16);
     assert!(messages.len() >= 14);
 }
 
 #[test]
-fn compress_drops_leading_tool_from_tail() {
+fn a_tail_starting_on_an_orphan_tool_result_drops_it() {
     let mut messages = vec![
         json!({"role": "system", "content": "sys"}),
         msg("user", "do task"),
         tc_msg("call_1", "read_file", r#"{"path":"x"}"#),
         tool_result("call_1", "file content"),
-        // tail starts here (keep=2) but the first is a tool result with
-        // no preceding assistant(tool_calls) in the tail
+        // The tail starts here (keep=2), and its first turn is a tool result
+        // whose assistant(tool_calls) parent was cut into the head - a shape no
+        // chat template can render.
         msg("user", "next"),
         msg("assistant", "done"),
     ];
-    let result = compress(&mut messages, COMPRESS_KEEP, false, |_| {
-        Some("summary".to_string())
-    });
-    // compress returns Some but the tool result must be dropped from the tail
-    assert!(result.is_some());
-    // Check no tool message is in the result
+    let result = fold(&mut messages, COMPRESS_KEEP, false, "summary").expect("applied");
+    // The dropped turn is summarized instead of kept, and the header counts what
+    // actually survived rather than what was asked for.
+    assert_eq!(result.kept_n, 2);
     for m in &messages {
         assert!(
             m.get("role").and_then(|r| r.as_str()) != Some("tool"),
-            "tool message should have been dropped from tail"
+            "an orphan tool result must not survive into the tail"
         );
     }
 }
 
 #[test]
-fn compress_returns_none_on_empty_summary() {
-    let mut messages = vec![
-        json!({"role": "system", "content": "sys"}),
-        msg("user", "do task"),
-        msg("assistant", "ok"),
-        msg("user", "step 2"),
-        msg("assistant", "done"),
-        msg("user", "step 3"),
-        msg("assistant", "done"),
-    ];
-    let result = compress(&mut messages, COMPRESS_KEEP, false, |_| Some(String::new()));
-    assert!(result.is_none());
+fn an_empty_summary_leaves_the_conversation_alone() {
+    let mut messages = conversation(3);
+    let before = messages.clone();
+    assert!(fold(&mut messages, COMPRESS_KEEP, false, "   ").is_none());
+    assert_eq!(messages, before);
 }
 
 #[test]
 fn a_plan_that_is_never_applied_changes_nothing() {
-    // The half-second between planning and the summary coming back is where an
-    // Esc lands, and a conversation that was folded halfway is not one the run
-    // can carry on from.
-    let mut messages = conversation(20);
+    // The wait between planning and the summary coming back is where an Esc
+    // lands, and a conversation folded halfway is not one the run can carry on
+    // from.
+    let messages = conversation(20);
     let before = messages.clone();
     let plan = plan_compression(&messages, COMPRESS_KEEP, true).expect("a long chat folds");
     assert!(plan.prompt().contains("turn 0"));
     drop(plan);
     assert_eq!(messages, before);
-    // And the same plan, applied, leaves the system message in place.
-    let plan = plan_compression(&messages, COMPRESS_KEEP, true).expect("a long chat folds");
-    let result = plan.apply(&mut messages, "the summary").expect("applied");
-    assert_eq!(messages[0]["role"], "system");
-    assert_eq!(result.summary_chars, "the summary".len());
 }
 
 #[test]
-fn maybe_autocompress_disabled() {
-    let result = maybe_autocompress(100_000, 0, Some(200_000));
-    assert!(!result);
+fn folding_is_off_at_zero_percent() {
+    assert_eq!(decide(100_000, 0, Some(200_000)), Decision::Keep);
 }
 
 #[test]
-fn maybe_autocompress_below_threshold() {
-    // 1000/200_000 = 0.5% << 85%
-    assert!(!maybe_autocompress(1000, 85, Some(200_000)));
+fn a_turn_well_under_the_threshold_is_kept() {
+    // 1000/200_000 = 0.5%, nowhere near 85%
+    assert_eq!(decide(1000, 85, Some(200_000)), Decision::Keep);
 }
 
 #[test]
-fn maybe_autocompress_above_threshold() {
+fn a_turn_over_the_threshold_folds_against_its_window() {
     // 180_000/200_000 = 90% > 85%
-    assert!(maybe_autocompress(180_000, 85, Some(200_000)));
+    assert_eq!(
+        decide(180_000, 85, Some(200_000)),
+        Decision::Fold { window: 200_000 }
+    );
 }
 
 #[test]
-fn maybe_autocompress_no_context_window() {
-    assert!(!maybe_autocompress(180_000, 85, None));
+fn an_unknown_window_is_not_the_same_as_a_turn_under_the_threshold() {
+    // The difference is what decides whether the run says anything: nobody knows
+    // the window, rather than the window having room left.
+    assert_eq!(decide(180_000, 85, None), Decision::WindowUnknown);
 }
 
 #[test]
-fn maybe_autocompress_zero_prompt_tokens() {
-    assert!(!maybe_autocompress(0, 85, Some(200_000)));
+fn a_turn_the_provider_counted_nothing_for_is_kept() {
+    assert_eq!(decide(0, 85, Some(200_000)), Decision::Keep);
+    // Even with no window, because there is nothing to measure either way.
+    assert_eq!(decide(0, 85, None), Decision::Keep);
 }
 
 #[test]
-fn a_window_declared_as_zero_never_folds() {
-    // `AFI_SOURCE_X_CONTEXT_WINDOW=0` is how an operator turns folding off for
-    // one source without touching the percentage.
-    assert!(!maybe_autocompress(u64::MAX, 85, Some(0)));
+fn a_window_declared_as_zero_never_folds_and_says_nothing() {
+    // `AFI_SOURCE_X_CONTEXT_WINDOW=0` turns folding off for one source without
+    // touching the percentage, so it is an answer rather than a gap.
+    assert_eq!(decide(u64::MAX, 85, Some(0)), Decision::Keep);
 }
 
 #[test]
@@ -190,10 +180,8 @@ fn compression_keeps_the_system_message_whole() {
     for turn in ["one", "two", "three", "four", "five", "six"] {
         messages.push(msg("user", turn));
     }
-    compress(&mut messages, COMPRESS_KEEP, false, |_| {
-        Some("summary".to_string())
-    })
-    .expect("this history is long enough to compress");
+    fold(&mut messages, COMPRESS_KEEP, false, "summary")
+        .expect("this history is long enough to compress");
 
     assert_eq!(messages[0], system, "sent unchanged after a fold");
     assert!(

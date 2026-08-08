@@ -31,6 +31,7 @@ pub use protocol::{
 };
 pub use runtime::Runtime;
 pub use sources::discover_sources;
+pub(crate) use sources::source_prefix;
 pub use system_prompt::SystemPrompt;
 
 use crate::summary::RunAuth;

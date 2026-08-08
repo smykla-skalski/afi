@@ -25,7 +25,7 @@ use std::process::{Command, Output, Stdio};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::endpoint::{Bodies, serve};
+use common::endpoint::{Bodies, serve, sse_body};
 use common::summary_of;
 
 /// Prompt tokens the endpoint reports on every turn: 950 of the 1000-token window
@@ -51,30 +51,24 @@ fn tool_call_body() -> String {
         "function": {"name": "list_dir", "arguments": r#"{"path":"."}"#},
     }]);
     let delta = serde_json::json!({"tool_calls": calls});
-    [
-        format!(r#"data: {{"choices":[{{"delta":{delta}}}]}}"#),
+    sse_body([
+        format!(r#"{{"choices":[{{"delta":{delta}}}]}}"#),
         format!(
-            r#"data: {{"choices":[{{"delta":{{}},"finish_reason":"tool_calls"}}],"usage":{}}}"#,
+            r#"{{"choices":[{{"delta":{{}},"finish_reason":"tool_calls"}}],"usage":{}}}"#,
             usage()
         ),
-        "data: [DONE]".to_string(),
-    ]
-    .join("\n\n")
-        + "\n\n"
+    ])
 }
 
 /// A plain answer, which ends the turn loop.
 fn final_body() -> String {
-    [
-        r#"data: {"choices":[{"delta":{"content":"finished"}}]}"#.to_string(),
+    sse_body([
+        r#"{"choices":[{"delta":{"content":"finished"}}]}"#.to_string(),
         format!(
-            r#"data: {{"choices":[{{"delta":{{}},"finish_reason":"stop"}}],"usage":{}}}"#,
+            r#"{{"choices":[{{"delta":{{}},"finish_reason":"stop"}}],"usage":{}}}"#,
             usage()
         ),
-        "data: [DONE]".to_string(),
-    ]
-    .join("\n\n")
-        + "\n\n"
+    ])
 }
 
 /// The non-streaming answer a summary request gets. Carries `usage`, because a

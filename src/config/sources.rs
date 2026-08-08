@@ -67,10 +67,12 @@ fn source_names<S: BuildHasher>(env: &HashMap<String, String, S>) -> Vec<String>
 
 /// The `AFI_SOURCE_<NAME>_` prefix a named source's variables carry.
 ///
-/// Shared with the config file, which writes the variables this module reads. Two
-/// spellings of the convention would let the file emit names nothing reads, and
-/// the failure would be silent - keys accepted, no refusal, setting absent.
-pub(super) fn source_prefix(name: &str) -> String {
+/// Shared with the config file, which writes the variables this module reads, with
+/// the context-window resolver, which reads one of them, and with the message that
+/// tells an operator to set it. Two spellings of the convention would let the file
+/// emit names nothing reads, or name a variable at the operator that nothing reads,
+/// and the failure would be silent - keys accepted, no refusal, setting absent.
+pub(crate) fn source_prefix(name: &str) -> String {
     format!("AFI_SOURCE_{}_", name.to_uppercase())
 }
 

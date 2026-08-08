@@ -21,9 +21,9 @@ pub struct CompressionPlan {
     /// whatever else goes.
     has_sys: bool,
     /// The turns that survive verbatim, already trimmed to something a chat
-    /// template can render.
+    /// template can render. Its length is the kept count - the requested `keep`
+    /// is only where that started, because trimming can take a turn back off.
     tail: Vec<Value>,
-    keep: usize,
     summarized_n: usize,
 }
 
@@ -47,18 +47,20 @@ impl CompressionPlan {
         if summary.is_empty() {
             return None;
         }
+        // The tail is what survived, so it is what the header counts. Reporting
+        // the requested `keep` instead would overstate whenever
+        // `trim_unrenderable_tail_head` took one back off.
+        let kept_n = self.tail.len();
         let header = format!(
-            "[Compressed context - {} earlier turns summarized; last {} turns kept verbatim]",
-            self.summarized_n, self.keep
+            "[Compressed context - {} earlier turns summarized; last {kept_n} turns kept verbatim]",
+            self.summarized_n
         );
-        let mut new_messages = Vec::with_capacity(2 + self.tail.len());
+        let mut new_messages = Vec::with_capacity(2 + kept_n);
         if self.has_sys {
             new_messages.push(messages[0].clone());
         }
         new_messages.push(json!({"role": "user", "content": format!("{header}\n\n{summary}")}));
         new_messages.extend(self.tail);
-
-        let kept_n = new_messages.len() - if self.has_sys { 2 } else { 1 };
         *messages = new_messages;
         Some(CompressResult {
             kept_n,
@@ -123,7 +125,6 @@ pub fn plan_compression(
         prompt,
         has_sys,
         tail,
-        keep,
         summarized_n,
     })
 }

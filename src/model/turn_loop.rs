@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::approval::ApprovalState;
 use crate::config::Source;
 use crate::model::client::ChatClient;
-use crate::model::compress::{AutoCompress, run_autocompress};
+use crate::model::compress::{AutoCompress, Fold, fold_after_turn};
 use crate::model::turn::{TurnRequest, model_turn};
 use crate::model::{
     ModelConfig, TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL,
@@ -32,13 +32,6 @@ pub struct LoopRequest<'a> {
     pub env: &'a HashMap<String, String>,
     pub force_final: bool,
     pub recovery_sampling: bool,
-    /// Whether the conversation outlives this loop - true for a REPL session,
-    /// false for a one-shot run that exits with its answer.
-    ///
-    /// Only the fold reads it, and only for the turn that ends the loop: folding
-    /// then is an investment in the next request, so a run that will never make
-    /// one would be paying for a summary nobody reads. See [`fold_if_full`].
-    pub session_persists: bool,
 }
 
 /// Retry/recovery counters carried across turns of the loop.
@@ -48,6 +41,9 @@ struct TurnCounters {
     empty_turn_cuts: u32,
     force_final: bool,
     recovery_sampling: bool,
+    /// Set once a fold has been attempted and did not happen, which stops the
+    /// loop asking again. See [`Fold::Abandoned`].
+    fold_abandoned: bool,
 }
 
 /// Build a `TurnRequest` from the loop request and current counters.
@@ -99,45 +95,49 @@ fn transition(status: &str, c: &mut TurnCounters) {
     }
 }
 
-/// Fold the conversation when the turn that just ended left the context over the
-/// configured threshold.
+/// Fold between this loop's own requests, when the turn that just ended left the
+/// context over the configured threshold.
 ///
-/// Runs after every turn the provider counted, rather than before the next
-/// request, so that a question-and-answer session folds too: such a session ends
-/// its loop after one turn per message, and a fold that only ever happened
-/// *inside* a loop would let it grow until the provider refused it. Folding on
-/// the way out means the next thing the operator types starts from a
-/// conversation that already fits.
+/// Only between them: a turn that ends the loop is the *session's* to fold, and
+/// whether there is a session at all is something the loop cannot see - see
+/// `repl::core::run_user_turn`, which folds after the loop returns, and the
+/// one-shot path, which does not because nothing would read the result.
 ///
-/// Three turns are skipped. An Esc, because firing a request straight after the
-/// user asked for the run to stop is not what they asked for. A failure, because
-/// the size that turn reports is whatever the refused request carried. And the
-/// turn that ends a loop whose conversation ends with it - a one-shot run - where
-/// the summary would be bought and then thrown away. The first two are
-/// re-measured on the next turn that answers.
-async fn fold_if_full(
+/// A fold that is attempted and does not happen stops the loop asking again. The
+/// conversation is left untouched and still over the threshold, so without the
+/// latch every remaining turn would fire another summary request and fail the
+/// same way - and the likeliest reason for failing is that the summary prompt is
+/// itself too big, which no later turn improves.
+async fn fold_between_turns(
     messages: &mut Vec<Value>,
     outcome: &TurnOutcome,
     lr: &LoopRequest<'_>,
+    c: &mut TurnCounters,
     ui: &mut dyn UserInterface,
 ) {
-    let Some(prompt_tokens) = outcome.prompt_tokens() else {
-        return;
-    };
-    if outcome.status == TURN_ESC || outcome.is_failure() {
+    if c.fold_abandoned || is_terminal(outcome) {
         return;
     }
-    if outcome.status == TURN_DONE && !lr.session_persists {
-        return;
+    let ac = autocompress_for(lr);
+    if fold_after_turn(messages, outcome, &ac, ui).await == Fold::Abandoned {
+        c.fold_abandoned = true;
     }
-    let ac = AutoCompress {
+}
+
+/// Whether this turn ends the loop.
+fn is_terminal(outcome: &TurnOutcome) -> bool {
+    outcome.status == TURN_DONE || outcome.status == TURN_ESC || outcome.is_failure()
+}
+
+/// What the fold needs from the loop's request.
+fn autocompress_for<'a>(lr: &LoopRequest<'a>) -> AutoCompress<'a> {
+    AutoCompress {
         client: lr.client,
         source: lr.source,
         model: lr.model,
         percent: lr.config.autocompress_percent,
         context_window: lr.source.context_window,
-    };
-    run_autocompress(messages, prompt_tokens, &ac, ui).await;
+    }
 }
 
 /// The model turn loop: retries based on TURN_* status until DONE/ESC/FAILED.
@@ -162,16 +162,17 @@ pub async fn run_model_turn_loop(
         empty_turn_cuts: 0,
         force_final: lr.force_final,
         recovery_sampling: lr.recovery_sampling,
+        fold_abandoned: false,
     };
 
     while steps < max_turns {
         let outcome = model_turn(messages, build_request(&lr, &c, c.force_final), ui).await;
         c.force_final = false;
         c.recovery_sampling = false;
-        fold_if_full(messages, &outcome, &lr, ui).await;
+        fold_between_turns(messages, &outcome, &lr, &mut c, ui).await;
         // TURN_FAILED is terminal too. Retrying it would hammer a server that
         // just refused us, up to max_turns times.
-        if outcome.status == TURN_DONE || outcome.status == TURN_ESC || outcome.is_failure() {
+        if is_terminal(&outcome) {
             return outcome;
         }
         steps += 1;
@@ -183,12 +184,9 @@ pub async fn run_model_turn_loop(
             MessageKind::Warning,
             format!("MODEL TURN LIMIT ({max_turns}) - forcing final"),
         );
-        let outcome = model_turn(messages, build_request(&lr, &c, true), ui).await;
-        // Folded like any other turn: a run that exhausted its turn budget is
-        // exactly the shape whose context has grown, and the session continues
-        // from here.
-        fold_if_full(messages, &outcome, &lr, ui).await;
-        return outcome;
+        // Terminal, so the fold - if there is a session to fold for - belongs to
+        // whoever called this loop.
+        return model_turn(messages, build_request(&lr, &c, true), ui).await;
     }
     TurnOutcome::new(TURN_DONE)
 }

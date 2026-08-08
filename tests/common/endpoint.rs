@@ -16,16 +16,33 @@ use std::thread::{self, JoinHandle};
 /// Every `/chat/completions` body the endpoint was sent.
 pub type Bodies = Arc<Mutex<Vec<String>>>;
 
+/// `events` framed as an SSE body, terminated the way a provider ends one.
+///
+/// The body only - [`serve`] puts the HTTP response around it, which is what
+/// separates this from `common::sse_response`. One place owns the frame so a test
+/// that needs its own events does not hand-roll `data:` lines to get them.
+pub fn sse_body<I>(events: I) -> String
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let mut body = String::new();
+    for event in events {
+        body.push_str("data: ");
+        body.push_str(event.as_ref());
+        body.push_str("\n\n");
+    }
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
 /// One plain text answer, which ends the turn loop after a single request.
 pub fn text_answer(text: &str) -> String {
     let content = serde_json::json!({"content": text});
-    [
-        format!(r#"data: {{"choices":[{{"delta":{content}}}]}}"#),
-        r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#.to_string(),
-        "data: [DONE]".to_string(),
-    ]
-    .join("\n\n")
-        + "\n\n"
+    sse_body([
+        format!(r#"{{"choices":[{{"delta":{content}}}]}}"#),
+        r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#.to_string(),
+    ])
 }
 
 /// One structured tool call, which the turn loop dispatches before asking again.

@@ -371,8 +371,6 @@ async fn cmd_recover(
             shared,
             force_final: true,
             recovery_sampling: true,
-            // `/recover` is a turn inside a session that carries on afterwards.
-            session_persists: true,
         },
         ui,
     )

@@ -94,7 +94,7 @@ pub async fn model_turn(
     };
     // The count rides out with the outcome so the loop can decide whether the
     // next turn still fits the context window - see
-    // `compress::run_autocompress`. Read here because `finalize_turn` consumes
+    // `compress::fold_after_turn`. Read here because `finalize_turn` consumes
     // the accumulator it comes from.
     let prompt_tokens = acc.prompt_tokens();
     finalize_turn(messages, &tr, acc, t0, &cancel, ui).with_prompt_tokens(prompt_tokens)

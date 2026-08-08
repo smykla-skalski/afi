@@ -8,8 +8,12 @@
 
 use std::collections::HashMap;
 
-use crate::model::context_window::context_window_for;
+use super::source_prefix;
 use crate::summary::{ErrorKind, RunError};
+use crate::util::nonblank;
+
+mod table;
+use table::context_window_for;
 
 /// The window `--context-window` named, recording a refusal when it named
 /// something unreadable.
@@ -53,27 +57,22 @@ pub(super) fn resolve(
     if flag.is_some() {
         return flag;
     }
-    let upper = name.to_uppercase();
-    [
-        format!("AFI_SOURCE_{upper}_CONTEXT_WINDOW"),
-        format!("AFI_{upper}_CONTEXT_WINDOW"),
-        "AFI_CONTEXT_WINDOW".to_string(),
-    ]
-    .iter()
-    .find_map(|key| declared(env, key))
-    .or_else(|| context_window_for(model))
+    // `source_prefix` rather than a second spelling of the same convention: the
+    // config file lowers `sources.<name>.context_window` through that helper, and
+    // a key written one way and read the other is accepted, unrefused, and absent.
+    declared(env, &format!("{}CONTEXT_WINDOW", source_prefix(name)))
+        .or_else(|| declared(env, &format!("AFI_{}_CONTEXT_WINDOW", name.to_uppercase())))
+        .or_else(|| declared(env, "AFI_CONTEXT_WINDOW"))
+        .or_else(|| context_window_for(model))
 }
 
 /// A window declared under `key`, or `None` when it is unset, blank, or not a
 /// whole number.
 ///
-/// An unreadable value falls through to the next spelling rather than refusing
-/// the run, which is how every other `AFI_*` number behaves - see
-/// `ModelConfig::from_env`.
+/// Blank counts as unset through [`nonblank`], the one rule every `AFI_*`
+/// variable reads by. An unreadable value falls through to the next spelling
+/// rather than refusing the run, which is how every other `AFI_*` number behaves -
+/// see `ModelConfig::from_env`.
 fn declared(env: &HashMap<String, String>, key: &str) -> Option<u64> {
-    env.get(key)
-        .map(|raw| raw.trim())
-        .filter(|raw| !raw.is_empty())?
-        .parse()
-        .ok()
+    nonblank(env.get(key).map(String::as_str))?.parse().ok()
 }

@@ -4,19 +4,20 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::approval::{ApprovalState, apply_approval, approval_display, normalize_approval};
+use crate::approval::{ApprovalState, starting_approval};
 use crate::envfile;
 use crate::pricing::Pricing;
 use crate::summary::{ErrorKind, RunError, SummaryFormat, summary_path, writable};
 use crate::tools::policy::ToolPolicy;
 
 use super::Source;
-use super::args::{ParsedArgs, parse_args};
+use super::args::parse_args;
 use super::effort;
 use super::file::{FileSettings, config_files};
 use super::sources::discover_sources;
 use super::system_prompt::{self, SystemPrompt};
 use super::tools::apply_tool_flags;
+use super::window;
 
 // --- Runtime -----------------------------------------------------------------
 
@@ -54,6 +55,11 @@ pub struct Runtime {
     pub flag_errors: Vec<RunError>,
     /// Token rates for the summary's cost, `None` when unset or unusable.
     pub pricing: Option<Pricing>,
+    /// The context window `--context-window` set for this run, if it was given.
+    /// It outranks every configured value, on every source - see
+    /// `window::resolve` - because it is the one figure typed for this run rather
+    /// than stored for all of them.
+    pub context_window: Option<u64>,
     /// The system prompt every turn of this run sends, resolved once here so a
     /// file named on the command line is read before the run is paid for rather
     /// than on the first request. The project's own instruction files are read
@@ -147,7 +153,11 @@ impl Runtime {
         settings.apply_to(&mut env);
         let (sources, source_order) = discover_sources(&env);
         let parsed = parse_args(args);
-        let approval = resolve_approval(&env, &parsed);
+        let approval = starting_approval(
+            env.get("AFI_APPROVAL").map(String::as_str),
+            parsed.approval.as_deref(),
+            parsed.yolo,
+        );
         apply_tool_flags(&mut env, &parsed);
         // Ahead of the struct below, and ahead of the moves that follow, because
         // it wants the whole of `parsed` and the env after the flags landed in it.
@@ -163,6 +173,7 @@ impl Runtime {
             .map(|why| RunError::new(why.clone(), ErrorKind::Input))
             .collect();
         flag_errors.extend(parsed.flag_errors);
+        let context_window = window::from_flag(parsed.context_window.as_deref(), &mut flag_errors);
         let effort = effort::resolve(
             parsed.effort.as_deref(),
             env.get("AFI_EFFORT").map(String::as_str),
@@ -205,6 +216,7 @@ impl Runtime {
             flag_errors,
             // At startup, so a typo is heard about before the run, not after.
             pricing: Pricing::from_env(&env),
+            context_window,
             system_prompt,
             env,
         };
@@ -267,11 +279,14 @@ impl Runtime {
             Some(m) => m.to_string(),
             None => self.sources[name].resolve_model(),
         };
+        // Resolved here rather than at discovery because the window belongs to
+        // the *model*, and this is where the model this source will use is
+        // finally known - `/source zai glm-4.6` pins one the source itself never
+        // named. See `window::resolve` for the order.
+        let window = window::resolve(&self.env, self.context_window, name, &model);
         self.model = Some(model);
-        // A model change means the cached max-context may no longer apply - drop
-        // it so the footer re-probes against the new model next turn.
         if let Some(s) = self.sources.get_mut(name) {
-            s.context_window = None;
+            s.context_window = window;
         }
         true
     }
@@ -371,40 +386,4 @@ impl Runtime {
             .as_ref()
             .unwrap_or_else(|_| system_prompt::builtin())
     }
-}
-
-// --- Startup defaults --------------------------------------------------------
-
-/// Resolve the starting approval state from env (`AFI_APPROVAL`) then the
-/// `--approval` / `--yolo` flags. Unknown levels warn and are ignored.
-fn resolve_approval(env: &HashMap<String, String>, parsed: &ParsedArgs) -> ApprovalState {
-    let mut approval = ApprovalState::default();
-    if let Some(val) = env.get("AFI_APPROVAL").filter(|v| !v.trim().is_empty()) {
-        if let Some(kind) = normalize_approval(val) {
-            apply_approval(&mut approval, kind, true);
-        } else {
-            eprintln!(
-                "  \u{2717} unknown AFI_APPROVAL={val:?} \
-                 (want all|low|medium|high|yolo); prompting for all actions"
-            );
-        }
-    }
-    if let Some(level) = &parsed.approval {
-        if let Some(kind) = normalize_approval(level) {
-            apply_approval(&mut approval, kind, true);
-        } else {
-            eprintln!(
-                "  \u{2717} unknown --approval level {level:?} \
-                 (want all|low|medium|high|yolo); keeping {}",
-                approval_display(&approval)
-            );
-        }
-    }
-    if parsed.yolo {
-        // bare --yolo: short-circuit everything, never prompt. Does NOT touch
-        // default_approve_level (matches the Python --yolo path).
-        approval.yolo = true;
-        approval.approve_level = None;
-    }
-    approval
 }

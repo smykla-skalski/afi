@@ -4,6 +4,11 @@
 //! Probe order depends on host locality:
 //! - Local (llama.cpp etc.): /v1/models meta -> /props -> overrun probe
 //! - Remote (Together, Z.ai, ...): overrun probe -> /v1/models -> /props
+//!
+//! None of this is on the request path. What a run actually resolves its window
+//! from is the compiled table in `config::window`, which is a static fact about a
+//! model rather than a question for a server. These probes answer the same
+//! question over the network, for a caller that wants to ask one directly.
 
 use regex::Regex;
 use serde_json::Value;

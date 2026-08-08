@@ -18,6 +18,7 @@ mod runtime;
 mod sources;
 mod system_prompt;
 mod tools;
+mod window;
 pub use args::{ParsedArgs, parse_args};
 pub(crate) use bedrock::dns_suffix;
 pub use bedrock::{Bedrock, WebIdentity};
@@ -30,6 +31,7 @@ pub use protocol::{
 };
 pub use runtime::Runtime;
 pub use sources::discover_sources;
+pub(crate) use sources::source_prefix;
 pub use system_prompt::SystemPrompt;
 
 use crate::summary::RunAuth;

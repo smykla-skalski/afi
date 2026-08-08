@@ -4,6 +4,7 @@
 mod commands;
 mod core;
 mod failure;
+mod one_shot;
 mod report;
 mod resume;
 mod tui;
@@ -21,8 +22,9 @@ use crate::config::{Runtime, nested};
 use crate::summary::{ErrorKind, RunError};
 use crate::term::plain::PlainUi;
 
-use core::{ReplCore, run_one_shot_async};
+use core::ReplCore;
 pub(crate) use core::{Shared, TurnParams, run_turn_loop};
+use one_shot::run_one_shot_async;
 use resume::restore_prompt_resume;
 
 pub const DIM: &str = "\x1b[2m";

@@ -27,6 +27,10 @@ pub struct ParsedArgs {
     pub disallowed_tools: Option<String>,
     pub effort: Option<String>,
     pub config: Option<String>,
+    /// The context window this run measures the auto-compress threshold against,
+    /// for every source it touches. Kept as written so `Runtime` reports an
+    /// unusable one by name rather than silently running without a window.
+    pub context_window: Option<String>,
     /// Flags that were given wrongly. Only the flags whose silent fallback
     /// loses something the caller asked for record here - see `set_required`.
     ///
@@ -152,6 +156,9 @@ fn apply_value_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> Op
             set_required_value(&mut out.flag_errors, &mut out.summary_file, flag, value)
         }
         "--config" => set_required_value(&mut out.flag_errors, &mut out.config, flag, value),
+        "--context-window" => {
+            set_required_value(&mut out.flag_errors, &mut out.context_window, flag, value)
+        }
         "--system-prompt-file" => set_required_value(
             &mut out.flag_errors,
             &mut out.system_prompt_file,

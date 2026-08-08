@@ -43,6 +43,8 @@ pub(crate) fn finalize_turn(
     ui: &mut dyn UserInterface,
 ) -> TurnOutcome {
     let text = acc.answer_text();
+    // Read before the destructure below moves the fields it comes from.
+    let prompt_tokens = acc.prompt_tokens();
     let Accumulated {
         tool_calls,
         reasoning_parts,
@@ -56,11 +58,6 @@ pub(crate) fn finalize_turn(
         ..
     } = acc;
     let elapsed = t0.elapsed().as_secs_f64();
-    let prompt_tokens = usage
-        .as_ref()
-        .map(|u| u.prompt_tokens)
-        .or_else(|| timings.as_ref().map(|t| t.prompt_n))
-        .unwrap_or(0);
     let completion_tokens = usage
         .as_ref()
         .map(|u| u.completion_tokens)

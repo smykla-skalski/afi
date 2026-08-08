@@ -124,3 +124,32 @@ fn write_cache(home: &Path, fetched: &str) {
     let _: Table = serde_json::from_str(&fs::read_to_string(cache_path(home)).unwrap())
         .expect("the fixture must parse");
 }
+
+#[test]
+fn two_spellings_of_one_model_id_are_both_dropped() {
+    // Resolving them by `HashMap` iteration order would make the bill and the
+    // cap move run to run, which is the one failure `Pricing::normalize` refuses
+    // an `AFI_PRICES` duplicate to prevent. Neither wins: a figure that depends
+    // on which spelling survived is worse than no figure.
+    let home = TempDir::new().unwrap();
+    let newer = day(&vendored().fetched).succ_opt().expect("a day after");
+    let body = format!(
+        r#"{{"fetched": "{newer}", "providers": {{"together": {{
+             "Qwen/Qwen3-Coder": {{"input": 1, "output": 2}},
+             "qwen/qwen3-coder": {{"input": 999, "output": 999}},
+             "kept/model": {{"input": 5, "output": 6}}
+           }}}}}}"#
+    );
+    fs::write(cache_path(home.path()), body).unwrap();
+
+    let (by_provider, _) = layers(home.path());
+    let together = &by_provider[&Provider::Together];
+    assert!(
+        !together.contains_key("qwen/qwen3-coder"),
+        "a colliding id must be priced by nothing rather than by whichever won"
+    );
+    assert!(
+        together.contains_key("kept/model"),
+        "and the collision must not take the rest of the provider with it"
+    );
+}

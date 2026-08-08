@@ -75,11 +75,21 @@ impl Rates {
     ///
     /// `Err` names the class that stopped it, so a caller reporting the failure
     /// can say which rate is missing rather than that one is.
-    fn weighted(self, usage: &UsageTotals) -> Result<u128, &'static str> {
+    ///
+    /// `bound` decides what an unpriced class does. A summary reports a figure
+    /// or reports nothing, so it asks for [`Bound::Exact`]. A spend cap cannot
+    /// afford "nothing" - see [`Bound::Ceiling`].
+    fn weighted(self, usage: &UsageTotals, bound: Bound) -> Result<u128, &'static str> {
+        // A cached prompt token is a prompt token the provider chose to charge
+        // less for, so `input` is its ceiling and never its floor. `cache_write`
+        // is the one class that can exceed input - Anthropic bills a write above
+        // it - so it has no substitute and stays strict under either bound.
+        let ceiling = matches!(bound, Bound::Ceiling);
+        let cache_read = self.cache_read.or_else(|| ceiling.then_some(self.input?));
         let classes = [
             ("input", usage.input_tokens, self.input),
             ("output", usage.output_tokens, self.output),
-            ("cache_read", usage.cache_read_tokens, self.cache_read),
+            ("cache_read", usage.cache_read_tokens, cache_read),
             ("cache_write", usage.cache_write_tokens, self.cache_write),
             (
                 "reasoning",
@@ -168,10 +178,15 @@ impl Pricing {
     ///
     /// For a caller that has to know *before* the run whether a cap it was given
     /// can ever fire. Only `input` and `output` are demanded, because those are
-    /// the two classes every request spends. The cache classes are checked when
-    /// they are actually spent rather than in advance: an OpenAI-compatible
-    /// source reports no cache writes at all, and demanding a rate for one would
-    /// refuse a configuration that is complete for the endpoint it talks to.
+    /// the two classes every request spends, and they are exactly what
+    /// [`Bound::Ceiling`] needs - so a run that passes this check can always be
+    /// capped, which is the promise the check exists to make.
+    ///
+    /// The cache classes are deliberately not demanded. An OpenAI-compatible
+    /// source reports no cache *writes* at all, and 44% of the models afi ships
+    /// rates for carry no cache-*read* rate - most of them embeddings, image and
+    /// speech models that never report one. Demanding either would refuse a
+    /// configuration that is complete for the endpoint it talks to.
     #[must_use]
     pub fn unpriceable(&self, provider: Option<Provider>, model: &str) -> Option<String> {
         // Not `?`: no rates at all is the *most* unpriceable a model gets, and
@@ -200,13 +215,18 @@ impl Pricing {
         }
     }
 
-    /// The run's cost so far in whole micro-USD, or why there is no figure.
+    /// The most this run can have cost so far, in whole micro-USD, or why there
+    /// is no such figure. The question a spend cap asks.
     ///
     /// [`Self::run_cost_usd`] folds every reason into a figure or `None`, because
-    /// a summary reports one or the other. A spend cap cannot afford that: "no
-    /// request has spent yet" is zero and must not stop a run, "afi counted these
-    /// itself" is a number a cap must not act on, and "afi cannot price what was
-    /// spent" is the one thing a cap must never read as free.
+    /// a summary reports one or the other. A cap cannot afford that: "no request
+    /// has spent yet" is zero and must not stop a run, "afi counted these itself"
+    /// is a number a cap must not act on, and "afi cannot price what was spent"
+    /// is the one thing a cap must never read as free.
+    ///
+    /// Priced to [`Bound::Ceiling`], so a model with no cache-read rate caps
+    /// early rather than killing the run. The figure can therefore exceed
+    /// `cost_usd`, which reports nothing at all in that case.
     #[must_use]
     pub fn run_cost(&self, billed: &[(Billed, UsageTotals)]) -> Priced {
         if billed.is_empty() {
@@ -219,7 +239,7 @@ impl Pricing {
             let Some(rates) = self.rates_for(who.provider, &who.model) else {
                 return Priced::Unpriceable(format!("no rate for model {:?}", who.model));
             };
-            match rates.weighted(usage) {
+            match rates.weighted(usage, Bound::Ceiling) {
                 Ok(amount) => weighted = weighted.saturating_add(amount),
                 Err(class) => return Priced::Unpriceable(missing(&who.model, class)),
             }
@@ -236,15 +256,41 @@ impl Pricing {
     ///
     /// `None` when anything that spent tokens has no rates, or no rate for a
     /// class it used. Absent beats approximate: a partial total under-reports
-    /// without saying so. An estimated figure is still reported, because
+    /// without saying so, and the ceiling `run_cost` settles for would
+    /// over-report. An estimated figure is still reported, because
     /// `usage.estimated_tokens` beside it is what marks it as one.
     #[must_use]
     pub fn run_cost_usd(&self, billed: &[(Billed, UsageTotals)]) -> Option<f64> {
-        match self.run_cost(billed) {
-            Priced::Spent(micros) | Priced::Estimated(micros) => usd(micros),
-            Priced::Nothing | Priced::Unpriceable(_) => None,
+        if billed.is_empty() {
+            return None;
         }
+        let mut weighted: u128 = 0;
+        for (who, usage) in billed {
+            let rates = self.rates_for(who.provider, &who.model)?;
+            weighted = weighted.saturating_add(rates.weighted(usage, Bound::Exact).ok()?);
+        }
+        usd(round_to_micros(weighted))
     }
+}
+
+/// How to price a class that was spent on and has no rate.
+///
+/// The summary and the cap want opposite answers, and giving both the same one
+/// is what made a budgeted run die mid-turn on a rate it never needed exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    /// Report a figure or report nothing. An unpriced class suppresses the whole
+    /// total, because a partial one under-reports without saying so.
+    Exact,
+    /// The most this can have cost. An unpriced cache read is billed at the
+    /// model's own `input` rate, which is its ceiling: the provider charges less
+    /// for a cached prompt token, never more.
+    ///
+    /// A cap wants this. Stopping a run early is a cost the operator asked for
+    /// when they set a budget; failing the run because afi lacks a discount rate
+    /// is not, and refusing to start over one would refuse 44% of the models afi
+    /// ships rates for - most of which never report a cache read at all.
+    Ceiling,
 }
 
 /// A model that has rates but not the one it spent on.

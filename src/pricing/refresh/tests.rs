@@ -1,6 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use super::{enabled, plan};
+use super::{enabled, loses_coverage, plan};
+use crate::pricing::catalog::Projection;
+use crate::pricing::provider::Provider;
+use crate::pricing::table::Providers;
 
 fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs
@@ -45,5 +48,56 @@ fn turning_the_refresh_off_beats_being_due() {
     assert!(
         plan(&off, "2020-01-01", "2026-08-08".to_string()).is_none(),
         "an air-gapped setup must make no network call however old its table is"
+    );
+}
+
+/// A projection carrying exactly these providers, with one priced model each.
+fn covering(providers: &[Provider]) -> Projection {
+    providers
+        .iter()
+        .map(|provider| {
+            let mut models = BTreeMap::new();
+            models.insert(
+                "m".to_string(),
+                BTreeMap::from([("input", "1".to_string())]),
+            );
+            (*provider, models)
+        })
+        .collect()
+}
+
+/// The table it would replace, carrying exactly these providers.
+fn current(providers: &[Provider]) -> Providers {
+    providers
+        .iter()
+        .map(|provider| (*provider, HashMap::new()))
+        .collect()
+}
+
+#[test]
+fn a_projection_that_lost_a_provider_is_never_written() {
+    // The cache outranks the shipped table by date rather than by coverage, and
+    // each day's refresh rewrites the same hole with a fresher date - so writing
+    // this once takes those rates away for good. A catalogue that renames a
+    // provider must cost the run nothing instead.
+    let now = current(&[Provider::Anthropic, Provider::Together]);
+    assert!(
+        loses_coverage(&now, &covering(&[Provider::Anthropic])),
+        "dropping Together must refuse the write"
+    );
+    assert!(
+        loses_coverage(&now, &Projection::new()),
+        "and an empty projection is the same failure at its worst"
+    );
+    assert!(!loses_coverage(
+        &now,
+        &covering(&[Provider::Anthropic, Provider::Together])
+    ));
+    assert!(
+        !loses_coverage(
+            &now,
+            &covering(&[Provider::Anthropic, Provider::Together, Provider::OpenAi])
+        ),
+        "a catalogue that gained a provider is welcome"
     );
 }

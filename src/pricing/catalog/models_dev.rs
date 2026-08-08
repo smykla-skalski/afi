@@ -58,6 +58,10 @@ impl Catalog for ModelsDev {
         let catalogue: Catalogue = serde_json::from_slice(body).ok()?;
         let mut out = Projection::new();
         for provider in wanted {
+            // Absent is not an error here: this catalogue may simply never
+            // have carried a provider afi can reach. Losing one it *did* carry
+            // is the dangerous case, and only `refresh::run` can see that,
+            // because only it knows the table being replaced.
             let Some(entry) = catalogue.get(slug(*provider)) else {
                 continue;
             };

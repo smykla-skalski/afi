@@ -43,6 +43,7 @@ pub(in crate::summary) fn summary(ok: bool, answer: &str, usage: UsageTotals) ->
         usage,
         cost_usd: None,
         budget: None,
+        spent_micros: None,
         elapsed_secs: 14.2341,
         tools: known_tool_names().to_vec(),
         effort: None,

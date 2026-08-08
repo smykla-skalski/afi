@@ -76,11 +76,14 @@ fn money(micros: u128) -> String {
 }
 
 /// What a run was allowed to spend, and what enforcing it did.
+///
+/// No spend figure rides here. The guard's last checkpoint runs *before* a turn,
+/// so on a run that finished normally it predates the final request - a
+/// one-turn run would report having spent nothing. The summary prices the ledger
+/// it already reads for `cost_usd` instead, so the two describe one instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Outcome {
     pub budget: Budget,
-    /// The run's spend when it was last checked, when it could be priced.
-    pub spent: Option<u128>,
     /// Whether the converge note was sent. `false` on a run that went from
     /// under the soft threshold to past the hard one in a single turn, which
     /// one large turn does routinely - the note is best effort, the stop is not.
@@ -223,7 +226,6 @@ pub fn outcome() -> Option<Outcome> {
         .as_ref()
         .map(|guard| Outcome {
             budget: guard.budget,
-            spent: guard.spent,
             converged: guard.converged,
             stopped: guard.stopped,
         })

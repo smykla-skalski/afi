@@ -90,16 +90,26 @@ pub(crate) async fn run(plan: Plan) {
     let Ok(Some(projection)) = spawn_blocking(move || catalog.project(&body, &ALL)).await else {
         return;
     };
-    // An empty projection is a catalogue that answered and priced nothing afi
-    // asked about. Writing it would replace a working table with an empty one,
-    // which is the single worst outcome available here.
-    if projection.is_empty() {
+    // A cache outranks the shipped table by date rather than by coverage, and
+    // the next day's refresh rewrites the same hole with a fresher date - so a
+    // projection that lost a provider takes its rates away permanently. Refuse
+    // any table that covers less than the one it would replace, which also
+    // covers the empty case: a catalogue that answered and priced nothing.
+    let (replacing, _) = table::layers(&plan.home);
+    if loses_coverage(&replacing, &projection) {
         return;
     }
     // Atomic, so a run reading the cache sees the old table or the new one and
     // never the prefix of one still being written.
     let body = catalog::render(&projection, &plan.today);
     let _ = atomic::write(&table::cache_path(&plan.home), body.as_bytes());
+}
+
+/// Whether writing `projection` would drop a provider the current table has.
+fn loses_coverage(replacing: &table::Providers, projection: &catalog::Projection) -> bool {
+    replacing
+        .keys()
+        .any(|provider| !projection.contains_key(provider))
 }
 
 #[cfg(test)]

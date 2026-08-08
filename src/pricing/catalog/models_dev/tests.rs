@@ -102,3 +102,16 @@ fn every_provider_afi_bills_has_a_name_here() {
         assert!(!slug(provider).is_empty(), "{provider:?}");
     }
 }
+
+#[test]
+fn a_provider_this_catalogue_does_not_carry_is_simply_absent() {
+    // Not an error here: models.dev may never have carried a provider afi can
+    // reach. Whether *losing* one is safe to write is `refresh::run`'s call,
+    // because only it can see the table being replaced.
+    let renamed = CATALOGUE.replace(r#""openai":"#, r#""openai-renamed":"#);
+    let projected = ModelsDev
+        .project(renamed.as_bytes(), &ALL)
+        .expect("the rest still projects");
+    assert!(!projected.contains_key(&Provider::OpenAi));
+    assert!(projected.contains_key(&Provider::Anthropic));
+}

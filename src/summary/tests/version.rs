@@ -148,6 +148,7 @@ fn an_uncapped_run_carries_no_budget_key_at_all() {
 fn the_budget_block_is_pinned_too() {
     let mut run = summary(true, "x", totals(3));
     run.budget = Some(capped());
+    run.spent_micros = Some(4_830_000);
     let json = run.to_json();
     assert_eq!(
         sorted_keys(&json["usage"]["budget"]),
@@ -185,10 +186,10 @@ fn a_cap_that_never_measured_anything_reports_a_null_rather_than_a_zero() {
     // `cost_usd` is absent to avoid.
     let mut run = summary(true, "x", totals(3));
     run.budget = Some(Outcome {
-        spent: None,
         stopped: false,
         ..capped()
     });
+    run.spent_micros = None;
     let json = run.to_json();
     assert!(json["usage"]["budget"]["spent_usd"].is_null(), "{json}");
     assert_eq!(json["usage"]["budget"]["stopped"], false);
@@ -198,7 +199,6 @@ fn a_cap_that_never_measured_anything_reports_a_null_rather_than_a_zero() {
 fn capped() -> Outcome {
     Outcome {
         budget: resolve_budget(Some("5"), &HashMap::new()).unwrap().unwrap(),
-        spent: Some(4_830_000),
         converged: true,
         stopped: true,
     }

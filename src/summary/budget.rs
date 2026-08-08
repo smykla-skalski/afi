@@ -13,18 +13,22 @@ use crate::cost::Outcome;
 use crate::pricing::usd;
 
 /// The `usage.budget` object, or `None` when the run carried no cap.
-pub(super) fn json(outcome: Option<Outcome>) -> Option<Value> {
+///
+/// `spent` is the cap's own view of the run - an upper bound, priced the way
+/// `cost::checkpoint` prices - so it can exceed `cost_usd`, which reports a
+/// figure only when every class it spent on had a rate. On the ordinary run
+/// where every rate is known they are the same number.
+pub(super) fn json(outcome: Option<Outcome>, spent: Option<u128>) -> Option<Value> {
     let outcome = outcome?;
     let (soft, hard) = outcome.budget.ratios_usd();
     Some(json!({
         "limit_usd": money(outcome.budget.limit_usd()),
         "soft_ratio": money(soft),
         "hard_ratio": money(hard),
-        // The same figure as `cost_usd`, from the same ledger read the whole
-        // object is built from - repeated here so a consumer reading the cap
-        // never has to look outside it, and because `cost_usd` vanishes on an
-        // unpriced run while this is always present.
-        "spent_usd": money(outcome.spent.and_then(usd)),
+        // Repeated here so a consumer reading the cap never has to look
+        // outside it, and because `cost_usd` vanishes on a run afi could only
+        // bound rather than price exactly.
+        "spent_usd": money(spent.and_then(usd)),
         "converged": outcome.converged,
         "stopped": outcome.stopped,
     }))

@@ -234,9 +234,10 @@ fn a_cap_over_spend_afi_had_to_guess_at_stops_rather_than_holding_wrongly() {
         summary["usage"]["budget"]["stopped"], false,
         "the cap did not stop it - the measurement did: {summary}"
     );
-    assert!(
-        summary["usage"]["budget"]["spent_usd"].is_null(),
-        "an unmeasurable run reports no spend rather than a zero: {summary}"
+    assert_eq!(
+        summary["usage"]["budget"]["spent_usd"], summary["usage"]["cost_usd"],
+        "the guess is reported, the same way cost_usd reports it - what marks it \
+         unusable is estimated_tokens, not a missing figure: {summary}"
     );
     assert_eq!(
         requests(&bodies).len(),

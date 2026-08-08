@@ -382,6 +382,7 @@ fn the_run_summary_reports_those_writes_separately() {
         usage: totals,
         cost_usd: None,
         budget: None,
+        spent_micros: None,
         elapsed_secs: 1.0,
         tools: known_tool_names().to_vec(),
         effort: None,

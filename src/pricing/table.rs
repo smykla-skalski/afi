@@ -102,15 +102,35 @@ pub(super) fn layers(home: &Path) -> (Providers, String) {
         // A cache written by a newer afi can name a provider this one has never
         // heard of. That is a row to skip, not a file to refuse.
         .filter_map(|(key, models)| Some((Provider::from_key(key)?, models)))
-        .map(|(provider, models)| {
-            let rates = models
-                .iter()
-                .filter_map(|(model, raw)| Some((super::key(model), raw.to_rates().ok()?)))
-                .collect();
-            (provider, rates)
-        })
+        .map(|(provider, models)| (provider, priced(models)))
         .collect();
     (by_provider, table.fetched.clone())
+}
+
+/// One provider's models, normalized, with any id that collides dropped.
+///
+/// Two spellings of one id would otherwise resolve by `HashMap` iteration order,
+/// which `RandomState` varies per process - so the bill and the cap would move
+/// run to run. That is the single failure `Pricing::normalize` refuses an
+/// `AFI_PRICES` duplicate to prevent and `scripts/project-prices.py` exits over;
+/// this is the third path and it now refuses too.
+///
+/// Both entries go rather than one winning: reporting no figure is checkable,
+/// and a figure that depends on which spelling survived is not.
+fn priced(models: &HashMap<String, RawRates>) -> HashMap<String, super::Rates> {
+    let mut out: HashMap<String, super::Rates> = HashMap::with_capacity(models.len());
+    let mut collided: Vec<String> = Vec::new();
+    for (model, raw) in models {
+        let Ok(rates) = raw.to_rates() else { continue };
+        let key = super::key(model);
+        if out.insert(key.clone(), rates).is_some() {
+            collided.push(key);
+        }
+    }
+    for key in collided {
+        out.remove(&key);
+    }
+    out
 }
 
 /// Provider, then normalized model id, then that model's rates.
@@ -144,10 +164,14 @@ pub(super) fn warn_if_stale<S: BuildHasher>(
     };
     let age = (today - projected).num_days();
     if age > limit {
+        // Deliberately not "set AFI_PRICE_REFRESH=1": it is on unless turned
+        // off, and the run most likely to see this line is a one-shot, which
+        // never starts a refresh at all - so that advice would print forever and
+        // never move the date.
         eprintln!(
-            "afi: token rates were last projected {fetched} ({age} days ago); \
-             any cost_usd is billed against those. Set AFI_PRICE_REFRESH=1 to \
-             refresh, or AFI_PRICES to override"
+            "afi: token rates were last projected {fetched} ({age} days ago) and any \
+             cost_usd is billed against those. Upgrade afi, run an interactive \
+             session to refresh them, or set AFI_PRICES to override"
         );
     }
 }

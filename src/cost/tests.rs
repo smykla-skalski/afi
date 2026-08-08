@@ -6,10 +6,11 @@
 
 use std::collections::HashMap;
 
-use super::{Crossing, Guard, Verdict, money};
+use super::{Crossing, Guard, Verdict, checkpoint, install, may_spend, money, outcome, reset};
 use crate::config::Budget;
 use crate::config::budget::resolve_budget;
-use crate::model::usage_totals::{Billed, UsageTotals};
+use crate::model::stream::NormalizedUsage;
+use crate::model::usage_totals::{self, Billed, UsageTotals};
 use crate::pricing::Pricing;
 
 /// $1.00 of input per million tokens, so a million tokens is exactly a dollar.
@@ -114,12 +115,51 @@ fn a_stopped_run_is_still_stopped_on_the_next_loop() {
         matches!(guard.checkpoint(&spent(9_000_000)), Verdict::Hard(_)),
         "a stopped run must never read as carry-on"
     );
-    assert!(!may_spend_with(&guard), "and nothing else may spend either");
 }
 
-/// `may_spend`'s answer for a guard, without touching the process-wide one.
-fn may_spend_with(guard: &Guard) -> bool {
-    !guard.stopped
+/// The one test that owns the process-wide guard, so nothing here can be
+/// satisfied by a re-statement of the code under test.
+///
+/// `may_spend` is what stops `/compress` issuing a billed request after the cap
+/// has fired, and it had no test at all: inverting it left the whole suite
+/// green. A second `#[test]` would interleave with this one under the parallel
+/// runner, so the phases below are plain calls.
+#[test]
+fn the_installed_guard_answers_may_spend() {
+    reset();
+    assert!(
+        may_spend(),
+        "a run with no budget may always spend - which is every run today"
+    );
+
+    install(Some(budget("5")), Pricing::parse(Some(RATES)).as_ref());
+    assert!(may_spend(), "a budget nothing has spent against yet");
+
+    stops_spending_once_the_cap_fires();
+
+    reset();
+    usage_totals::reset();
+    assert!(may_spend(), "reset clears the latch for the next run");
+}
+
+/// Drive the process-wide guard past its hard threshold the way a turn does.
+fn stops_spending_once_the_cap_fires() {
+    usage_totals::reset();
+    usage_totals::record("local", None, "m", &spent_usage(9_000_000));
+    assert!(matches!(checkpoint(), Verdict::Hard(_)));
+    assert!(
+        !may_spend(),
+        "/compress must not be able to spend after the cap has fired"
+    );
+    assert!(outcome().is_some_and(|o| o.stopped));
+}
+
+/// One request's worth of reported input tokens.
+fn spent_usage(input: u64) -> NormalizedUsage {
+    NormalizedUsage {
+        input_tokens: input,
+        ..NormalizedUsage::default()
+    }
 }
 
 #[test]

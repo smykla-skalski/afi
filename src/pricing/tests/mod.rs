@@ -335,39 +335,4 @@ fn an_unusable_table_still_prices_nothing_at_all() {
     assert_eq!(Pricing::from_env(&env), None);
 }
 
-#[test]
-fn a_model_with_no_rates_at_all_is_the_most_unpriceable_kind() {
-    // The trap this guards: `rates_for` returns `None` for a model nothing
-    // prices, and `unpriceable` returns `None` for a model it *can* price. Wiring
-    // the first straight through to the second with `?` inverts the answer and
-    // lets a budgeted run start with a cap that can never fire.
-    let pricing = Pricing::parse(Some(SONNET)).unwrap();
-    assert!(
-        pricing
-            .unpriceable(None, "a-model-nothing-prices")
-            .is_some_and(|why| why.contains("no rate for model")),
-        "a model with no rates must report why, not report itself as fine"
-    );
-    assert_eq!(
-        pricing.unpriceable(None, "claude-sonnet-5"),
-        None,
-        "and a fully priced model must report nothing"
-    );
-}
-
-#[test]
-fn a_model_priced_for_only_half_the_run_says_which_half() {
-    let input_only = Pricing::parse(Some(r#"{"m": {"input": 3}}"#)).unwrap();
-    assert!(
-        input_only
-            .unpriceable(None, "m")
-            .is_some_and(|why| why.contains("\"output\"")),
-        "every request spends on output, so a missing output rate cannot be capped around"
-    );
-    let output_only = Pricing::parse(Some(r#"{"m": {"output": 3}}"#)).unwrap();
-    assert!(
-        output_only
-            .unpriceable(None, "m")
-            .is_some_and(|why| why.contains("\"input\""))
-    );
-}
+mod budget;

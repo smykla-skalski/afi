@@ -98,7 +98,6 @@ pub struct Outcome {
 struct Guard {
     budget: Budget,
     pricing: Pricing,
-    spent: Option<u128>,
     converged: bool,
     stopped: bool,
 }
@@ -114,11 +113,7 @@ impl Guard {
         let spent = match self.pricing.run_cost(billed) {
             Priced::Spent(micros) => micros,
             Priced::Nothing => 0,
-            // Whatever was last measured no longer describes this run: it has
-            // since spent something afi cannot price, so the figure goes rather
-            // than standing as a total that reads far too low.
             Priced::Estimated(_) => {
-                self.spent = None;
                 return Verdict::Unpriceable(
                     "the budget cannot be measured: this endpoint reported no usage, so afi \
                      counted the tokens itself and a cap cannot hold over a guess"
@@ -126,11 +121,9 @@ impl Guard {
                 );
             }
             Priced::Unpriceable(why) => {
-                self.spent = None;
                 return Verdict::Unpriceable(format!("the budget cannot be measured: {why}"));
             }
         };
-        self.spent = Some(spent);
         let at = Crossing {
             spent,
             limit: self.budget.limit(),
@@ -171,7 +164,6 @@ pub fn install(budget: Option<Budget>, pricing: Option<&Pricing>) {
         (Some(budget), Some(pricing)) => Some(Guard {
             budget,
             pricing: pricing.clone(),
-            spent: None,
             converged: false,
             stopped: false,
         }),

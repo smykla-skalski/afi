@@ -118,17 +118,20 @@ pub(crate) fn resolve_budget<S: BuildHasher>(
     let Some((named, raw)) = named_budget(flag, env) else {
         return Ok(None);
     };
-    if millionths(raw.trim()) == Some(0) {
-        return Err(format!(
-            "{named} 0 would stop the run before its first request - leave it unset for no cap"
-        ));
-    }
-    let Some(limit) = amount(raw) else {
+    // Read once, then split the two refusals off the one figure. `amount` is the
+    // same read with zero already excluded, so asking it as well would parse
+    // twice and leave a reader wondering which of the two decides.
+    let Some(limit) = millionths(raw.trim()) else {
         return Err(format!(
             "{named} {raw:?} is not an amount in USD (want dollars, nothing negative, \
              and no finer than a millionth of a dollar)"
         ));
     };
+    if limit == 0 {
+        return Err(format!(
+            "{named} 0 would stop the run before its first request - leave it unset for no cap"
+        ));
+    }
     let limit = u128::from(limit);
     Ok(Some(Budget {
         limit,

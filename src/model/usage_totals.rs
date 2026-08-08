@@ -62,31 +62,34 @@ pub struct UsageTotals {
 }
 
 impl UsageTotals {
+    /// One request's usage as totals in its own right.
+    ///
+    /// A request afi counted itself has every one of its tokens marked, which is
+    /// [`Self::total_tokens`] over this one entry - the same five classes, summed
+    /// the same way, rather than a second chain that has to be remembered when a
+    /// class is added.
+    pub(crate) fn of(usage: &NormalizedUsage) -> Self {
+        let mut totals = Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+            requests: 1,
+            estimated_tokens: 0,
+        };
+        if usage.estimated {
+            totals.estimated_tokens = totals.total_tokens();
+        }
+        totals
+    }
+
     /// Fold one request's normalized usage in.
     ///
     /// Crate-internal, like `merge`: the counts are a public shape to read, but
     /// building one is afi's own business and not a semver commitment.
     pub(crate) fn add(&mut self, usage: &NormalizedUsage) {
-        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
-        self.cache_read_tokens = self
-            .cache_read_tokens
-            .saturating_add(usage.cache_read_tokens);
-        self.cache_write_tokens = self
-            .cache_write_tokens
-            .saturating_add(usage.cache_write_tokens);
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
-        self.requests = self.requests.saturating_add(1);
-        if usage.estimated {
-            self.estimated_tokens = self.estimated_tokens.saturating_add(
-                usage
-                    .input_tokens
-                    .saturating_add(usage.output_tokens)
-                    .saturating_add(usage.cache_read_tokens)
-                    .saturating_add(usage.cache_write_tokens)
-                    .saturating_add(usage.reasoning_tokens),
-            );
-        }
+        self.merge(&Self::of(usage));
     }
 
     /// Fold another model's totals in, for the run-wide flat counts.
@@ -174,15 +177,13 @@ pub fn record(source: &str, provider: Option<Provider>, model: &str, usage: &Nor
         totals.add(usage);
         return;
     }
-    let mut totals = UsageTotals::default();
-    totals.add(usage);
     guard.entries.push((
         Billed {
             source: source.to_string(),
             provider,
             model: model.to_string(),
         },
-        totals,
+        UsageTotals::of(usage),
     ));
 }
 

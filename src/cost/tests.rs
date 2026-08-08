@@ -26,7 +26,6 @@ fn guard(usd: &str) -> Guard {
     Guard {
         budget: budget(usd),
         pricing: Pricing::parse(Some(RATES)).expect("the rates must parse"),
-        spent: None,
         converged: false,
         stopped: false,
     }
@@ -225,7 +224,6 @@ fn the_thresholds_move_with_the_ratios() {
     let mut guard = Guard {
         budget: resolve_budget(Some("10"), &env).unwrap().unwrap(),
         pricing: Pricing::parse(Some(RATES)).expect("the rates must parse"),
-        spent: None,
         converged: false,
         stopped: false,
     };
@@ -261,17 +259,15 @@ fn a_crossing_names_both_figures() {
 }
 
 #[test]
-fn a_run_that_stops_being_measurable_reports_no_figure_rather_than_a_stale_one() {
-    // The pre-flight checkpoint measures zero before anything has been sent. If
-    // that number survived a later request afi could not price, the summary
-    // would report `spent_usd: 0.0` for a run that had spent real money - which
-    // reads as "this run was free", the one thing `cost_usd` is absent to avoid.
+fn a_run_that_stops_being_measurable_stops_rather_than_riding_its_last_figure() {
+    // The pre-flight checkpoint measures zero before anything has been sent. A
+    // guard that had once priced the run cleanly must still refuse it the moment
+    // a request arrives that afi had to guess at - "it was measurable a turn ago"
+    // is not a cap.
     let mut guard = guard("5");
     assert_eq!(guard.checkpoint(&[]), Verdict::Under);
-    assert_eq!(guard.spent, Some(0));
     assert!(matches!(
         guard.checkpoint(&guessed(1)),
         Verdict::Unpriceable(_)
     ));
-    assert_eq!(guard.spent, None, "the stale figure must not stand");
 }

@@ -13,7 +13,7 @@ use crate::memory::{list_memories, remember_memories};
 use crate::model::client::{ChatClient, ReqwestClient};
 use crate::model::compress::COMPRESS_KEEP;
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
-use crate::model::{ModelConfig, TurnOutcome};
+use crate::model::{ModelConfig, TurnOutcome, stream::tags};
 use crate::sessions::{self, new_session_id, resolve_session};
 use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
@@ -181,11 +181,12 @@ async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, client: &ReqwestC
     };
     ui.stop_activity();
     match result {
-        Some(Ok(Some(summary))) => {
+        // An empty summary would replace the conversation and report success.
+        Some(Ok(Some(summary))) if !summary.trim().is_empty() => {
             apply_compression(messages, &summary);
             say(ui, Info, "Compressed context");
         }
-        Some(Ok(None)) => {}
+        Some(Ok(_)) => say(ui, Warning, "Compress produced no summary; kept context"),
         Some(Err(error)) => {
             say(ui, Error, format!("Compress failed: {error}"));
         }
@@ -215,7 +216,7 @@ async fn request_compression(
     Ok(parse_completion_content(&text))
 }
 
-/// Pull `choices[0].message.content` out of a chat-completions JSON response.
+/// Pull `choices[0].message.content` out, stripped of reasoning, empty dropped.
 fn parse_completion_content(text: &str) -> Option<String> {
     let v: Value = serde_json::from_str(text).ok()?;
     v.get("choices")
@@ -224,7 +225,8 @@ fn parse_completion_content(text: &str) -> Option<String> {
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .map(ToString::to_string)
+        .map(tags::strip)
+        .filter(|summary| !summary.trim().is_empty())
 }
 
 /// Replace all but the last `COMPRESS_KEEP` turns with a summary user turn.

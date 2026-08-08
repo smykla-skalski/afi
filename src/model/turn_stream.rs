@@ -8,15 +8,21 @@ use std::time::Instant;
 use serde_json::{Value, json};
 
 use crate::metrics::abbr;
+use crate::model::stream::tags::ReasoningTags;
 use crate::model::stream::{StreamChunk, ThinkingDelta, Timings, Usage};
 use crate::model::turn_dispatch::ToolCallAccum;
 use crate::term::{MessageKind, StreamKind, UserInterface};
+use crate::tools::protocol::parse_text_calls;
 
 /// The folded result of a streamed turn.
 pub(crate) struct Accumulated {
     pub content_parts: Vec<String>,
     pub tool_calls: HashMap<u32, ToolCallAccum>,
     pub reasoning_parts: Vec<String>,
+    /// The subset of `reasoning_parts` that was lifted out of `content` by the
+    /// tag splitter, kept apart because only this text was ever a candidate for
+    /// the answer. See [`Accumulated::answer_text`].
+    pub tag_reasoning: String,
     /// Anthropic thinking blocks, in the order the model emitted them, ready to
     /// be replayed verbatim on the request carrying this turn's tool results.
     /// Always empty on the `OpenAI` path.
@@ -27,6 +33,35 @@ pub(crate) struct Accumulated {
     pub streamed_chars: u64,
     pub reasoning_only_chars: usize,
     pub t_first: Option<f64>,
+}
+
+impl Accumulated {
+    /// The turn's answer text, taking back a text-protocol tool call that was
+    /// classified as reasoning.
+    ///
+    /// A server with no native tool calling emits its call in the message body,
+    /// and a model on such a server can emit it inside a `<think>` span - where
+    /// the splitter, correctly for every other purpose, routes it off the
+    /// answer. `parse_text_calls` only ever reads the answer, so the call would
+    /// never be dispatched and the turn would report a reasoning stall instead.
+    ///
+    /// Only `tag_reasoning` is eligible, and only when there is nothing else to
+    /// run. Reasoning a provider reported in its own field was never part of the
+    /// answer, and scanning it would dispatch a call the model merely quoted -
+    /// afi's own system prompt carries unfenced text-protocol examples with real
+    /// tool names, so a model restating its instructions in a scratchpad
+    /// reproduces one exactly. Emptiness of `content` does not distinguish a
+    /// misrouted call from an abandoned one; provenance does.
+    pub(crate) fn answer_text(&self) -> String {
+        let text = self.content_parts.join("");
+        if !text.trim().is_empty()
+            || !self.tool_calls.is_empty()
+            || parse_text_calls(&self.tag_reasoning).is_empty()
+        {
+            return text;
+        }
+        self.tag_reasoning.clone()
+    }
 }
 
 /// Either the folded turn, or a reasoning-only stall the caller must handle.
@@ -88,6 +123,10 @@ pub(crate) struct StreamAccumulator {
     content_parts: Vec<String>,
     tool_calls: HashMap<u32, ToolCallAccum>,
     reasoning_parts: Vec<String>,
+    /// Only what the splitter took out of `content`, so `answer_text` can tell
+    /// a misrouted tool call from one a model quoted in a scratchpad afi never
+    /// had a claim on.
+    tag_reasoning: String,
     /// Keyed by Anthropic's content-block index, so iteration restores the
     /// order the model emitted the blocks in.
     thinking: BTreeMap<u32, ThinkingAccum>,
@@ -99,16 +138,24 @@ pub(crate) struct StreamAccumulator {
     /// The reasoning-only cutoff for this turn. `0` disables the cut, which is
     /// what the Anthropic path uses while thinking is on.
     reasoning_only_char_limit: usize,
+    /// Lifts `<think>` and `<reasoning>` spans back out of `content`, for the
+    /// endpoints that put deliberation there instead of in its own field. Idle
+    /// on the sources that cannot need it.
+    tags: ReasoningTags,
     t_first: Option<f64>,
 }
 
 impl StreamAccumulator {
+    /// `split_reasoning_tags` is off for sources that report deliberation
+    /// structurally, where looking for tags could only take a quoted one out of
+    /// an answer that meant it.
     #[must_use]
-    pub(crate) fn new(reasoning_only_char_limit: usize) -> Self {
+    pub(crate) fn new(reasoning_only_char_limit: usize, split_reasoning_tags: bool) -> Self {
         Self {
             content_parts: Vec::new(),
             tool_calls: HashMap::new(),
             reasoning_parts: Vec::new(),
+            tag_reasoning: String::new(),
             thinking: BTreeMap::new(),
             usage: None,
             timings: None,
@@ -116,6 +163,7 @@ impl StreamAccumulator {
             streamed_chars: 0,
             reasoning_only_chars: 0,
             reasoning_only_char_limit,
+            tags: ReasoningTags::new(split_reasoning_tags),
             t_first: None,
         }
     }
@@ -204,21 +252,23 @@ impl StreamAccumulator {
         if let Some(reasoning) = &chunk.reasoning_content
             && self.handle_reasoning(reasoning, ui)
         {
-            ui.finish_stream();
-            ui.message(
-                MessageKind::Warning,
-                format!(
-                    "REASONING-ONLY LIMIT - {} chars; cutting",
-                    abbr(self.reasoning_only_chars as u64)
-                ),
-            );
-            return Some(StreamResult::ReasoningStall {
-                chars: self.reasoning_only_chars,
-                reasoning_parts: take(&mut self.reasoning_parts),
-            });
+            return Some(self.stall(ui));
         }
+        // Content is divided before it is folded, so an endpoint that wrapped
+        // its deliberation in tags reaches the same two channels as one that
+        // reported it in `reasoning_content`.
         if let Some(content) = &chunk.content {
-            self.handle_content(content, ui);
+            let split = self.tags.split(content);
+            self.tag_reasoning.push_str(&split.reasoning);
+            let cut = !split.reasoning.is_empty() && self.handle_reasoning(&split.reasoning, ui);
+            // The answer goes out before the cut is acted on. One delta can
+            // carry the end of a span and the start of the reply, and stalling
+            // first would throw away text the model had already answered with -
+            // then nudge it to act, which it just had.
+            self.handle_content(&split.content, ui);
+            if cut && split.content.trim().is_empty() {
+                return Some(self.stall(ui));
+            }
         }
         if !chunk.tool_calls.is_empty() {
             self.handle_tool_calls(chunk);
@@ -229,9 +279,33 @@ impl StreamAccumulator {
         None
     }
 
+    /// Report the reasoning-only cutoff and hand back what was deliberated.
+    fn stall(&mut self, ui: &mut dyn UserInterface) -> StreamResult {
+        ui.finish_stream();
+        ui.message(
+            MessageKind::Warning,
+            format!(
+                "REASONING-ONLY LIMIT - {} chars; cutting",
+                abbr(self.reasoning_only_chars as u64)
+            ),
+        );
+        StreamResult::ReasoningStall {
+            chars: self.reasoning_only_chars,
+            reasoning_parts: take(&mut self.reasoning_parts),
+        }
+    }
+
     /// Complete a normally exhausted SSE stream and return its accumulated
     /// model/tool data.
-    pub(crate) fn finish(self, ui: &mut dyn UserInterface) -> StreamResult {
+    ///
+    /// A stream that ended mid-tag still has text held back waiting for the rest
+    /// of it, and that text is the model's, so it is released here rather than
+    /// dropped. The cutoff is not consulted: the stream is already over.
+    pub(crate) fn finish(mut self, ui: &mut dyn UserInterface) -> StreamResult {
+        let last = self.tags.flush();
+        self.tag_reasoning.push_str(&last.reasoning);
+        self.handle_reasoning(&last.reasoning, ui);
+        self.handle_content(&last.content, ui);
         ui.finish_stream();
         StreamResult::Done(Box::new(self.into_accumulated()))
     }
@@ -241,6 +315,7 @@ impl StreamAccumulator {
             content_parts: self.content_parts,
             tool_calls: self.tool_calls,
             reasoning_parts: self.reasoning_parts,
+            tag_reasoning: self.tag_reasoning,
             thinking_blocks: self
                 .thinking
                 .into_values()

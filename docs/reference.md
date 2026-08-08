@@ -19,6 +19,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--context-window <tokens>`                 | how much context the model holds ([details](#auto-compress))         |
 | `--system-prompt-file <path>`               | send these standing instructions to the model ([details](#system-prompt)) |
 | `--system-prompt-mode <replace\|append>`    | against the built-in prompt, default `replace` ([details](#system-prompt)) |
+| `--budget-usd <usd>`                        | stop the run once it has spent this much ([details](#budget))                 |
 | `--instructions <value>`                    | `project`, `none`, or paths to load standing rules from ([details](#project-instructions)) |
 | `--read-only`                               | deny every tool that can change anything ([details](#tool-policy)) |
 | `--allowed-tools <a,b>`                     | only these tools may be called ([details](#tool-policy))    |
@@ -82,6 +83,9 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_INSTRUCTIONS`                           | load a project's own standing rules ([details](#project-instructions)) |
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
 | `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
+| `AFI_BUDGET_USD`                              | stop the run once it has spent this much ([details](#budget))                     |
+| `AFI_SOFT_BUDGET_RATIO`                       | where in the budget the model is told to converge (default 0.8)                   |
+| `AFI_HARD_BUDGET_RATIO`                       | where in the budget the loop stops (default 0.95)                                 |
 | `AFI_PRICES`                                 | your own token rates, above the ones afi ships ([details](#cost)) |
 | `AFI_PRICE_REFRESH`                          | set to `0` to never fetch newer rates ([details](#cost))             |
 | `AFI_PRICE_STALE_DAYS`                       | warn when the rates are older than this (default 30, 0=off)          |
@@ -107,6 +111,7 @@ The project walk stops at the directory holding `.git`, so a file above the repo
   "active": "zai",
   "effort": "high",
   "read_only": true,
+  "budget_usd": 5,
   "sources": {
     "zai": {
       "base_url": "https://api.z.ai/api/paas/v4",
@@ -139,7 +144,7 @@ Credentials stay in the environment or the [env file](#environment-variables), w
 
 **A project file sets what a repository has a say in, and no more.** It is written by whoever wrote the repository rather than by whoever is running afi, so `cd`-ing into a clone must not reconfigure the run. Given the whole keyspace it could: one key redirecting a source's `base_url` is enough for the clone to receive whatever credential your environment holds, and `approval` in the same file switches off the gate that would have asked.
 
-So a project file may say **what to work with** - `active`, `source_order`, a source's `model`, `effort`, `backend`, `max_tokens` and the other sizing and tuning knobs, `summary`, `prices`, a source's `extra_body`, `app_name`, and `app_url`. It may not say where requests go, whose instructions the model follows, or whether you are asked:
+So a project file may say **what to work with** - `active`, `source_order`, a source's `model`, `effort`, `backend`, `max_tokens` and the other sizing and tuning knobs, `summary`, `prices`, a source's `extra_body`, `app_name`, and `app_url`. It may not say where requests go, whose instructions the model follows, whether you are asked, or how much of your money a run may spend:
 
 | refused in a project file                                        | why                                              |
 | ---------------------------------------------------------------- | ------------------------------------------------ |
@@ -148,6 +153,7 @@ So a project file may say **what to work with** - `active`, `source_order`, a so
 | `approval`                                                        | whether you are asked before a tool runs        |
 | `system_prompt_file`, `system_prompt_mode`, `instructions`          | whose instructions the model follows            |
 | `summary_file`, `home`, `sessions_dir`                             | where afi writes                                |
+| `budget_usd`, `soft_budget_ratio`, `hard_budget_ratio`           | how much of your money a run may spend, in either direction - see [Budget](#budget) |
 
 Reaching for one of those from a project file refuses the run and says so, naming the key.
 
@@ -371,6 +377,7 @@ One-shot runs (`-f`) skip the fold on the turn that produces the answer: the pro
     "cache_read_tokens": 6837,
     "cache_write_tokens": 2279,
     "reasoning_tokens": 0,
+    "estimated_tokens": 0,
     "total_tokens": 11447,
     "requests": 3,
     "refused_tool_calls": 0,
@@ -465,7 +472,9 @@ Reporting writes separately re-attributes tokens rather than adding them. The 22
 
 Anthropic prices a 5-minute cache write differently from a 1-hour one and reports them separately. `afi` only ever requests the default TTL, so the single figure here covers every write it can make.
 
-`cost_usd` appears only when you supply rates - see [Cost](#cost) below.
+`estimated_tokens` is how many of the tokens above afi counted rather than was told. It is a subset of the five counts, not a sixth class, so it is deliberately not part of `total_tokens`. Zero is the ordinary case: Anthropic and Bedrock report exact counts, every OpenAI-compatible endpoint honouring `stream_options.include_usage` reports input, output and cache reads, and llama.cpp reports `timings`. Anything above zero means an endpoint reported none of them, afi fell back to one character in four, and part of `cost_usd` is its arithmetic rather than a provider's. A budgeted run stops rather than capping against that - see [Budget](#budget).
+
+`cost_usd` appears only when afi has rates for the model - see [Cost](#cost) below. `usage.budget` appears only when the run was given a cap - see [Budget](#budget).
 
 A failed run sets `ok` to false, fills in `error` and `error_kind`, and exits 1.
 
@@ -574,6 +583,46 @@ Rates are read as exact decimals, down to the sixth place - a millionth of a dol
 Four things warn at startup and disable cost reporting for the whole run: a negative rate, a rate finer than the sixth decimal place or too large to hold, a misspelled class key, and a model named twice. The last one counts case and surrounding space as the same id, so `{"M": ..., "m": ...}` is a duplicate - one of the two would otherwise win at random and the bill would change between runs. One unreadable entry is not priced around.
 
 A session that switches models is billed against each model's own rates, so `cost_usd` stays right even though `model` can only name the last one.
+
+## Budget
+
+`--budget-usd 5` (or `AFI_BUDGET_USD=5`) caps what one run may spend. Unset, there is no cap, which is what afi did before this existed.
+
+**The cap is enforced by afi, never by the model.** A budget written into a prompt is text: the model does not know its own spend, cannot add it up across turns, and anything else in the context - a repository's instruction file, a tool result, the task itself - can argue with it. So the number never reaches the model as an instruction. What reaches the model is one sentence at the soft threshold, and what stops the run at the hard one is the turn loop declining to open another request.
+
+Two ratios say where those points sit. `AFI_SOFT_BUDGET_RATIO` (0.8) is where afi tells the model to converge: one line, once per run, on the next request - the remaining budget is short, finish the highest-value work rather than starting more. `AFI_HARD_BUDGET_RATIO` (0.95) is where the loop stops. The gap between them is what turns a hard stop into a wrapped-up answer rather than a sentence cut in half.
+
+**The hard threshold sits below 1 on purpose.** The request that crosses the line has already been paid for by the time its usage comes back, so stopping *at* the cap means stopping *past* it. afi cannot know what a turn will cost before it runs; what a cap can promise is that the turn after the one that crossed never happens.
+
+**Spending the budget ends the run successfully.** It exits 0 with `ok: true` and whatever had been produced, because a cap is a decision the caller made rather than a failure the run had. `usage.budget` says what happened:
+
+```json
+"budget": {
+  "limit_usd": 5.0,
+  "soft_ratio": 0.8,
+  "hard_ratio": 0.95,
+  "spent_usd": 4.83,
+  "converged": true,
+  "stopped": true
+}
+```
+
+The block is there whenever a cap was set and absent when none was, so its presence answers "was this run capped at all" - a question nothing else in the summary answers. `converged` says the note was sent, `stopped` says the loop was cut short, and both are `false` on a run that finished on its own. `converged` can be `false` on a stopped run: one turn large enough to jump from under the soft threshold to past the hard one gets no note, because there was never a request left to carry it. The note is best effort; the stop is not.
+
+**Read `stopped` before `answer`.** A stopped run's answer is whatever the model had got to, not a finished one, and `ok: true` is not the field that tells you which.
+
+**A budget afi cannot measure refuses to start.** afi caps what a run spends by pricing what it used, so a run with a cap and no rates for the model it is about to use exits 2 rather than starting under a cap that could never fire. After the shipped rate table that is rare - it fires for a self-hosted endpoint afi has no rates for, which is exactly the case where a cap could not have held. The refusal names the spelling you used and the model it could not price:
+
+```
+  ✗ --budget-usd 5 cannot be enforced: no rate for model "my-local-model" - afi caps
+    what a run spends by pricing what it used, so price it in AFI_PRICES or drop the budget
+```
+
+The same thing found later is a failure rather than a cap hit. A `/source` switch onto a model with no rates warns immediately and stops the run at the next turn with `ok: false` and `error_kind: input`; so does an endpoint that reports no usage at all, because afi is then counting characters and a cap cannot hold over a guess. In both cases `usage.budget` is present with `stopped: false` and no `spent_usd`, since `stopped` means *the cap* stopped it and here the measurement did. A budget that cannot be measured is never treated as no budget.
+
+**Nothing inside the run can move the cap.** The flag beats the variable, the variable beats your config file, and a project's `.afi/config.json` cannot set it at all - not even downwards. It is the one bound where lowering is as dangerous as raising, because a hard stop is a *successful* exit: a repository able to write `budget_usd: 0.01` could end every run in a checkout after one request and have the summary report that it worked. `read_only` is safe to tighten from a project file because a denied tool shows up in `refused_by_policy`; a truncated answer that reports success shows up nowhere.
+
+`/compress` is asked too. It is the one slash command that issues a billed request, so a run whose cap has already stopped the turn loop cannot spend more by typing it.
 
 ## Anthropic
 

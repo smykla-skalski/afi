@@ -594,6 +594,14 @@ steps:
 
 The role's trust policy is what decides whether the workflow may assume it. Register `token.actions.githubusercontent.com` as an IAM OIDC identity provider with `sts.amazonaws.com` as its audience, then condition the role on the `sub` claim - `repo:acme/afi:ref:refs/heads/main`, or whatever the job should be limited to - as AWS's own GitHub Actions documentation describes. afi supplies the token; the account decides what it is worth.
 
+**Read the `sub` before writing the policy for it.** GitHub also issues an immutable subject, which carries the numeric owner and repository ids rather than their names - `repo:acme@244299042/afi@1325001485:ref:refs/heads/main`. It is the better claim to pin, because renaming or transferring a repository cannot silently move the grant to somebody else's, but a policy written for the readable form matches none of it and STS refuses with the same `AccessDenied` it uses for a role that does not exist. Which form a repository gets is not always what its OIDC settings report, so print the claim from a job that has `id-token: write` and condition on what came back:
+
+```bash
+curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+  | jq -r '.value' | cut -d. -f2 | base64 -d 2>/dev/null | jq '{sub, aud}'
+```
+
 **AWS federates differently from Anthropic, and afi hides the difference.** Anthropic's exchange returns a bearer token that goes in a header. AWS's `sts:AssumeRoleWithWebIdentity` returns a temporary access key, secret, and session token, and those sign requests exactly as a long-lived pair would - so every Bedrock request is SigV4 either way, and only where the credential came from differs.
 
 **The identity token comes from `AWS_WEB_IDENTITY_TOKEN`, else `AWS_WEB_IDENTITY_TOKEN_FILE`, else GitHub Actions' OIDC endpoint,** so a workflow mints nothing itself. The second is the variable every AWS SDK reads, which means a job that already ran `aws-actions/configure-aws-credentials`, or a pod given an EKS service-account identity, needs nothing further. The audience afi asks Actions for is `sts.amazonaws.com`, which is what AWS's setup instructions register. An identity provider created with a different audience is reached by minting the token yourself and passing it in one of those two variables, which skips the Actions endpoint entirely.

@@ -6,11 +6,12 @@ The mechanism lives in [`.github/workflows/release.yml`](../.github/workflows/re
 
 ## What a release is
 
-Four publications, from one run:
+Five publications, from one run:
 
 - a GitHub release, with an archive and a checksum for each of five targets
 - two Debian packages, attached to that release and pushed to the apt repository
-- the `afi-cli` crate on crates.io, published last by `scripts/publish-crate.sh`
+- the `afi-cli` crate on crates.io, published by `scripts/publish-crate.sh`
+- a Homebrew formula in [smykla-skalski/homebrew-tap](https://github.com/smykla-skalski/homebrew-tap), rewritten there by that repository's own workflow
 - a Sigstore build-provenance attestation for every archive and package
 
 [`scripts/release-targets.sh`](../scripts/release-targets.sh) is the definition of that list. The build matrix reads it and so does the reconciliation gate, so adding a target means editing one file.
@@ -24,9 +25,12 @@ release  tag, open a DRAFT release, attach and attest.
 apt      push both Debian packages.
 verify   assert the release and the apt repository agree.
 publish  flip the draft, then publish the crate.
+homebrew ask the tap for a formula update, and wait until it has one.
 ```
 
-The crate goes last, on its own, because it is the only publication a release cannot take back. Everything ahead of it is reversible: a release can be turned back into a draft, a Debian package can be deleted from apt. A crate can only be yanked, which stops new dependents resolving to it and leaves it downloadable forever. So it is published once nothing else can still fail.
+The crate is the last publication a release cannot take back. Everything ahead of it is reversible: a release can be turned back into a draft, a Debian package can be deleted from apt. A crate can only be yanked, which stops new dependents resolving to it and leaves it downloadable forever. So it is published once nothing that could still fail is left.
+
+`homebrew` running after it is not a contradiction. It publishes into another repository, and it is the one step of a release anyone can put right by hand afterwards, so it has no business standing between the release going public and the crate that cannot be undone. A red `homebrew` job means the tap is a version behind, and nothing else.
 
 Nothing is visible to a user until `publish`. That is deliberate, and it is the fix for how the first four releases went wrong:
 
@@ -111,6 +115,12 @@ Re-run rather than dispatching a fresh run, so the same version is finished inst
 
 **`verify`** — the release and the apt repository disagree. The output names every missing file. This is the gate doing its job; the release stays a draft.
 
+**`homebrew`** — everything is published and the tap is a version behind. There is nothing to undo and nothing to re-run in this repository beyond the job itself. The error says which of the two things happened: no run started, meaning `update-afi-formula.yml` is not on the tap's default branch, or a run started and the formula still does not name this version, with a link to it. Either way the tap's own workflow can be driven by hand:
+
+```
+gh workflow run update-afi-formula.yml --repo smykla-skalski/homebrew-tap -f version=0.8.0
+```
+
 ## Undoing a release
 
 ### The version is bad and it is already published
@@ -149,6 +159,16 @@ Turn it back into a draft rather than deleting it, so the tag and the assets sur
 gh release edit v0.5.0 --draft=true
 ```
 
+Do this and the Homebrew formula still points at the release's assets, which a draft no longer serves. Roll the formula back too.
+
+### Roll the Homebrew formula back
+
+```
+gh workflow run update-afi-formula.yml --repo smykla-skalski/homebrew-tap -f version=0.4.0
+```
+
+Pointing the formula at an older release is the closest thing to an undo Homebrew has: `brew upgrade` follows the formula, so anyone who has not upgraded yet never sees the bad version and anyone who has moves back on their next upgrade. The tap refuses anything that is not a stable `X.Y.Z`.
+
 ## A tag with no release
 
 The state v0.3.0 was left in. The current pipeline cannot produce it, because it builds everything before it tags, but a tag pushed by hand can, and the tags that predate this pipeline already have.
@@ -164,7 +184,7 @@ It checks out the tag, builds and smoke-tests every target from it, attests the 
 - It refuses a tag that already has a *published* release, so it can only fill a gap and never overwrite bytes someone has already downloaded.
 - It refuses a tag whose manifest disagrees with the tag name.
 - It builds from exactly that commit and does not move the tag, bump anything, or touch the changelog. The release notes are that version's existing changelog section, plus a note saying it was backfilled.
-- The result is not marked latest, and nothing is pushed to apt: a backfilled version is by definition older than what apt already serves.
+- The result is not marked latest, nothing is pushed to apt, and the Homebrew formula is left alone: a backfilled version is by definition older than what those already serve.
 
 The packaging comes from the tag's own tree, so the `.deb` is the one that version would have produced. Only the target list and the smoke test are taken from the default branch, because a tag old enough to need this predates them.
 
@@ -194,6 +214,8 @@ Repository secrets:
 
 The `plan` job checks all of them before anything is tagged, so a missing one costs a failed run rather than a half-finished release.
 
+Homebrew adds nothing to either table. The same app reaches the tap, with a token scoped to that repository and to `contents: write` and `actions: read`.
+
 [`.github/workflows/apt-credentials-check.yml`](../.github/workflows/apt-credentials-check.yml) exercises the Cloudsmith credential without publishing. Run it if a release has not happened in a while and you want to know the OIDC trust still resolves before you find out during one.
 
 ## crates.io credentials
@@ -205,6 +227,20 @@ Configured on 2026-08-07: GitHub, `smykla-skalski/afi`, workflow `release.yml`, 
 Getting there took two releases, because a trusted publisher is registered against a crate you already own. 0.6.0 created `afi-cli` using a scoped, short-lived token and took the documented fallback, warning as it went. The publisher was registered afterwards. 0.7.0 then reported `Authenticated to crates.io by trusted publishing.` and its post-step cleanup said `Token revoked successfully`, where 0.6.0 had said `No token to revoke` — which is what proved the exchange was real and not a silent fallback. Only then was the stored token revoked and the `CARGO_REGISTRY_TOKEN` secret deleted.
 
 The fallback code is still in the publish job and now has nothing to fall back to, which is the point: a broken trusted-publishing setup fails the release instead of quietly reaching for a long-lived credential. If it ever needs restoring, the token that worked was scoped to crate pattern `afi-cli` with `publish-new` and `publish-update` only.
+
+## The Homebrew tap
+
+The formula and the workflow that rewrites it live in [smykla-skalski/homebrew-tap](https://github.com/smykla-skalski/homebrew-tap), next to the formulae for the other tools there. This repository only dispatches to it.
+
+The `homebrew` job sends an `afi-release` dispatch carrying the version, then waits for `Formula/afi.rb` to name it. The wait is the part worth having. A `repository_dispatch` is accepted with a 204 whether or not a workflow matches it, so a release that dispatched and moved on would report success while the tap stayed quietly behind. Reading the formula afterwards is the same move the `verify` job makes against Cloudsmith: check the outcome, not the request.
+
+The tap does the work. It downloads the four archives the formula serves, verifies each one with `gh attestation verify --repo smykla-skalski/afi`, pins checksums it computed from the files it just verified, installs the result on a macOS runner and makes the binary report its own version, and only then commits. So the formula can only ever pin an archive that came out of this repository's release workflow.
+
+Linux gets the musl builds on both architectures rather than the glibc build a release also publishes, for the reason `install.sh` gives: they are static and run whatever the host's glibc turns out to be.
+
+Prereleases stay out. Homebrew has no notion of one, so a formula pointing at `0.9.0-rc.1` would carry every `brew upgrade afi` onto a release candidate. The `homebrew` job skips them and the tap's workflow rejects them as well, which is deliberate duplication across a repository boundary: the tap's `workflow_dispatch` can be driven by a hand that does not know the rule.
+
+The one setup requirement is that `update-afi-formula.yml` is on the tap's default branch, because a dispatch to a workflow that is not there goes nowhere. The job asks before it dispatches rather than waiting out its deadline to find out.
 
 ## Immutable releases
 
@@ -229,3 +265,5 @@ gh attestation verify afi-x86_64-unknown-linux-musl.tar.gz --repo smykla-skalski
 ```
 
 The published `.sha256` files sit next to the archives and are uploaded by the same job, so they prove a download arrived intact and nothing about where it came from. The attestation is the one that answers that.
+
+The tap runs the same command on every archive before it pins a checksum, so a `brew install smykla-skalski/tap/afi` has already had this check run on its behalf.

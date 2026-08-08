@@ -9,8 +9,9 @@
 
 # The crates.io name `afi` belongs to an unrelated audio/video crate published in
 # 2017, so the package is `afi-cli` and the binary it installs is still `afi`.
-# A release is four things: the GitHub release and its archives, the Debian
-# packages in the apt repository, and the crate.
+# A release is four publications: the GitHub release and its archives, the
+# Debian packages in the apt repository, the crate, and the Homebrew formula in
+# smykla-skalski/homebrew-tap.
 #
 # release-plz does not publish the crate, though. The release workflow's own
 # `publish` job does, last, after the reconciliation gate has passed. Two reasons,
@@ -79,6 +80,12 @@ git_release_body = """
 {{ changelog }}
 
 ## Install
+
+Homebrew, on macOS and Linux:
+
+```
+brew install smykla-skalski/tap/afi
+```
 
 Debian and Ubuntu, amd64 and arm64:
 

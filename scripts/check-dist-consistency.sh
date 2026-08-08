@@ -17,6 +17,13 @@ set -eu
 #
 # Neither can be deduplicated away. This is the check that keeps them honest
 # instead, so a documented single source of truth is one in fact.
+#
+# A third copy lives in another repository: the formula template in
+# smykla-skalski/homebrew-tap names four of these archives. This script cannot
+# read it and does not try. That copy is kept honest by failure instead -- the
+# tap asks for the archives by name with `gh release download --pattern`, so a
+# rename here turns its next run red rather than pinning a file that no longer
+# exists, and the release waits on that run.
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 targets_sh="$repo_root/scripts/release-targets.sh"

@@ -22,8 +22,12 @@ name: release
 #   apt      push the Debian packages.
 #   verify   assert the release and the apt repository agree.
 #   publish  flip the draft, then publish the crate. The first moment a user can
-#            see anything, and the crate is last because it is the only step of a
-#            release that cannot be undone.
+#            see anything, and the crate comes after everything reversible
+#            because it is the one step of a release that cannot be undone.
+#   homebrew ask the tap for a formula update, and wait until it has one. After
+#            the crate, and in its own job: it publishes into another repository
+#            and is the only step here anyone can put right afterwards by hand,
+#            so it has no business standing between the release and the crate.
 #
 # The bump is committed in `plan`, before the build, and that is deliberate even
 # though it is the one thing here that writes outside the runner early. The
@@ -72,6 +76,10 @@ name: release
 #
 # The plan job refuses to publish while any of those is unset, so a missing step
 # fails before a tag exists rather than halfway through a release.
+#
+# Homebrew needs no setup here beyond the app key the plan job already checks.
+# The formula and the workflow that rewrites it live in
+# smykla-skalski/homebrew-tap; this workflow only dispatches to it and waits.
 on:
   schedule:
     # 04:17 UTC. Off the hour on purpose: GitHub queues scheduled jobs across all
@@ -602,3 +610,117 @@ jobs:
             exit 1
           fi
           mise run publish:crate
+
+  homebrew:
+    name: Update the Homebrew formula
+    needs: [plan, publish]
+    # A prerelease stays out of the tap. Homebrew has no notion of one, so a
+    # formula pointing at 0.9.0-rc.1 would carry every `brew upgrade afi` onto a
+    # release candidate. Same predicate the publish job uses for `--latest`.
+    if: ${{ !contains(needs.plan.outputs.version, '-') }}
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
+    # The tap installs the formula on a macOS runner to prove it works, which is
+    # the slow part of what this job waits for. This is the backstop under that
+    # wait's own deadline.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      # Scoped to one repository and two permissions, unlike the tokens the plan
+      # and release jobs mint. Those push to a branch whose ruleset this app
+      # bypasses, and a permission-scoped token loses the bypass; this one only
+      # sends a dispatch and reads, so no ruleset is involved. `actions: read`
+      # is for the run status the wait below reports on.
+      - name: Mint a token for the tap
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SMYKLOT_CLIENT_ID || 'Iv23liMyF31aNYay8IXy' }}
+          private-key: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
+          owner: smykla-skalski
+          repositories: homebrew-tap
+          permission-contents: write
+          permission-actions: read
+
+      # After the crate rather than before it, and in its own job. The tap is
+      # the one publication that happens in another repository and the only one
+      # a release can put right afterwards by hand, so it is not allowed to
+      # stand between the release going public and the crate that cannot be
+      # taken back. A red job here means the tap is a version behind, which is
+      # fixed by re-running this job or dispatching the tap's own workflow.
+      #
+      # The tap downloads this release's archives, verifies their provenance,
+      # pins their checksums, installs the result, and pushes the formula. See
+      # update-afi-formula.yml in smykla-skalski/homebrew-tap.
+      - name: Update the Homebrew formula
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          TAP: smykla-skalski/homebrew-tap
+          WORKFLOW: update-afi-formula.yml
+        run: |
+          set -euo pipefail
+
+          # Read before dispatching, so the wait cannot mistake the previous
+          # release's run for this one's. Zero when the workflow exists and has
+          # never run, which is the first release through here.
+          #
+          # It also answers the question worth asking before dispatching at all.
+          # `gh run list` 404s on a workflow that is not on the tap's default
+          # branch, and a dispatch that matches nothing is accepted with a 204
+          # and dropped, so without this the run would sit out the whole
+          # deadline waiting for something that was never going to start.
+          if ! before="$(gh run list --repo "${TAP}" --workflow "${WORKFLOW}" \
+            --limit 1 --json databaseId --jq '.[0].databaseId // 0' 2>/dev/null)"; then
+            echo "::error::${WORKFLOW} is not on ${TAP}'s default branch, so an afi-release dispatch would go nowhere."
+            exit 1
+          fi
+
+          jq -n --arg v "${VERSION}" \
+            '{event_type: "afi-release", client_payload: {version: $v}}' \
+            | gh api --method POST "repos/${TAP}/dispatches" --input -
+          echo "Dispatched afi-release ${VERSION} to ${TAP}."
+
+          # A dispatch is fire-and-forget: GitHub accepts it with a 204 whether
+          # or not a workflow matches it. So this does not take the tap's word
+          # for anything and waits for the formula itself to name this release,
+          # the same way the verify job reads Cloudsmith's API rather than
+          # trusting the push step that ran a minute earlier.
+          #
+          # The formula carries no `version` stanza -- Homebrew reads it out of
+          # the URLs -- so the URLs are what gets checked, which is also what a
+          # `brew install` will actually fetch.
+          deadline=$(( SECONDS + 900 ))
+          run=""
+          while (( SECONDS < deadline )); do
+            sleep 15
+
+            formula="$(gh api "repos/${TAP}/contents/Formula/afi.rb?ref=main" \
+              --header 'Accept: application/vnd.github.raw' 2>/dev/null || true)"
+            if grep -qF "/download/v${VERSION}/" <<<"${formula}"; then
+              echo "Formula/afi.rb on ${TAP} now points at v${VERSION}."
+              exit 0
+            fi
+
+            # Reported as soon as it is known, so a failing tap costs a minute
+            # rather than the whole deadline. A transient API error here is not
+            # worth failing a release over; the next pass asks again.
+            run="$(gh run list --repo "${TAP}" --workflow "${WORKFLOW}" --limit 5 \
+              --json databaseId,status,conclusion,url \
+              --jq "[.[] | select(.databaseId > ${before})] | first // empty" \
+              2>/dev/null || true)"
+            if [[ -n "${run}" ]] \
+              && [[ "$(jq -r .status <<<"${run}")" == completed ]] \
+              && [[ "$(jq -r .conclusion <<<"${run}")" != success ]]; then
+              echo "::error::The tap's formula update $(jq -r .conclusion <<<"${run}"): $(jq -r .url <<<"${run}")"
+              exit 1
+            fi
+          done
+
+          # The two ways this times out are different problems, so say which.
+          if [[ -z "${run}" ]]; then
+            echo "::error::No ${WORKFLOW} run started on ${TAP}. Is that workflow on its default branch?"
+          else
+            echo "::error::$(jq -r .url <<<"${run}") is still running, or finished without updating Formula/afi.rb to v${VERSION}."
+          fi
+          exit 1

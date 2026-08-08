@@ -37,7 +37,7 @@ fn billed_usage() -> String {
 /// access key id beside it is, and the pair is what makes the difference
 /// testable.
 const AWS_SECRET: &str = "aws-secret-never-published";
-const AWS_KEY_ID: &str = "AKIAEXAMPLEFIRST";
+const AWS_KEY_ID: &str = "AKIAEXAMPLESECOND";
 
 /// A piped session that spends on `first`, switches, and spends on `second`.
 ///

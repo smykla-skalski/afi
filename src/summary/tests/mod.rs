@@ -17,6 +17,20 @@ pub(in crate::summary) fn totals(requests: u64) -> UsageTotals {
     }
 }
 
+/// The breakdown a one-source run has: the whole of `usage` under the name that
+/// paid, and nothing at all when nothing was billed.
+fn billed_by(usage: UsageTotals) -> Vec<SourceSpend<'static>> {
+    if usage.is_empty() {
+        return Vec::new();
+    }
+    vec![SourceSpend {
+        source: "anthropic".to_string(),
+        usage,
+        cost_usd: None,
+        auth: Some(RunAuth::ApiKey),
+    }]
+}
+
 pub(in crate::summary) fn summary(ok: bool, answer: &str, usage: UsageTotals) -> RunSummary<'_> {
     RunSummary {
         ok,
@@ -32,12 +46,11 @@ pub(in crate::summary) fn summary(ok: bool, answer: &str, usage: UsageTotals) ->
         effort: None,
         refused_tool_calls: RefusedToolCalls::default(),
         auth: Some(RunAuth::ApiKey),
-        sources: vec![SourceSpend {
-            source: "anthropic".to_string(),
-            usage,
-            cost_usd: None,
-            auth: Some(RunAuth::ApiKey),
-        }],
+        // Derived from `usage` rather than written unconditionally, so a fixture
+        // for a run that billed nothing cannot hand a test an entry of zeros -
+        // a shape `spend_by_source` has no way to produce, since it maps over
+        // ledger entries and every one of those was recorded by a request.
+        sources: billed_by(usage),
         system_prompt_mode: Some("builtin"),
         system_prompt_file: None,
     }
@@ -347,7 +360,6 @@ fn a_run_that_billed_nothing_breaks_down_into_nothing() {
     let mut failed = summary(false, "", UsageTotals::default());
     failed.error = Some("HTTP 401: authentication_error");
     failed.error_kind = Some(ErrorKind::Auth);
-    failed.sources = Vec::new();
     let json = failed.to_json();
     assert_eq!(json["sources"], json!([]));
     // The credential it tried is still named, which is what a failed run has to

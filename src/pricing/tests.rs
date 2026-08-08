@@ -1,4 +1,5 @@
 use super::*;
+use crate::pricing::provider::Provider;
 
 /// Anthropic's published Sonnet rates, the table a CI job would actually write.
 const SONNET: &str = r#"{
@@ -21,8 +22,18 @@ fn totals(input: u64, output: u64, cache_read: u64, cache_write: u64) -> UsageTo
     }
 }
 
-fn run(model: &str, usage: UsageTotals) -> Vec<(String, UsageTotals)> {
-    vec![(model.to_string(), usage)]
+/// One entry in the ledger, on an endpoint afi carries no rates for, so what is
+/// under test is the caller's own table and nothing beneath it.
+fn run(model: &str, usage: UsageTotals) -> Vec<(Billed, UsageTotals)> {
+    vec![(billed(model), usage)]
+}
+
+fn billed(model: &str) -> Billed {
+    Billed {
+        source: "local".to_string(),
+        provider: None,
+        model: model.to_string(),
+    }
 }
 
 // --- rate parsing ---------------------------------------------------------------
@@ -208,8 +219,8 @@ fn a_run_that_switched_models_bills_each_at_its_own_rates() {
     ))
     .unwrap();
     let cost = pricing.run_cost_usd(&[
-        ("cheap".to_string(), totals(1_000_000, 1_000_000, 0, 0)),
-        ("dear".to_string(), totals(1_000_000, 1_000_000, 0, 0)),
+        (billed("cheap"), totals(1_000_000, 1_000_000, 0, 0)),
+        (billed("dear"), totals(1_000_000, 1_000_000, 0, 0)),
     ]);
     assert_eq!(cost, Some(33.0));
 }
@@ -218,8 +229,8 @@ fn a_run_that_switched_models_bills_each_at_its_own_rates() {
 fn a_run_that_switched_onto_an_unpriced_model_reports_no_cost() {
     let pricing = Pricing::parse(Some(r#"{"cheap": {"input": 1, "output": 2}}"#)).unwrap();
     let cost = pricing.run_cost_usd(&[
-        ("cheap".to_string(), totals(1_000_000, 1_000_000, 0, 0)),
-        ("dear".to_string(), totals(1_000_000, 1_000_000, 0, 0)),
+        (billed("cheap"), totals(1_000_000, 1_000_000, 0, 0)),
+        (billed("dear"), totals(1_000_000, 1_000_000, 0, 0)),
     ]);
     assert_eq!(cost, None, "half a run's cost is not the run's cost");
 }
@@ -264,14 +275,61 @@ fn a_nonsense_token_count_saturates_instead_of_panicking() {
 // --- env plumbing -----------------------------------------------------------------
 
 #[test]
-fn the_table_comes_from_afi_prices() {
-    let mut env: HashMap<String, String> = HashMap::new();
-    assert_eq!(Pricing::from_env(&env), None);
-    env.insert("AFI_PRICES".to_string(), SONNET.to_string());
-    let pricing = Pricing::from_env(&env).expect("a valid table must be read");
+fn a_run_that_set_no_rates_is_still_priced() {
+    // The point of shipping a table: `AFI_PRICES` used to be the only way to get
+    // a figure at all, so every run that had not written one reported nothing.
+    let env: HashMap<String, String> = HashMap::new();
+    let pricing = Pricing::from_env(&env).expect("the shipped table must be read");
     assert!(
-        pricing
-            .run_cost_usd(&run("claude-sonnet-5", totals(1_000_000, 0, 0, 0)))
-            .is_some()
+        !pricing.fetched().is_empty(),
+        "the shipped table must say when it was projected"
     );
+    let billed = vec![(
+        Billed {
+            source: "anthropic".to_string(),
+            provider: Some(Provider::Anthropic),
+            model: "claude-sonnet-4-6".to_string(),
+        },
+        totals(1_000_000, 0, 0, 0),
+    )];
+    assert_eq!(
+        pricing.run_cost_usd(&billed),
+        Some(3.0),
+        "a million input tokens at the shipped Sonnet rate"
+    );
+}
+
+#[test]
+fn the_callers_own_rates_beat_the_shipped_ones() {
+    let mut env: HashMap<String, String> = HashMap::new();
+    env.insert(
+        "AFI_PRICES".to_string(),
+        r#"{"claude-sonnet-4-6": {"input": 99}}"#.to_string(),
+    );
+    let pricing = Pricing::from_env(&env).expect("a valid table must be read");
+    let billed = vec![(
+        Billed {
+            source: "anthropic".to_string(),
+            provider: Some(Provider::Anthropic),
+            model: "claude-sonnet-4-6".to_string(),
+        },
+        totals(1_000_000, 1_000_000, 0, 0),
+    )];
+    // The override replaces the input rate and leaves the output rate standing.
+    // Replacing the whole card instead would leave output unpriced and silence
+    // `cost_usd` for the model the override was written to correct.
+    assert_eq!(pricing.run_cost_usd(&billed), Some(99.0 + 15.0));
+}
+
+#[test]
+fn an_unusable_table_still_prices_nothing_at_all() {
+    // Unchanged, and it has to stay that way: a caller who wrote a rate wrong
+    // must not be quietly billed against the shipped card instead, because the
+    // figure would look right and be the wrong one.
+    let mut env: HashMap<String, String> = HashMap::new();
+    env.insert(
+        "AFI_PRICES".to_string(),
+        r#"{"m": {"input": -3}}"#.to_string(),
+    );
+    assert_eq!(Pricing::from_env(&env), None);
 }

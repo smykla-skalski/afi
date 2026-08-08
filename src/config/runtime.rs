@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 use crate::approval::{ApprovalState, starting_approval};
 use crate::envfile;
 use crate::pricing::Pricing;
-use crate::summary::{ErrorKind, RunError, SummaryFormat, summary_path, writable};
+use crate::summary::{ErrorKind, RunError, SummaryFormat, summary_path};
 use crate::tools::policy::ToolPolicy;
 
 use super::Source;
 use super::args::parse_args;
 use super::effort;
 use super::file::{FileSettings, config_files};
+use super::refusals;
 use super::sources::discover_sources;
 use super::system_prompt::{self, SystemPrompt};
 use super::tools::apply_tool_flags;
@@ -319,57 +320,12 @@ impl Runtime {
         self.active.as_ref().and_then(|n| self.sources.get(n))
     }
 
-    /// Why this run must not start, if it must not.
-    ///
-    /// Every case is a setting whose quiet fallback leaves a finished run that
-    /// differs from the one the command line asked for, with nothing downstream
-    /// to notice: a wider tool grant than was asked for, an effort nobody chose,
-    /// afi's own prompt in place of the instructions the run was handed, or a
-    /// config file whose settings are all absent. The
-    /// summary-file case is checked here, by touching the path, rather than left
-    /// to the write at the end of the run: a caller that asked for a file is not
-    /// watching stdout for the JSON, and a run that has already been paid for is
-    /// a poor moment to learn the directory does not exist.
-    ///
-    /// Each refusal carries the kind the summary reports, decided here where the
-    /// reason is known. Deriving it afterwards from which field was non-empty
-    /// would put the caller's classification back at one remove from the thing
-    /// being classified, which is what `error_kind` exists to end.
-    ///
-    /// Only the *active* source is checked for a credential it cannot assemble.
-    /// A half-configured source nobody switches to costs the run nothing, and
-    /// refusing to start over one would make an unused `AWS_ACCESS_KEY_ID` in
-    /// the shell enough to block every run.
+    /// Why this run must not start, if it must not. See [`super::refusals`],
+    /// which holds the list itself so that it can grow without this struct
+    /// growing with it.
     #[must_use]
     pub fn refusals(&self) -> Vec<RunError> {
-        let mut out = self.flag_errors.clone();
-        out.extend(
-            self.tool_policy
-                .unknown_names_message()
-                .map(|m| RunError::new(m, ErrorKind::Policy)),
-        );
-        out.extend(
-            self.summary_file
-                .as_deref()
-                .and_then(|p| writable(p).err())
-                .map(|m| RunError::new(m, ErrorKind::Input)),
-        );
-        // `Input`: the invocation named a prompt this run cannot use, and
-        // retrying it lands in the same place.
-        out.extend(
-            self.system_prompt
-                .as_ref()
-                .err()
-                .map(|m| RunError::new(m.clone(), ErrorKind::Input)),
-        );
-        // `Auth`: the source the run starts on cannot assemble a credential, and
-        // no retry assembles one either.
-        out.extend(
-            self.active_source()
-                .and_then(Source::config_error)
-                .map(|m| RunError::new(m, ErrorKind::Auth)),
-        );
-        out
+        refusals::of(self)
     }
 
     /// The system prompt every turn of this run sends.

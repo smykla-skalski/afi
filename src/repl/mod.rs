@@ -15,10 +15,12 @@ use std::fmt::Write as _;
 use std::io::{self, IsTerminal};
 use std::time::Instant;
 
+use chrono::Utc;
 use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::approval::Level;
 use crate::config::{Runtime, nested};
+use crate::pricing::refresh;
 use crate::summary::{ErrorKind, RunError};
 use crate::term::plain::PlainUi;
 
@@ -179,6 +181,7 @@ fn styled_approval(rt: &Runtime) -> String {
 pub fn run_repl(rt: &mut Runtime) -> bool {
     let mut owned = rt.clone();
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
+    start_price_refresh(&runtime, &owned);
     if let Some(prompt_file) = owned.prompt_file.clone() {
         restore_prompt_resume(&mut owned);
         let mut ui = plain_ui_for(&owned);
@@ -209,8 +212,31 @@ pub fn run_repl(rt: &mut Runtime) -> bool {
 #[must_use]
 pub fn run_one_shot(prompt_file: &str, rt: &Runtime) -> bool {
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
+    start_price_refresh(&runtime, rt);
     let mut ui = plain_ui_for(rt);
     runtime.block_on(run_one_shot_async(prompt_file, rt, &mut ui))
+}
+
+/// Refresh the cached rate table in the background, for the next run to read.
+///
+/// Detached rather than awaited: a run must never wait on the rate catalogue,
+/// and the
+/// table this run bills against was already resolved when the `Runtime` was
+/// built. A session that ends before the fetch does simply leaves the cache as
+/// it was, and next time the same question gets asked again.
+///
+/// It runs even for a run that sets no budget and reports no cost, which is the
+/// point - the table has to already be current the first time somebody caps a
+/// run, not a day after.
+fn start_price_refresh(runtime: &TokioRuntime, rt: &Runtime) {
+    let fetched = rt
+        .pricing
+        .as_ref()
+        .map_or(String::new(), |p| p.fetched().to_string());
+    let today = Utc::now().date_naive().to_string();
+    if let Some(plan) = refresh::plan(&rt.env, &fetched, today) {
+        runtime.spawn(refresh::run(plan));
+    }
 }
 
 /// A plain ui, with human output moved off stdout when the run summary claims it.

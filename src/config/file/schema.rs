@@ -206,6 +206,11 @@ pub(super) const TOP: &[Setting] = &[
     // rather than beside the blocks because it carries one value like the rest of
     // this table - the `env` column is what the exception needs.
     row("source_order", "AFI_SOURCES", list),
+    // What a token costs. A repository has a legitimate say here - the rates are
+    // a description of the world rather than a decision about this machine - so
+    // these are `row` like `prices` itself.
+    row("price_refresh", "AFI_PRICE_REFRESH", flag),
+    row("price_stale_days", "AFI_PRICE_STALE_DAYS", count),
     // Sizes and caps.
     row("max_tokens", "AFI_MAX_TOKENS", count),
     row(

@@ -1,0 +1,85 @@
+name: prices
+
+# Keeps the vendored rate table in `assets/prices.json` current.
+#
+# afi caps what a run may spend by pricing what it used, so the table is not
+# documentation - it is the thing the cap is computed from. A table nobody
+# refreshes is a cap that is quietly wrong, and a table refreshed inside
+# `build.rs` would put data nobody reviewed into the binary and break every
+# offline build. So the network call lives here, weekly, and the pull request
+# it opens is the review.
+#
+# A week that moved no rate opens nothing: `project-prices.py` leaves the file
+# alone when the rates it computed match the ones already there, and `fetched`
+# moves only with them.
+on:
+  schedule:
+    # Mondays, early. Nothing downstream is waiting on it.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+# The app token below carries the write. `github.token` needs nothing.
+permissions:
+  contents: read
+
+concurrency:
+  group: prices
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: refresh the vendored rate table
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL || '["ubuntu-24.04"]') }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Generate GitHub App token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SMYKLOT_CLIENT_ID || 'Iv23liMyF31aNYay8IXy' }}
+          private-key: ${{ secrets.SMYKLOT_APP_PRIVATE_KEY }}
+          # Narrowed to what opening one pull request needs. Without these the
+          # token carries every permission the app was installed with, and this
+          # job hands it to a `git push` in a shell.
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Install mise
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+
+      - name: Re-project the table from models.dev
+        run: mise run prices:project
+
+      # Proves the new rates parse and that every provider in the file is one
+      # afi can resolve a source to, before anyone is asked to look at a diff.
+      - name: Check the table afi will read
+        run: mise run check
+
+      - name: Open a pull request when a rate moved
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- assets/prices.json; then
+            echo "no rate moved this week"
+            exit 0
+          fi
+          fetched=$(python3 -c 'import json;print(json.load(open("assets/prices.json"))["fetched"])')
+          branch="prices/refresh-${fetched}"
+          git config user.name 'smyklot[bot]'
+          git config user.email '223648037+smyklot[bot]@users.noreply.github.com'
+          git switch -c "${branch}"
+          git commit -s -- assets/prices.json \
+            -m "chore(pricing): refresh the vendored rate table" \
+            -m "Projected from models.dev on ${fetched}. Every line is a rate afi bills against, so read the diff as money rather than as data."
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${branch}"
+          gh pr create --repo "${REPO}" --head "${branch}" --base main \
+            --title "chore(pricing): refresh the vendored rate table" \
+            --body "Weekly projection from models.dev, fetched ${fetched}.
+
+          Each line is a rate a budgeted run is capped against, so a wrong number here is a wrong cap. Read the diff as money."

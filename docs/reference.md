@@ -4,16 +4,16 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 
 ## Flags
 
-| flag                                        | what it does                                                |
-| ------------------------------------------- | ----------------------------------------------------------- |
+| flag                                        | what it does                                                                  |
+| ------------------------------------------- | ----------------------------------------------------------------------------- |
 | `--config <path>`                           | read settings from this file instead of the default ([details](#config-file)) |
-| `--yolo`                                    | start in never-prompt mode (auto-approve everything)        |
-| `--approval <all\|low\|medium\|high\|yolo>` | start with a non-default approval mode                      |
-| `--source <name>`                           | start on a specific source                                  |
-| `--resume [target]`                         | resume a saved session - bare = most recent                 |
-| `--session <id>`                            | start a fresh run attached to a specific session id         |
-| `--prompt-file <path>` / `-f`               | non-interactive single-shot mode (reads from file or stdin) |
-| `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary)) |
+| `--yolo`                                    | start in never-prompt mode (auto-approve everything)                          |
+| `--approval <all\|low\|medium\|high\|yolo>` | start with a non-default approval mode                                        |
+| `--source <name>`                           | start on a specific source                                                    |
+| `--resume [target]`                         | resume a saved session - bare = most recent                                   |
+| `--session <id>`                            | start a fresh run attached to a specific session id                           |
+| `--prompt-file <path>` / `-f`               | non-interactive single-shot mode (reads from file or stdin)                   |
+| `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary))      |
 | `--summary-file <path>`                     | also write that summary to a path ([details](#writing-the-summary-to-a-file)) |
 | `--effort <low\|medium\|high\|xhigh\|max>`  | how hard the model is asked to think ([details](#reasoning-effort))  |
 | `--context-window <tokens>`                 | how much context the model holds ([details](#auto-compress))         |
@@ -24,7 +24,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--allowed-tools <a,b>`                     | only these tools may be called ([details](#tool-policy))    |
 | `--disallowed-tools <a,b>`                  | these tools may not be called ([details](#tool-policy))     |
 | `--version` / `-V`                          | print the version and build metadata ([details](#version-and-build-metadata)) |
-| `--help` / `-h`                             | print usage and exit                                        |
+| `--help` / `-h`                             | print usage and exit                                                          |
 
 `--help` and `--version` are answered before anything else, so neither depends on an env file loading or a source resolving, and both work as the last word of a command you were already typing. `--help` wins when both are given.
 
@@ -82,7 +82,9 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_INSTRUCTIONS`                           | load a project's own standing rules ([details](#project-instructions)) |
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
 | `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
-| `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
+| `AFI_PRICES`                                 | your own token rates, above the ones afi ships ([details](#cost)) |
+| `AFI_PRICE_REFRESH`                          | set to `0` to never fetch newer rates ([details](#cost))             |
+| `AFI_PRICE_STALE_DAYS`                       | warn when the rates are older than this (default 30, 0=off)          |
 | `AFI_CONFIG`                                 | read settings from this file instead of the defaults ([details](#config-file)) |
 
 Most of these can be written in a [config file](#config-file) instead, where a variable beats the file. No credential can: that section says where they go and which other names are absent.
@@ -93,10 +95,10 @@ Everything above is a flat string, so anything with structure has to be flattene
 
 A config file is a second way in for the same settings. afi reads two, lowest precedence first:
 
-| file                                                             | written by                                    |
-| ---------------------------------------------------------------- | --------------------------------------------- |
-| `$AFI_HOME/config.json`, `~/.afi/config.json` unless you moved it | you, so it sets anything                     |
-| the nearest `.afi/config.json` at or above the working directory  | the repository, so it sets less - see below   |
+| file                                                              | written by                                  |
+| ----------------------------------------------------------------- | ------------------------------------------- |
+| `$AFI_HOME/config.json`, `~/.afi/config.json` unless you moved it | you, so it sets anything                    |
+| the nearest `.afi/config.json` at or above the working directory  | the repository, so it sets less - see below |
 
 The project walk stops at the directory holding `.git`, so a file above the repository belongs to whatever is up there rather than to this project. Outside a repository only the working directory is checked.
 
@@ -118,7 +120,9 @@ The project walk stops at the directory holding `.git`, so a file above the repo
   },
   "anthropic": {
     "model": "claude-opus-5",
-    "extra_body": { "thinking": { "type": "adaptive", "display": "summarized" } }
+    "extra_body": {
+      "thinking": { "type": "adaptive", "display": "summarized" }
+    }
   }
 }
 ```
@@ -149,11 +153,11 @@ Reaching for one of those from a project file refuses the run and says so, namin
 
 **The tool policy is the exception, and it may only tighten.** A repository saying "this project is read-only", or naming fewer tools than you allowed, is a thing it should be able to say - so `read_only`, `allowed_tools`, and `disallowed_tools` are permitted from a project file, and the three combine rather than replace when both files set them. Deny lists add up, allow lists keep only what both agree on, and `read_only` stays on once either asks for it. So a project file can take a tool away and cannot hand one back:
 
-| your file                          | the project's                | the run gets              |
-| ---------------------------------- | ---------------------------- | ------------------------- |
-| `"allowed_tools": ["read_file"]`    | `["read_file", "run_bash"]`  | `read_file`               |
-| `"disallowed_tools": ["run_bash"]`  | `[]`                         | `run_bash` still denied   |
-| `"read_only": true`                 | `false`                      | read-only                 |
+| your file                          | the project's               | the run gets            |
+| ---------------------------------- | --------------------------- | ----------------------- |
+| `"allowed_tools": ["read_file"]`   | `["read_file", "run_bash"]` | `read_file`             |
+| `"disallowed_tools": ["run_bash"]` | `[]`                        | `run_bash` still denied |
+| `"read_only": true`                | `false`                     | read-only               |
 
 Two allow lists with nothing in common are a conflict between the files rather than a value either got wrong, so the run exits 2 saying which tools each one permits. It cannot be answered with an empty list: that reads as "every tool" by the time it reaches the policy, so the run would end up with every tool precisely because two files agreed on none.
 
@@ -163,12 +167,12 @@ Two allow lists with nothing in common are a conflict between the files rather t
 
 **Every key is its variable, minus the `AFI_` prefix and lowercased.** `AFI_MAX_TOKENS` is `max_tokens`, `AFI_READ_ONLY` is `read_only`, and so on through the table above and the tuning variables that are not in it. A test reads the source for `AFI_*` names and fails when one has neither a key nor a stated reason, so this stays true as settings are added. Four groups have structure instead:
 
-| key             | what it replaces                                                              |
-| --------------- | ----------------------------------------------------------------------------- |
-| `sources`       | the `AFI_SOURCE_<NAME>_*` variables, one object per source, keyed by its name  |
-| `source_order`  | `AFI_SOURCES`                                                                 |
-| `prices`        | `AFI_PRICES`, as an object rather than as JSON inside a string                 |
-| `anthropic`     | `AFI_ANTHROPIC_*`, with `anthropic.federation` holding the `ANTHROPIC_*` federation ids |
+| key            | what it replaces                                                                        |
+| -------------- | --------------------------------------------------------------------------------------- |
+| `sources`      | the `AFI_SOURCE_<NAME>_*` variables, one object per source, keyed by its name           |
+| `source_order` | `AFI_SOURCES`                                                                           |
+| `prices`       | `AFI_PRICES`, as an object rather than as JSON inside a string                          |
+| `anthropic`    | `AFI_ANTHROPIC_*`, with `anthropic.federation` holding the `ANTHROPIC_*` federation ids |
 
 A source takes `base_url`, `model`, `protocol`, `app_name`, `app_url`, and `extra_body` - no `api_key`, which is the one above. `extra_body` is a JSON object here, not a string of one. Object key order is not preserved, so name the order you want in `source_order` rather than relying on the order you wrote the sources in. A source's name has to be lowercase, with digits, `-`, and `_` allowed: the name becomes part of a variable name, which is uppercased on the way in and lowercased on the way back out, so a source written `Zai` would register as `zai` and `"active": "Zai"` would then match nothing.
 
@@ -199,10 +203,10 @@ afi -f task.md --system-prompt-file ci/review.md --read-only --summary json
 
 `--system-prompt-mode` decides what happens to afi's own prompt. A flag wins over its variable, as everywhere else.
 
-| mode                | what the model is told                                          |
-| ------------------- | --------------------------------------------------------------- |
-| `replace` (default) | the tool-call contract, then your file                           |
-| `append`            | afi's whole prompt, then your file                               |
+| mode                | what the model is told                 |
+| ------------------- | -------------------------------------- |
+| `replace` (default) | the tool-call contract, then your file |
+| `append`            | afi's whole prompt, then your file     |
 
 Replacing is what makes the setting worth having. Most of afi's prompt explains how to launch and wait on detached shell commands, which a read-only review job resends on every request and can never act on. `append` is for adding a rule to a run that still wants the rest.
 
@@ -268,7 +272,7 @@ afi --read-only -f review-prompt.txt
 
 That is the whole posture for a job that reads. `--read-only` leaves `read_file` and `list_dir` and denies everything else: the two writers, the shell, and `wait_background`, which deletes the log it hands back. Approval only ever asks about the writers and the shell, so a read-only run has nothing left to prompt for and needs no approval bypass. **It does not need `--yolo`, and pairing the two grants nothing** - the flag would only decide whether afi asks about tools the run can no longer call.
 
-Approval alone cannot express "read but do not write": it decides whether afi *asks*, while the policy decides what exists to ask about. A run that genuinely must write still needs approval settled, and that is the one case for `--yolo`; give it a tool policy too, so "do not ask me" does not also mean "anything at all".
+Approval alone cannot express "read but do not write": it decides whether afi _asks_, while the policy decides what exists to ask about. A run that genuinely must write still needs approval settled, and that is the one case for `--yolo`; give it a tool policy too, so "do not ask me" does not also mean "anything at all".
 
 Prefer `--read-only` to spelling out an allow list. It names no tools, so it cannot be mistyped, and it is a denial, so it cannot be widened: `--read-only --allowed-tools run_bash` still leaves `run_bash` blocked. A new mutating tool is covered the day it is added, because the posture and the approval gate read the same list.
 
@@ -294,12 +298,12 @@ afi --effort xhigh -f review-prompt.txt
 
 The same level reaches every source in whatever its endpoint calls it:
 
-| endpoint                     | sent as                              | highest level |
-| ---------------------------- | ------------------------------------ | ------------- |
-| Anthropic Messages API       | `output_config: {"effort": "…"}`     | `max`         |
-| OpenRouter                   | `reasoning: {"effort": "…"}`         | `high`        |
-| OpenAI                       | `reasoning_effort: "…"`              | `high`        |
-| everything else              | nothing                              | -             |
+| endpoint               | sent as                          | highest level |
+| ---------------------- | -------------------------------- | ------------- |
+| Anthropic Messages API | `output_config: {"effort": "…"}` | `max`         |
+| OpenRouter             | `reasoning: {"effort": "…"}`     | `high`        |
+| OpenAI                 | `reasoning_effort: "…"`          | `high`        |
+| everything else        | nothing                          | -             |
 
 A level above an endpoint's ceiling is capped rather than sent, and a source with no effort control afi knows of - llama.cpp, vLLM, SGLang, Z.ai - gets nothing at all. Both print a line on stderr naming the source, and neither stops the run: a level is a preference the endpoint may simply not have, and dying over it would make the flag unusable in any script that switches source. Only the source the run starts on is reported; `/source` switches to an endpoint with a different ladder without saying so.
 
@@ -375,7 +379,14 @@ One-shot runs (`-f`) skip the fold on the turn that produces the answer: the pro
     "cost_usd": 0.023398
   },
   "elapsed_secs": 12.17,
-  "tools": ["read_file", "write_file", "edit_file", "list_dir", "run_bash", "wait_background"],
+  "tools": [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir",
+    "run_bash",
+    "wait_background"
+  ],
   "effort": "xhigh",
   "auth": {
     "mode": "federated",
@@ -482,20 +493,21 @@ The file is written to a sibling temp file, flushed, and renamed into place, so 
 The flag is stricter than the variable about being given nothing. `--summary-file` with no value, with a blank value, or with something that looks like another flag exits 2 the way a broken [tool policy](#tool-policy) does. Both `afi --summary-file $OUT` and `afi --summary-file "$OUT"` with `OUT` unset are refused - the quoted form arrives as an empty argument rather than as no argument, and it is the form a CI script is written in. Either would otherwise exit 0 having written nothing to the path the next step is about to read, or leave a file from an earlier run standing as this run's result. A blank `AFI_SUMMARY_FILE` names no file and is not an error, since that is what an exported-but-unset shell variable looks like.
 
 The same entry points report it as `--summary json` does, and an interactive TTY session writes no file.
+
 ## Failure kinds
 
 `error` is the sentence the run printed to stderr, so the log and the JSON never disagree: `HTTP 429: {"type":"error"...}`, or `can't reach http://localhost:8080/v1 - is the server up?`. `error_kind` is what a workflow branches on, and it comes from a closed set:
 
-| kind | what happened | retry? |
-| --- | --- | --- |
-| `auth` | a credential was missing, unusable, or refused (401, 403) | no |
-| `policy` | the tool policy could not be honoured, so the run never started | no |
-| `input` | the invocation was wrong - no prompt to read, no source configured, an effort nothing can honour, or a summary file that cannot be written | no |
-| `provider_http` | the provider answered with a failing status, or never answered | yes |
-| `provider_stream` | the response opened and then broke, or was not a stream at all | yes |
-| `timeout` | a request outlived its deadline (including 408 and 504) | yes |
-| `no_answer` | the model was reached and billed but never produced an answer | no |
-| `internal` | a bug in afi | no |
+| kind              | what happened                                                                                                                              | retry? |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
+| `auth`            | a credential was missing, unusable, or refused (401, 403)                                                                                  | no     |
+| `policy`          | the tool policy could not be honoured, so the run never started                                                                            | no     |
+| `input`           | the invocation was wrong - no prompt to read, no source configured, an effort nothing can honour, or a summary file that cannot be written | no     |
+| `provider_http`   | the provider answered with a failing status, or never answered                                                                             | yes    |
+| `provider_stream` | the response opened and then broke, or was not a stream at all                                                                             | yes    |
+| `timeout`         | a request outlived its deadline (including 408 and 504)                                                                                    | yes    |
+| `no_answer`       | the model was reached and billed but never produced an answer                                                                              | no     |
+| `internal`        | a bug in afi                                                                                                                               | no     |
 
 Retry policy is why the field exists. A rate limit and a rejected credential arrive the same way, as a status and a body; telling them apart here costs nothing, while telling them apart from `error` means matching substrings of a sentence that changes wording, and failing silently when it does.
 
@@ -523,7 +535,23 @@ Exit codes are unchanged: 1 for a failed run, 2 for a refusal to start. A refusa
 
 ## Cost
 
-No provider afi speaks to returns a cost. Anthropic's Messages API reports tokens, and so does every OpenAI-compatible endpoint, so the rates have to come from somewhere - and a table compiled into afi is a table nobody notices going stale. You supply it in `AFI_PRICES`, a JSON object mapping model id to USD per million tokens:
+No provider afi speaks to returns a cost. Anthropic's Messages API reports tokens, and so does every OpenAI-compatible endpoint, so the rates have to come from somewhere. afi ships them, refreshes them, and lets you overrule them, in that order.
+
+The summary carries `usage.cost_usd`, rounded to the micro-dollar, for any model afi has rates for. A model it has none for gets no `cost_usd` key at all - not a null, not a zero, both of which read as "this run was free" to anything summing the field.
+
+**Rates are keyed on the provider as well as the model, and the provider comes from the address.** The same model id is sold by several people at different prices: `google/gemma-4-31b-it` is $0.10 per million input tokens through OpenRouter and $0.39 through Together, and 46 of the 668 ids afi carries are priced by more than one of them. So `https://api.anthropic.com` is billed at Anthropic's rates, `bedrock-runtime.<region>.amazonaws.com` at AWS's, and an address afi does not recognise - a llama.cpp on localhost, a gateway of your own - is billed by nothing and reports no figure. The protocol does not decide it: a proxy speaking the Messages API is not Anthropic, and afi does not know what it charges.
+
+**Three layers, highest first.**
+
+| layer                  | where                                      | when it moves                         |
+| ---------------------- | ------------------------------------------ | ------------------------------------- |
+| your own rates         | `AFI_PRICES`, or `prices` in a config file | when you say so                       |
+| the refreshed table    | `$AFI_HOME/prices.json`                    | at most once a day, in the background |
+| the table that shipped | compiled into the binary                   | when you upgrade                      |
+
+The bottom layer is why a cost figure works offline, on a first run, and behind an air gap. The middle one is why it does not go stale between releases. Neither is on the critical path: the refresh is started after the session is up and writes a file the _next_ run reads, so a slow or unreachable catalogue costs a run nothing, and a fetch that fails leaves the last good copy exactly where it was.
+
+**Your own rates win, class by class rather than wholesale:**
 
 ```bash
 export AFI_PRICES='{
@@ -531,11 +559,13 @@ export AFI_PRICES='{
 }'
 ```
 
-The summary then carries `usage.cost_usd`, rounded to the micro-dollar. Without it there is no `cost_usd` key at all - not a null, not a zero, both of which read as "this run was free" to anything summing the field.
+Naming one negotiated input rate keeps the rest of that model's card rather than blanking it, because replacing would leave `output` unpriced and silence `cost_usd` for the very model the override was written to correct. The table is flat - model id, no provider - since a rate you wrote down is one you meant, whichever endpoint serves it. It is also the only way to price a model afi has never heard of: a brand-new release, an enterprise deployment, or something you host yourself.
+
+**Stale rates say so.** Every layer carries the date it was projected, and a run billing against rates older than `AFI_PRICE_STALE_DAYS` (30) prints one line on stderr before it starts. Silent staleness is the failure worth designing against: a rate that moved six months ago produces exactly as confident a figure as a current one, and that line is the only difference a reader can see. Set it to `0` to say nothing. `AFI_PRICE_REFRESH=0` turns the background fetch off entirely, which is what an air-gapped or locked-down machine wants - the shipped table and your own rates still apply.
 
 The four classes match the token counts they price. `reasoning` is a fifth, optional key; leave it out and reasoning tokens are billed at the `output` rate, which is what every provider here does.
 
-A class you leave unpriced is fine as long as the run spent nothing there - an OpenAI-compatible source reports `0` cache writes on every request, so demanding a write rate would suppress every figure. Spend tokens on an unpriced class, or on a model missing from the table, and `cost_usd` disappears rather than reporting the part it could price.
+A class left unpriced is fine as long as the run spent nothing there - an OpenAI-compatible source reports `0` cache writes on every request, so demanding a write rate would suppress every figure. Spend tokens on an unpriced class, or on a model nothing carries a rate for, and `cost_usd` disappears rather than reporting the part it could price.
 
 Model ids match case-insensitively after trimming, and must otherwise be exactly the id afi sends to the provider - what `model` shows in the summary, or what `/source` reports. A mismatch drops the field, which is the point: an absent number is checkable, a wrong one is not.
 
@@ -585,12 +615,12 @@ A read-only job needs nothing else: there is no terminal to answer a prompt, and
 
 **Thinking is off by default, and `AFI_ANTHROPIC_EXTRA_BODY` turns it on.** The `thinking` key has three states:
 
-| `thinking` in `EXTRA_BODY` | sent as | for |
-| ---------------------------- | --------------------------- | -------------------------------------------- |
-| absent                       | `{"type": "disabled"}`      | the default; the only shape `claude-haiku-4-5` accepts |
-| absent, at effort `xhigh` or `max` | omitted entirely      | `claude-opus-5`, which rejects an explicit `disabled` that high ([details](#reasoning-effort)) |
-| `null`                       | omitted entirely            | `claude-fable-5`, which rejects an explicit `disabled` and always thinks |
-| an object                    | verbatim                    | `{"type": "adaptive", "display": "summarized"}` |
+| `thinking` in `EXTRA_BODY`         | sent as                | for                                                                                            |
+| ---------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------- |
+| absent                             | `{"type": "disabled"}` | the default; the only shape `claude-haiku-4-5` accepts                                         |
+| absent, at effort `xhigh` or `max` | omitted entirely       | `claude-opus-5`, which rejects an explicit `disabled` that high ([details](#reasoning-effort)) |
+| `null`                             | omitted entirely       | `claude-fable-5`, which rejects an explicit `disabled` and always thinks                       |
+| an object                          | verbatim               | `{"type": "adaptive", "display": "summarized"}`                                                |
 
 ```bash
 AFI_ANTHROPIC_EXTRA_BODY='{"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"high"}}'
@@ -620,17 +650,17 @@ Amazon Bedrock's open-weight models are reached through its OpenAI-compatible `/
 
 Set AWS credentials and a Region and a `bedrock` source registers itself, defaulting to `https://bedrock-runtime.<region>.amazonaws.com/openai/v1` and `zai.glm-5`. Keep the `/openai` prefix on any override: Bedrock serves nothing at `/v1` and answers `UnknownOperationException` there, which surfaces as a parse failure rather than a rejection because the routing layer replies in the Query protocol rather than as an SSE stream.
 
-| env var                                        | what it does                                                    |
-| ------------------------------------------------ | --------------------------------------------------------------- |
-| `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | the signing credential; both required unless a role is assumed  |
-| `AWS_REGION`, else `AWS_DEFAULT_REGION`       | names the endpoint host and scopes the signature; always required |
-| `AWS_SESSION_TOKEN`                           | sent and signed when set; absent for a long-lived IAM user      |
-| `AWS_ROLE_ARN`                                | a role to assume instead of holding a key ([details](#bedrock-without-a-key)) |
-| `AWS_ROLE_SESSION_NAME`                       | names that session in CloudTrail, instead of `afi`              |
-| `AWS_WEB_IDENTITY_TOKEN_FILE` / `AWS_WEB_IDENTITY_TOKEN` | where the OIDC token to exchange comes from          |
-| `AFI_BEDROCK_MODEL`                           | the default model, instead of `zai.glm-5`                       |
-| `AFI_BEDROCK_BASE_URL`                        | the endpoint, instead of the one the Region derives             |
-| `AFI_BEDROCK_EXTRA_BODY`                      | request-body keys this source should send                       |
+| env var                                                  | what it does                                                                  |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`            | the signing credential; both required unless a role is assumed                |
+| `AWS_REGION`, else `AWS_DEFAULT_REGION`                  | names the endpoint host and scopes the signature; always required             |
+| `AWS_SESSION_TOKEN`                                      | sent and signed when set; absent for a long-lived IAM user                    |
+| `AWS_ROLE_ARN`                                           | a role to assume instead of holding a key ([details](#bedrock-without-a-key)) |
+| `AWS_ROLE_SESSION_NAME`                                  | names that session in CloudTrail, instead of `afi`                            |
+| `AWS_WEB_IDENTITY_TOKEN_FILE` / `AWS_WEB_IDENTITY_TOKEN` | where the OIDC token to exchange comes from                                   |
+| `AFI_BEDROCK_MODEL`                                      | the default model, instead of `zai.glm-5`                                     |
+| `AFI_BEDROCK_BASE_URL`                                   | the endpoint, instead of the one the Region derives                           |
+| `AFI_BEDROCK_EXTRA_BODY`                                 | request-body keys this source should send                                     |
 
 These are the variable names every AWS SDK and the `aws` CLI already read, so a shell that can run `aws bedrock` needs nothing else. afi reads them from its own merged environment, which means `~/.env` and `AFI_ENV_FILE` count too. Nothing else is consulted: no shared credentials file, no profile, no instance metadata. Export them, or put them in the env file.
 
@@ -664,11 +694,11 @@ afi does not claim to know which happened. Bedrock answers a tool-incapable mode
 
 **AWS rejections are told apart.** Every one ends the run with a non-zero exit, and the message AWS wrote is always quoted:
 
-| what happened                                                   | how it reads                                        |
-| ----------------------------------------------------------------- | ----------------------------------------------------- |
-| `ExpiredTokenException`, `InvalidSignatureException`, and kin  | `AWS rejected the credentials (expired or wrong; afi reads them at startup, so a refresh needs a restart)` |
-| `ThrottlingException`, or any 429                              | `AWS throttled the request`                         |
-| `AccessDeniedException`                                        | `the account is not entitled to <model> in this Region` |
+| what happened                                                 | how it reads                                                                                               |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `ExpiredTokenException`, `InvalidSignatureException`, and kin | `AWS rejected the credentials (expired or wrong; afi reads them at startup, so a refresh needs a restart)` |
+| `ThrottlingException`, or any 429                             | `AWS throttled the request`                                                                                |
+| `AccessDeniedException`                                       | `the account is not entitled to <model> in this Region`                                                    |
 
 **The credential row reads differently under a role.** A static credential is read once at startup, so nothing short of a restart replaces it. A federated source re-assumes the role on its own as the credential ages, which makes the restart advice worse than useless there, so that mode says `AWS rejected the credentials (expired or wrong; afi re-assumes the role as they age, so a restart changes nothing - the assumed session was revoked, or the role stopped accepting the token)` instead. AWS returns the same `ExpiredTokenException` for both, so the mode is what tells them apart, not the rejection.
 
@@ -720,13 +750,17 @@ curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
 
 **Credentials are re-exchanged before they expire.** STS credentials last an hour by default, and as little as fifteen minutes on a role configured that way, so a session outliving one carries on rather than stopping mid-turn with a 403 that reads like a broken trust policy. The cache lives as long as the session, not as long as the turn - one role assumption covers every turn until the credential ages out, and `CloudTrail` records the one call rather than one per prompt.
 
-**A static key pair wins over a role.** That is the order every AWS SDK's default credential chain resolves in, and the order afi's own `anthropic` source already uses across its three modes. *Complete* pair: half of one is skipped the same way an SDK skips it, so a misspelled `AWS_SECRET_ACCESS_KEY` does not take down a run that had a perfectly good role to assume. Which one a run actually used is in the [summary](#run-summary): `auth.mode` is `sigv4` for a stored key and `sigv4_web_identity` for an assumed role, so a job that meant to federate and found a stray key in the environment can see that it did.
+**A static key pair wins over a role.** That is the order every AWS SDK's default credential chain resolves in, and the order afi's own `anthropic` source already uses across its three modes. _Complete_ pair: half of one is skipped the same way an SDK skips it, so a misspelled `AWS_SECRET_ACCESS_KEY` does not take down a run that had a perfectly good role to assume. Which one a run actually used is in the [summary](#run-summary): `auth.mode` is `sigv4` for a stored key and `sigv4_web_identity` for an assumed role, so a job that meant to federate and found a stray key in the environment can see that it did.
 
 The assumed-role block reports the role and the session name rather than an access key id. The minted key is re-minted as the run outlives it, so naming one would name whichever session happened to be current when the run ended; the role is the stable answer to whose budget paid.
 
 ```json
-{"mode": "sigv4_web_identity", "region": "us-east-1",
- "role_arn": "arn:aws:iam::123456789012:role/afi-ci", "session_name": "afi"}
+{
+  "mode": "sigv4_web_identity",
+  "region": "us-east-1",
+  "role_arn": "arn:aws:iam::123456789012:role/afi-ci",
+  "session_name": "afi"
+}
 ```
 
 **A role that cannot be used refuses the run before it starts,** the same as a half-set of keys:
@@ -740,13 +774,13 @@ The assumed-role block reports the role and the session name rather than an acce
 
 **A refused exchange says which refusal it was, and quotes AWS.** Each of these is an `auth` failure with a non-zero exit, never retried: no second attempt writes a trust policy.
 
-| STS code                                     | how it reads                                          |
-| ---------------------------------------------- | ------------------------------------------------------- |
-| `AccessDenied`                               | `AWS refused the role assumption: the role's trust policy did not accept the token's claims, or the role does not exist - STS answers both the same way` |
-| `InvalidIdentityToken`                       | `AWS would not read the OIDC identity token: no matching identity provider is registered in the account, or the token names an audience other than sts.amazonaws.com` |
-| `ExpiredTokenException`                      | `the OIDC identity token expired before it was exchanged` |
-| `IDPRejectedClaim`                           | `the identity provider registered on the role rejected the token's claims` |
-| `ValidationError`                            | `AWS refused the role-assumption request itself (check AWS_ROLE_ARN and AWS_ROLE_SESSION_NAME)` |
+| STS code                | how it reads                                                                                                                                                          |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AccessDenied`          | `AWS refused the role assumption: the role's trust policy did not accept the token's claims, or the role does not exist - STS answers both the same way`              |
+| `InvalidIdentityToken`  | `AWS would not read the OIDC identity token: no matching identity provider is registered in the account, or the token names an audience other than sts.amazonaws.com` |
+| `ExpiredTokenException` | `the OIDC identity token expired before it was exchanged`                                                                                                             |
+| `IDPRejectedClaim`      | `the identity provider registered on the role rejected the token's claims`                                                                                            |
+| `ValidationError`       | `AWS refused the role-assumption request itself (check AWS_ROLE_ARN and AWS_ROLE_SESSION_NAME)`                                                                       |
 
 `AccessDenied` names two causes because STS gives one answer to both, deliberately: telling them apart would let anyone holding a GitHub token enumerate an account's roles. Anything else is reported by its code, and AWS's own `<Message>` follows the sentence in every case, so nothing afi failed to classify is lost. A body carrying no code did not come from the STS API layer - a proxy or a VPC endpoint refusing on the way - and stays unclassified for the same reason a headerless Bedrock rejection does.
 

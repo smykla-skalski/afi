@@ -13,12 +13,13 @@ use crate::approval::ApprovalState;
 use crate::config::nested;
 use crate::model::ModelConfig;
 use crate::model::usage_totals;
-use crate::risk::{RiskClassifier, confirm, resolve_action_path};
+use crate::risk::{RiskClassifier, confirm};
 use crate::term::{OutputEvent, UserInterface};
 use crate::tools;
 use crate::tools::policy::ToolPolicy;
 use crate::tools::policy::is_mutating;
 use crate::tools::protocol::sanitize_tool_result;
+use crate::tools::target;
 use std::path::PathBuf;
 
 /// Accumulates the streamed fragments of a single tool call.
@@ -76,24 +77,15 @@ pub(crate) fn dispatch_tool(
     let action = match name {
         "write_file" => format!(
             "write {} ({} bytes)",
-            args.get("path").and_then(|p| p.as_str()).unwrap_or("?"),
+            target::path_arg(name, args).unwrap_or("?"),
             args.get("content")
                 .and_then(|c| c.as_str())
                 .unwrap_or("")
                 .len()
         ),
-        "edit_file" => format!(
-            "edit {}",
-            args.get("path").and_then(|p| p.as_str()).unwrap_or("?")
-        ),
-        "read_file" => format!(
-            "read {}",
-            args.get("path").and_then(Value::as_str).unwrap_or("?")
-        ),
-        "list_dir" => format!(
-            "list {}",
-            args.get("path").and_then(Value::as_str).unwrap_or(".")
-        ),
+        "edit_file" => format!("edit {}", target::path_arg(name, args).unwrap_or("?")),
+        "read_file" => format!("read {}", target::path_arg(name, args).unwrap_or("?")),
+        "list_dir" => format!("list {}", target::path_arg(name, args).unwrap_or(".")),
         "run_bash" => format!(
             "run: {}",
             args.get("command").and_then(|c| c.as_str()).unwrap_or("?")
@@ -310,14 +302,6 @@ fn emit_tool_finished(ui: &mut dyn UserInterface, name: &str, summary: &str) {
     });
 }
 
-/// The tools whose calls name a path, and so can take the model into a subtree
-/// whose instruction file has not been read yet.
-///
-/// `run_bash` is not among them on purpose. Its path, if it has one, is somewhere
-/// inside a shell command, and guessing at one would load a directory's rules off a
-/// substring that happened to look like a path.
-const PATH_TOOLS: [&str; 4] = ["read_file", "write_file", "edit_file", "list_dir"];
-
 /// `result`, with any instruction file the call's directory carries appended.
 ///
 /// The subtree half of project instructions: the startup walk reads the launch
@@ -329,15 +313,12 @@ const PATH_TOOLS: [&str; 4] = ["read_file", "write_file", "edit_file", "list_dir
 /// Appended after the tool's own output has been sanitized, so a result long enough
 /// to be truncated cannot take the rules with it.
 fn with_subtree_rules(mut result: String, name: &str, args: &Value, cwd: &Path) -> String {
-    if !PATH_TOOLS.contains(&name) {
-        return result;
-    }
-    let Some(path) = args.get("path").and_then(Value::as_str) else {
+    let Some(path) = target::path_arg(name, args) else {
         return result;
     };
-    // The same resolution the approval gate classifies against, so "inside the
-    // project" means one thing - see `resolve_action_path`.
-    let Some(rules) = nested::for_path(&resolve_action_path(path, cwd)) else {
+    // The loader resolves the path itself, through the same definition the approval
+    // gate classifies against, so "inside the project" means one thing.
+    let Some(rules) = nested::for_path(path, cwd) else {
         return result;
     };
     result.push_str("\n\n");

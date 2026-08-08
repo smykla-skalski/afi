@@ -14,25 +14,14 @@
 use std::collections::BTreeSet;
 use std::sync::{Mutex, PoisonError};
 
-use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
+use serde_json::Value;
 
+use super::summary::{self, Summary};
 use super::{COMPRESS_KEEP, CompressResult, plan_compression};
 use crate::config::{Source, source_prefix};
 use crate::model::client::ChatClient;
-use crate::model::stream::tags;
 use crate::model::{TURN_ESC, TurnOutcome};
 use crate::term::{MessageKind, UserInterface};
-
-/// How long to wait for a summary before giving up on the fold.
-///
-/// Longer than the 30 seconds `/compress` allows itself, because this request
-/// carries the conversation it is summarizing rather than a bare instruction, and
-/// a local server working through a folded-away hour of transcript is slow in a
-/// way a remote one is not. A fold that times out leaves the conversation as it
-/// was, and the loop stops asking - see [`Fold::Abandoned`], which is what keeps
-/// one slow endpoint from costing two minutes on every remaining turn.
-const SUMMARY_TIMEOUT_SECS: u64 = 120;
 
 /// What to do about the context after a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +146,7 @@ async fn run_autocompress(
         return Fold::Abandoned;
     };
     let cancel = ui.start_activity("Compressing context");
-    let summary = fetch_summary(ac, plan.prompt(), &cancel).await;
+    let summary = summary::fetch(ac.client, ac.source, ac.model, plan.prompt(), &cancel).await;
     ui.stop_activity();
 
     match summary {
@@ -191,67 +180,6 @@ async fn run_autocompress(
             Fold::Abandoned
         }
     }
-}
-
-/// How the summary request ended.
-enum Summary {
-    Text(String),
-    Failed(String),
-    Cancelled,
-}
-
-/// Ask the model for the summary, racing the request against Esc.
-async fn fetch_summary(ac: &AutoCompress<'_>, prompt: &str, cancel: &CancellationToken) -> Summary {
-    // Bound to a `let` rather than built inline: the future borrows it, and a
-    // temporary would be dropped before the `select!` below awaits.
-    let ask = [json!({"role": "user", "content": prompt})];
-    let request = ac.client.chat_completions(
-        ac.source,
-        ac.model,
-        &ask,
-        SUMMARY_TIMEOUT_SECS,
-        // The source's own body keys, unwrapped, exactly as the streaming path
-        // sends them - a source that has to name a provider to route to needs to
-        // name it here too.
-        ac.source.extra_body.as_ref(),
-    );
-    tokio::select! {
-        result = request => match result {
-            Ok(body) => match completion_content(&body) {
-                Some(text) => Summary::Text(text),
-                None => Summary::Failed("the response carried no summary".to_string()),
-            },
-            Err(error) => Summary::Failed(error.to_string()),
-        },
-        () = cancel.cancelled() => Summary::Cancelled,
-    }
-}
-
-/// Pull `choices[0].message.content` out of a chat-completions JSON response,
-/// stripped of reasoning, with an empty result dropped.
-///
-/// One parser for both protocols: the Anthropic client reshapes its own response
-/// into this form at the boundary, so nothing above the client branches on which
-/// wire protocol answered. And one for both folds - a summary is a summary
-/// whether an operator asked for it or the threshold did.
-///
-/// The strip matters here rather than only on the streaming path: a server with
-/// no reasoning field puts deliberation in the message body, and a fold would
-/// otherwise replace the conversation with the model thinking about summarizing
-/// it. A response that is nothing but reasoning strips to empty, which is a
-/// failed summary rather than an empty one worth applying.
-#[must_use]
-pub(crate) fn completion_content(text: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(text).ok()?;
-    value
-        .get("choices")?
-        .as_array()?
-        .first()?
-        .get("message")?
-        .get("content")?
-        .as_str()
-        .map(tags::strip)
-        .filter(|summary| !summary.trim().is_empty())
 }
 
 /// Say what the fold did. One line, because it happens mid-run without anyone

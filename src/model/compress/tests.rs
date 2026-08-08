@@ -210,10 +210,10 @@ fn compression_keeps_the_system_message_whole() {
     // nothing was dropped. Asserted on the whole string rather than on the role,
     // since a summarized copy would still be role `system`.
     //
-    // This covers the fold auto-compress performs. `/compress` folds through
-    // `repl::commands::apply_compression`, which holds the same property by
-    // construction - it pushes `messages[0]` unchanged - and is private to that
-    // module, so it cannot be asserted on from here.
+    // This covers both folds, now that `/compress` goes through the same plan the
+    // automatic one does. It used to hold the property by construction in a private
+    // `repl::commands` function that nothing here could reach, which is the kind of
+    // agreement that lasts exactly until someone edits one of the two copies.
     let system =
         json!({"role": "system", "content": "afi rules\n\nContents of /r/AGENTS.md:\n\nuse mise"});
     let mut messages = vec![system.clone()];

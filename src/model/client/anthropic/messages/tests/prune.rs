@@ -8,7 +8,7 @@ use super::*;
 
 #[test]
 fn orphan_tool_result_is_pruned() {
-    // apply_compression slices the last N turns and can start mid tool-cycle,
+    // CompressionPlan::apply slices the last N turns and can start mid tool-cycle,
     // leaving a tool_result with no preceding tool_use. Anthropic 400s on that.
     let history = vec![
         json!({"role": "user", "content": "summary of earlier work"}),

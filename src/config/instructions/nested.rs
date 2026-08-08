@@ -22,15 +22,15 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde_json::Value;
 
-use crate::risk::is_under_path;
+use crate::risk::{is_under_path, resolve_action_path};
 use crate::tools::protocol::escape_tool_protocol_delimiters;
 
 use super::super::system_prompt::{SystemPrompt, unreadable};
-use super::{MAX_BYTES, block_for, chain_up, file_size, files_in};
+use super::{MAX_BYTES, block_for, canonical, chain_up, file_size, files_in};
 
 /// What the model is told a mid-session block is.
 ///
@@ -59,20 +59,28 @@ struct State {
     loaded: Vec<(String, usize)>,
 }
 
-fn state() -> &'static Mutex<Option<State>> {
-    static STATE: OnceLock<Mutex<Option<State>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(None))
+/// Everything this module remembers, behind one lock.
+///
+/// `carried` sits beside `run` rather than inside it because it outlives arming: a run
+/// resuming under `--instructions none` is never armed and still has to report the
+/// blocks its history carries, or `/instructions` answers "none loaded" about a
+/// conversation visibly carrying rules - the reverse of the question it exists to
+/// answer. One lock rather than two, so a fold that touches both cannot invent a lock
+/// order, and so [`in_history`] reads one consistent answer.
+#[derive(Default)]
+struct Loader {
+    /// `None` until [`arm_once`], and again after [`reset`].
+    run: Option<State>,
+    /// Blocks a resumed history already holds, which this run did not send.
+    carried: Vec<(String, usize)>,
 }
 
-/// Blocks a resumed history already carries, which this run did not send.
-///
-/// Separate from [`State`] because it outlives arming: a run resuming under
-/// `--instructions none` is never armed and still needs to report these, or
-/// `/instructions` answers "none loaded" about a conversation visibly carrying rules -
-/// the exact reverse of the question it exists to answer.
-fn carried() -> &'static Mutex<Vec<(String, usize)>> {
-    static CARRIED: OnceLock<Mutex<Vec<(String, usize)>>> = OnceLock::new();
-    CARRIED.get_or_init(|| Mutex::new(Vec::new()))
+fn lock() -> MutexGuard<'static, Loader> {
+    static LOADER: OnceLock<Mutex<Loader>> = OnceLock::new();
+    LOADER
+        .get_or_init(|| Mutex::new(Loader::default()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Take note of the instruction blocks a resumed history already holds, from what
@@ -80,7 +88,7 @@ fn carried() -> &'static Mutex<Vec<(String, usize)>> {
 ///
 /// A resumed session replays its tool messages verbatim, and a block appended to one
 /// of them is still in front of the model - so this run must neither claim it sent
-/// them nor send them again. Both halves follow from recording them here: [`arm`]
+/// them nor send them again. Both halves follow from recording them here: [`arm_once`]
 /// seeds `sent` from this list, and the reporting reads it.
 ///
 /// Read from the session file rather than recovered from the message text, which is
@@ -99,8 +107,7 @@ pub fn adopt(recorded: &Value) {
     if found.is_empty() {
         return;
     }
-    let mut guard = carried().lock().unwrap_or_else(PoisonError::into_inner);
-    *guard = found;
+    lock().carried = found;
 }
 
 /// One recorded `{path, bytes}` pair, or `None` when a session file holds something
@@ -111,17 +118,69 @@ fn entry(value: &Value) -> Option<(String, usize)> {
     Some((path, bytes))
 }
 
+/// How a file in front of the model got there.
+///
+/// Three answers rather than two, because they answer different questions about why it
+/// is behaving as it is: a rule it has had all along, one it met when it read into a
+/// subtree, and one this run never sent at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    AtStartup,
+    OnDemand,
+    /// Replayed by a resumed session, sent by the run that saved it.
+    Resumed,
+}
+
+impl Arrival {
+    /// The trailing note a listing prints for a file, empty for the ordinary case.
+    #[must_use]
+    pub fn note(self) -> &'static str {
+        match self {
+            Self::AtStartup => "",
+            Self::OnDemand => ", loaded on demand",
+            Self::Resumed => ", carried in from the resumed session",
+        }
+    }
+}
+
+/// Every instruction file in front of the model, in the order it was sent.
+///
+/// The one join of the three sources, here rather than in the caller that formats it,
+/// because [`in_history`] is a second consumer of almost the same answer and the two
+/// disagreeing about membership is the kind of thing nobody notices. `prompt` supplies
+/// the startup half, which is re-decided every run and so is not this module's to hold.
+#[must_use]
+pub fn sent(prompt: &SystemPrompt) -> Vec<(String, usize, Arrival)> {
+    let tag = |arrival| move |(path, bytes): (String, usize)| (path, bytes, arrival);
+    // One acquisition, so the two halves this module owns are read as one snapshot
+    // rather than with a fold able to land between them.
+    let loader = lock();
+    prompt
+        .instruction_files()
+        .into_iter()
+        .map(tag(Arrival::AtStartup))
+        .chain(loader.carried.iter().cloned().map(tag(Arrival::Resumed)))
+        .chain(
+            loader
+                .run
+                .iter()
+                .flat_map(|state| state.loaded.iter().cloned())
+                .map(tag(Arrival::OnDemand)),
+        )
+        .collect()
+}
+
 /// The blocks this run believes its history carries, for the session file to record.
 ///
-/// Both halves: what a resume brought in, and what this run has since sent. That is
-/// the same set [`arm`] rebuilds `sent` from, so a session saved and resumed any
-/// number of times keeps one consistent answer to "what has the model been told".
+/// [`sent`] minus the startup half, which a resume re-decides from its own invocation
+/// rather than from what the last one did. Defined as a filter over the same join so
+/// the record and the listing cannot come to mean different things.
 #[must_use]
-pub fn in_history() -> Value {
-    let entries: Vec<Value> = carried_in()
+pub fn in_history(prompt: &SystemPrompt) -> Value {
+    let entries: Vec<Value> = sent(prompt)
         .into_iter()
-        .chain(loaded())
-        .map(|(path, bytes)| serde_json::json!({"path": path, "bytes": bytes}))
+        .filter(|(_, _, arrival)| *arrival != Arrival::AtStartup)
+        .map(|(path, bytes, _)| serde_json::json!({"path": path, "bytes": bytes}))
         .collect();
     Value::Array(entries)
 }
@@ -138,44 +197,41 @@ pub fn in_history() -> Value {
 /// difference is which way a wrong answer fails. Believing a forged block was sent
 /// suppresses a real rule; believing one was dropped only offers a rule again. So a
 /// file that fakes the marker costs a duplicate block here, and nothing worse.
+///
+/// `carried` is pruned whether or not the run was armed, which is the one thing here
+/// that is not merely a move: an unarmed run has no [`State`] for the rest of this to
+/// touch, and returning early would leave `/instructions` naming a block that left the
+/// conversation and the session recording it. The next resume then seeds `sent` from
+/// that record and suppresses the real file for the whole session.
 pub fn forget_in(dropped: &[Value]) {
-    let mut guard = state().lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(state) = guard.as_mut() else {
+    let gone = |path: &str| {
+        dropped
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .any(|text| super::mentions_block(text, path))
+    };
+    let mut loader = lock();
+    loader.carried.retain(|(path, _)| !gone(path));
+    let Some(state) = loader.run.as_mut() else {
         return;
     };
-    let text: String = dropped
-        .iter()
-        .filter_map(|message| message["content"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let gone: Vec<(String, usize)> = state
+    let dropped: Vec<(String, usize)> = state
         .loaded
         .iter()
-        .filter(|(path, _)| super::mentions_block(&text, path))
+        .filter(|(path, _)| gone(path))
         .cloned()
         .collect();
-    for (path, bytes) in gone {
+    for (path, bytes) in dropped {
         state.sent.remove(&canonical(&path));
         state.loaded.retain(|(sent, _)| sent != &path);
         // Refunded: the text is no longer in front of the model, so the run is no
         // longer paying for it on every request.
         state.remaining = state.remaining.saturating_add(bytes);
     }
-    drop(guard);
-    let mut carried = carried().lock().unwrap_or_else(PoisonError::into_inner);
-    carried.retain(|(path, _)| !super::mentions_block(&text, path));
 }
 
-/// What a resumed history brought with it, as `(path, bytes on the wire)`.
-#[must_use]
-pub fn carried_in() -> Vec<(String, usize)> {
-    carried()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone()
-}
-
-/// Arm the loader for this run, from the prompt the startup walk produced.
+/// Arm the loader for this run, from the prompt the startup walk produced, unless a
+/// turn already did.
 ///
 /// `prompt` supplies both halves of what this needs: whether the run asked for a
 /// walk at all, and which files it already found. A run that named its files, or
@@ -191,21 +247,20 @@ pub fn carried_in() -> Vec<(String, usize)> {
 /// Calling it again does nothing, which is what lets the caller be the per-turn
 /// funnel every path already runs through. A second arming would empty the set of
 /// files already sent, and every turn would re-append the same rules.
-pub fn arm(prompt: &SystemPrompt, cwd: &Path) {
+pub fn arm_once(prompt: &SystemPrompt, cwd: &Path) {
     if !prompt.instructions().walked() {
         return;
     }
-    let already = prompt.instruction_files();
-    let spent: usize = already.iter().map(|(_, bytes)| bytes).sum();
-    let mut guard = state().lock().unwrap_or_else(PoisonError::into_inner);
-    if guard.is_some() {
+    let mut loader = lock();
+    if loader.run.is_some() {
         return;
     }
     // Seeded from what a resumed history carries as well as from the startup walk,
     // so a block already in front of the model is not sent a second time.
-    let carried = carried_in();
-    let spent = spent.saturating_add(carried.iter().map(|(_, bytes)| bytes).sum());
-    *guard = Some(State {
+    let already = prompt.instruction_files();
+    let carried = loader.carried.clone();
+    let spent: usize = already.iter().chain(&carried).map(|(_, bytes)| bytes).sum();
+    loader.run = Some(State {
         launch: canonical(cwd),
         sent: already
             .iter()
@@ -219,12 +274,16 @@ pub fn arm(prompt: &SystemPrompt, cwd: &Path) {
 
 /// The instruction text a tool call on `path` brings in, or `None` when it brings
 /// in nothing - which is every call but the first into a directory that has a file.
-pub fn for_path(path: &Path) -> Option<String> {
-    let mut guard = state().lock().unwrap_or_else(PoisonError::into_inner);
-    let state = guard.as_mut()?;
-    let dir = canonical(&dir_of(path)?);
+#[must_use]
+pub fn for_path(raw: &str, cwd: &Path) -> Option<String> {
+    let mut loader = lock();
+    // Before the path is resolved, not after: a run that never asked for a walk - the
+    // default - should not pay a `canonicalize` on every tool call for a feature it
+    // switched off, and the check belongs to whoever owns the answer.
+    let state = loader.run.as_mut()?;
+    let dir = canonical(&dir_of(&resolve_action_path(raw, cwd))?);
     // Under the launch directory: above it is the startup walk's territory, and
-    // outside it is outside the project - see [`arm`]. Canonical on both sides, so a
+    // outside it is outside the project - see [`arm_once`]. Canonical on both sides, so a
     // path that climbs out with `..` is compared where it really lands.
     if !is_under_path(&dir, &state.launch) {
         return None;
@@ -249,30 +308,23 @@ pub fn for_path(path: &Path) -> Option<String> {
 /// offered again, while `/instructions` went on reporting rules the model can no
 /// longer see.
 ///
-/// Called for a whole-history restart only, which is why `/compress` does not call
-/// it: that fold keeps the most recent turns verbatim, so a block in them is still
-/// being sent, and forgetting it would duplicate the text and hand back the budget
-/// bounding it. See the call site in `crate::repl::commands`.
+/// For a whole-history restart only. A fold that keeps some turns uses [`forget_in`],
+/// which explains why.
 ///
-/// Un-arms rather than half-clears, so the next turn's [`arm`] rebuilds the set from
+/// Un-arms rather than half-clears, so the next turn's [`arm_once`] rebuilds the set from
 /// the startup walk and restores the byte budget - which is right, because the text
 /// it was spent on is no longer being sent either.
 pub fn reset() {
-    let mut guard = state().lock().unwrap_or_else(PoisonError::into_inner);
-    *guard = None;
-    // A resumed history's blocks went with it, so they are offerable again too.
-    carried()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
+    // A resumed history's blocks went with it, so those are offerable again too.
+    *lock() = Loader::default();
 }
 
 /// What this loader has read so far, as `(path, bytes sent)` in the order it was
 /// read. Empty for a run that was never armed.
 #[must_use]
 pub fn loaded() -> Vec<(String, usize)> {
-    let guard = state().lock().unwrap_or_else(PoisonError::into_inner);
-    guard
+    lock()
+        .run
         .as_ref()
         .map(|state| state.loaded.clone())
         .unwrap_or_default()
@@ -300,9 +352,6 @@ fn take(state: &mut State, path: &Path) -> Option<String> {
     let text = body.trim_matches(unreadable).to_string();
     if text.is_empty() {
         return None;
-    }
-    if text.len() > state.remaining {
-        return Some(over_budget(&shown));
     }
     // Escaped before it is measured, because the escaped form is what goes on the
     // wire: a repository file holding a literal tool-call delimiter would otherwise be
@@ -335,13 +384,6 @@ fn dir_of(path: &Path) -> Option<PathBuf> {
         return Some(path.to_path_buf());
     }
     path.parent().map(Path::to_path_buf)
-}
-
-/// A path resolved through links and `..` where the filesystem can say so, so two
-/// spellings of one file are one entry in `sent`.
-fn canonical<P: AsRef<Path>>(path: P) -> PathBuf {
-    let path = path.as_ref();
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(test)]

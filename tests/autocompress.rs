@@ -19,13 +19,14 @@
 mod common;
 
 use std::io::Write;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
+
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::endpoint::{Bodies, serve, sse_body};
+use common::endpoint::{Bodies, endpoint, sse_body};
 use common::summary_of;
 
 /// Prompt tokens the endpoint reports on every turn: 950 of the 1000-token window
@@ -127,14 +128,6 @@ fn run_afi(home: &TempDir, addr: SocketAddr, extra: &[&str]) -> Output {
     child.wait_with_output().expect("afi must exit")
 }
 
-fn endpoint() -> (SocketAddr, Bodies) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a port must bind");
-    let addr = listener.local_addr().expect("the address must resolve");
-    let bodies: Bodies = Bodies::default();
-    let _server = serve(listener, &bodies, reply_for);
-    (addr, bodies)
-}
-
 /// Every `/chat/completions` body the run sent, in order.
 fn sent(bodies: &Bodies) -> Vec<String> {
     bodies.lock().expect("the lock must hold").clone()
@@ -175,7 +168,7 @@ fn assert_carries_the_summary(after: &str) {
 
 #[test]
 fn a_run_over_the_threshold_folds_its_context_and_counts_the_request() {
-    let (addr, bodies) = endpoint();
+    let (addr, bodies) = endpoint(reply_for);
     let home = TempDir::new().expect("a temp home must exist");
 
     let output = run_afi(&home, addr, &["--context-window", DECLARED_WINDOW]);
@@ -215,7 +208,7 @@ fn a_run_over_the_threshold_folds_its_context_and_counts_the_request() {
 
 #[test]
 fn a_run_with_no_known_context_window_does_not_fold() {
-    let (addr, bodies) = endpoint();
+    let (addr, bodies) = endpoint(reply_for);
     let home = TempDir::new().expect("a temp home must exist");
 
     // No `--context-window`, and a model name no compiled row answers for, so the

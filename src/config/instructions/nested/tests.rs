@@ -8,6 +8,7 @@
 //! `tests/instructions_nested.rs`.
 
 use std::fs;
+use std::slice::from_ref;
 
 use tempfile::TempDir;
 
@@ -119,7 +120,7 @@ fn a_path_that_does_not_exist_yet_resolves_to_its_parent() {
 }
 
 /// A state armed at `launch` with the whole budget and nothing sent.
-fn armed(launch: &Path) -> State {
+fn armed_state(launch: &Path) -> State {
     State {
         launch: canonical(launch),
         sent: HashSet::new(),
@@ -132,7 +133,7 @@ fn armed(launch: &Path) -> State {
 fn reading_a_file_sends_it_and_spends_the_budget() {
     let dir = workspace();
     let path = dir.path().join("crates/api/AGENTS.md");
-    let mut state = armed(dir.path());
+    let mut state = armed_state(dir.path());
 
     let block = take(&mut state, &path).expect("a file with rules in it is a block");
     assert!(block.contains("Contents of "), "{block}");
@@ -151,7 +152,7 @@ fn a_file_that_says_nothing_is_skipped_in_silence() {
     let dir = workspace();
     let path = dir.path().join("crates/api/AGENTS.md");
     fs::write(&path, "\u{feff}\n  \n").unwrap();
-    let mut state = armed(dir.path());
+    let mut state = armed_state(dir.path());
 
     assert!(take(&mut state, &path).is_none());
     assert!(state.loaded.is_empty());
@@ -164,7 +165,7 @@ fn a_file_past_the_budget_is_reported_rather_than_sent() {
     // like one that has none.
     let dir = workspace();
     let path = dir.path().join("crates/api/AGENTS.md");
-    let mut state = armed(dir.path());
+    let mut state = armed_state(dir.path());
     state.remaining = 2;
 
     let note = take(&mut state, &path).expect("the model is told");
@@ -178,7 +179,7 @@ fn a_file_past_the_budget_is_reported_rather_than_sent() {
 fn a_file_that_cannot_be_read_is_reported_rather_than_swallowed() {
     let dir = workspace();
     let missing = dir.path().join("crates/api/gone.md");
-    let mut state = armed(dir.path());
+    let mut state = armed_state(dir.path());
 
     let note = take(&mut state, &missing).expect("the model is told");
     assert!(note.contains("could not be read"), "{note}");
@@ -246,12 +247,46 @@ fn an_ordinary_subtree_path_still_lands_inside_the_launch_dir() {
 
 #[test]
 fn an_unarmed_run_reads_nothing_and_reports_nothing() {
-    // A run that named its files, or asked for nothing at all. `arm` is what turns
-    // this module on, and it is never called for either.
-    arm(
+    // A run that named its files, or asked for nothing at all. `arm_once` is what
+    // turns this module on, and it is never called for either.
+    arm_once(
         super::super::super::system_prompt::builtin(),
         Path::new("/"),
     );
-    assert!(for_path(Path::new("/tmp")).is_none());
+    assert!(for_path("/tmp", Path::new("/")).is_none());
     assert!(loaded().is_empty());
+}
+
+#[test]
+fn a_fold_forgets_a_carried_block_on_a_run_that_was_never_armed() {
+    // The unarmed run that still has blocks to account for: one resuming under
+    // `--instructions none`, whose history replays what the saved run sent. A fold
+    // has to prune those too, and this is the case where nothing else would - the
+    // run has no `State` for the rest of `forget_in` to touch, so an early return
+    // above this would leave `/instructions` naming a block that left the
+    // conversation, and `arm_once` on the next resume seeding `sent` from it. That
+    // suppresses the real file for a whole session.
+    //
+    // Reads `carried` directly rather than through `sent`, which needs a prompt, and
+    // leaves it empty so the other test touching this global still reads its own
+    // state.
+    let kept = "/repo/crates/api/AGENTS.md";
+    let gone = "/repo/crates/db/AGENTS.md";
+    adopt(&serde_json::json!([
+        {"path": kept, "bytes": 9},
+        {"path": gone, "bytes": 12},
+    ]));
+    assert!(lock().run.is_none(), "this run was never armed");
+
+    let dropped = serde_json::json!({"content": block_for(gone, "db rules")});
+    forget_in(from_ref(&dropped));
+    assert_eq!(
+        lock().carried,
+        vec![(kept.to_string(), 9)],
+        "only the block that left is forgotten"
+    );
+
+    let rest = serde_json::json!({"content": block_for(kept, "api rules")});
+    forget_in(from_ref(&rest));
+    assert!(lock().carried.is_empty());
 }

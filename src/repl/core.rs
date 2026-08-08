@@ -67,7 +67,7 @@ pub(crate) async fn run_turn_loop(
     // The one funnel every path runs through - REPL, one-shot, `/recover` - and it
     // already resolved the directory the loader measures the subtree from. Arming
     // twice is a no-op, so the per-turn call cannot reset what the session has read.
-    nested::arm(params.prompt, &cwd);
+    nested::arm_once(params.prompt, &cwd);
     run_model_turn_loop(
         messages,
         LoopRequest {
@@ -182,7 +182,7 @@ impl ReplCore {
     }
 
     pub(crate) fn shutdown(&mut self, ui: &mut dyn UserInterface) {
-        let meta = self.session_meta(&Value::Null);
+        let meta = session_meta(&self.rt, None, None);
         let _ =
             sessions::write_session(&self.dir, &self.session_id, &mut self.messages, Some(&meta));
         ui.message(MessageKind::Info, self.resume_hint());
@@ -267,28 +267,25 @@ impl ReplCore {
                 .ok()
                 .map(|path| path.to_string_lossy().to_string())
         });
-        let meta = self.session_meta(&json!({"title": title, "cwd": cwd}));
+        let meta = session_meta(&self.rt, title.as_deref(), cwd.as_deref());
         let _ =
             sessions::write_session(&self.dir, &self.session_id, &mut self.messages, Some(&meta));
     }
+}
 
-    /// What a saved session records besides its messages.
-    ///
-    /// One place, because two of them disagreed: the subtree files this run sent have
-    /// to be recorded for a resume to know what the model has already been told, and a
-    /// save that left them out would hand the next run an empty answer. Null values are
-    /// dropped by the store, so an untitled save leaves an earlier title standing.
-    fn session_meta(&self, extra: &Value) -> Value {
-        let mut meta = json!({
-            "source": self.rt.active,
-            "model": self.rt.model,
-            "instructions": nested::in_history(),
-        });
-        if let (Some(meta), Some(extra)) = (meta.as_object_mut(), extra.as_object()) {
-            for (key, value) in extra {
-                meta.insert(key.clone(), value.clone());
-            }
-        }
-        meta
-    }
+/// What a saved session records besides its messages.
+///
+/// One place, and reachable from `/save` as well as from here, because a writer that
+/// forgets a key does not fail - the store keeps whatever the file already had, so a
+/// save after a `/compress` would pair fresh messages with a stale record of what the
+/// model has been told. Nulls are dropped by the store, so an untitled save leaves an
+/// earlier title standing.
+pub(super) fn session_meta(rt: &Runtime, title: Option<&str>, cwd: Option<&str>) -> Value {
+    json!({
+        "source": rt.active,
+        "model": rt.model,
+        "instructions": nested::in_history(rt.prompt()),
+        "title": title,
+        "cwd": cwd,
+    })
 }

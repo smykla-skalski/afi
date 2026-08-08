@@ -6,8 +6,6 @@
 //! drive a real process from a real checkout built by the same helper.
 
 use std::fs;
-use std::net::TcpListener;
-use std::sync::Arc;
 
 use afi::repl::banner;
 use serde_json::Value;
@@ -15,7 +13,7 @@ use tempfile::TempDir;
 
 mod common;
 
-use common::endpoint::{Bodies, serve, tool_call_per_user_turn};
+use common::endpoint::{endpoint, reads_the_api_crate};
 use common::{
     ROOT_RULE, checkout, repl_afi_in, repo, run_afi_in, stderr_of, summary_of, workspace,
 };
@@ -159,21 +157,12 @@ fn the_status_line_counts_both_halves_and_only_when_there_are_any() {
 
 #[test]
 fn the_status_line_follows_a_subtree_file_loaded_mid_session() {
-    // The count is rendered from `all_instructions`, which grows when the model reads
+    // The count is rendered from `nested::sent`, which grows when the model reads
     // into a subtree - so the header has to be re-rendered after a turn or it reports
     // one number while `/instructions` reports another.
     let dir = workspace();
     let home = TempDir::new().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
-    let addr = listener.local_addr().expect("an addr");
-    let bodies: Bodies = Arc::default();
-    let server = serve(listener, &bodies, |seen| {
-        tool_call_per_user_turn(
-            seen,
-            "read_file",
-            &serde_json::json!({"path": "crates/api/src/lib.rs"}),
-        )
-    });
+    let (addr, _bodies) = endpoint(reads_the_api_crate);
 
     let output = repl_afi_in(
         &home,
@@ -182,7 +171,6 @@ fn the_status_line_follows_a_subtree_file_loaded_mid_session() {
         &["--instructions", "project"],
         "read it\n/quit\n",
     );
-    drop(server);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

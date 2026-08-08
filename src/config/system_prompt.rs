@@ -116,12 +116,7 @@ impl SystemPrompt {
         &self.instructions
     }
 
-    /// The instruction files this prompt carries, as `(path, bytes sent)` in the
-    /// order they were appended. Empty for a run that loaded none.
-    ///
-    /// The bytes are what went in front of the model, which is what a `/instructions`
-    /// listing has to show: the file on disk may have been edited since, and the
-    /// difference between the two is the answer to "why is it ignoring my rule".
+    /// The instruction files this prompt carries - see [`Instructions::files`].
     #[must_use]
     pub(crate) fn instruction_files(&self) -> Vec<(String, usize)> {
         self.instructions.files()

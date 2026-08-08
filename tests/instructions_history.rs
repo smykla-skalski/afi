@@ -8,27 +8,13 @@
 //! under the per-file line cap.
 
 use std::fs;
-use std::net::TcpListener;
-use std::process::Output;
-use std::sync::Arc;
 
 use tempfile::TempDir;
 
 mod common;
 
-use common::endpoint::{Bodies, LAST, sent_with_roles, serve, tool_call_per_user_turn};
-use common::{DEEP_RULE as API_RULE, repl_afi_in, repo, workspace};
-
-/// The session id a finished run says to resume with.
-fn session_of(output: &Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .split("resume with: afi --resume ")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .unwrap_or_else(|| panic!("the run must save a session: {stdout}"))
-        .to_string()
-}
+use common::endpoint::{LAST, endpoint, reads_the_api_crate, sent_with_roles, tool_results};
+use common::{DEEP_RULE as API_RULE, repl_afi_in, repo, session_of, workspace};
 
 #[test]
 fn a_reset_history_is_told_the_subtree_rules_again() {
@@ -42,16 +28,7 @@ fn a_reset_history_is_told_the_subtree_rules_again() {
     // subtree loader.
     let dir = workspace();
     let home = TempDir::new().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
-    let addr = listener.local_addr().expect("an addr");
-    let bodies: Bodies = Arc::default();
-    let server = serve(listener, &bodies, |seen| {
-        tool_call_per_user_turn(
-            seen,
-            "read_file",
-            &serde_json::json!({"path": "crates/api/src/lib.rs"}),
-        )
-    });
+    let (addr, bodies) = endpoint(reads_the_api_crate);
 
     repl_afi_in(
         &home,
@@ -60,9 +37,11 @@ fn a_reset_history_is_told_the_subtree_rules_again() {
         &["--instructions", "project"],
         "read it\n/reset\nread it again\n/quit\n",
     );
-    drop(server);
 
-    // The last request is the second read's, in a history the reset emptied.
+    // The last request is the second read's, in a history the reset emptied. Tool
+    // results only, not the shared `tool_results`, which also takes user messages: a
+    // bare `any` over both roles would pass if the block moved off the tool result it
+    // is specified to ride on and onto the observation turn.
     let after = sent_with_roles(&bodies, LAST, &["tool"]);
     assert!(
         after.iter().any(|text| text.contains(API_RULE)),
@@ -77,16 +56,7 @@ fn a_compressed_history_is_told_again_about_a_rule_it_lost() {
     // or the rules are gone for good while `/instructions` still reports them as sent.
     let dir = workspace();
     let home = TempDir::new().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
-    let addr = listener.local_addr().expect("an addr");
-    let bodies: Bodies = Arc::default();
-    let server = serve(listener, &bodies, |seen| {
-        tool_call_per_user_turn(
-            seen,
-            "read_file",
-            &serde_json::json!({"path": "crates/api/src/lib.rs"}),
-        )
-    });
+    let (addr, bodies) = endpoint(reads_the_api_crate);
 
     // Two turns before the fold, so the block-carrying result is older than the kept
     // window and is folded away rather than surviving in it.
@@ -97,14 +67,13 @@ fn a_compressed_history_is_told_again_about_a_rule_it_lost() {
         &["--instructions", "project"],
         "read it\nand again\n/compress\nread it once more\n/quit\n",
     );
-    drop(server);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Compressed context"),
         "the fold has to have happened: {stdout}"
     );
-    let sent = sent_with_roles(&bodies, LAST, &["tool", "user"]);
+    let sent = tool_results(&bodies);
     assert!(
         sent.iter().any(|text| text.contains(API_RULE)),
         "a rule the fold dropped has to be offered again: {sent:#?}"
@@ -119,16 +88,7 @@ fn a_compressed_history_is_not_told_a_rule_it_still_holds() {
     // meant to bound it. A 32 KiB cap is no cap if every fold doubles what it counts.
     let dir = workspace();
     let home = TempDir::new().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
-    let addr = listener.local_addr().expect("an addr");
-    let bodies: Bodies = Arc::default();
-    let server = serve(listener, &bodies, |seen| {
-        tool_call_per_user_turn(
-            seen,
-            "read_file",
-            &serde_json::json!({"path": "crates/api/src/lib.rs"}),
-        )
-    });
+    let (addr, bodies) = endpoint(reads_the_api_crate);
 
     let output = repl_afi_in(
         &home,
@@ -137,7 +97,6 @@ fn a_compressed_history_is_not_told_a_rule_it_still_holds() {
         &["--instructions", "project"],
         "read it\n/compress\nread it again\n/quit\n",
     );
-    drop(server);
 
     // Without this the rest is vacuous: "too few turns", an empty summary, or a
     // broken non-stream path all leave one copy of the rule and no fold at all.
@@ -146,7 +105,7 @@ fn a_compressed_history_is_not_told_a_rule_it_still_holds() {
         stdout.contains("Compressed context"),
         "the fold has to have happened: {stdout}"
     );
-    let carrying = sent_with_roles(&bodies, LAST, &["tool", "user"])
+    let carrying = tool_results(&bodies)
         .iter()
         .filter(|text| text.contains(API_RULE))
         .count();
@@ -154,7 +113,7 @@ fn a_compressed_history_is_not_told_a_rule_it_still_holds() {
         carrying,
         1,
         "the fold kept the block, so it must not be sent a second time: {:#?}",
-        sent_with_roles(&bodies, LAST, &["tool", "user"])
+        tool_results(&bodies)
     );
 }
 
@@ -166,16 +125,7 @@ fn a_resume_does_not_re_adopt_the_startup_walk() {
     // starve the budget and refuse a genuine subtree file.
     let dir = workspace();
     let home = TempDir::new().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
-    let addr = listener.local_addr().expect("an addr");
-    let bodies: Bodies = Arc::default();
-    let server = serve(listener, &bodies, |seen| {
-        tool_call_per_user_turn(
-            seen,
-            "read_file",
-            &serde_json::json!({"path": "crates/api/src/lib.rs"}),
-        )
-    });
+    let (addr, _bodies) = endpoint(reads_the_api_crate);
 
     let first = repl_afi_in(
         &home,
@@ -192,7 +142,6 @@ fn a_resume_does_not_re_adopt_the_startup_walk() {
         &["--resume", &session, "--instructions", "project"],
         "/instructions\n/quit\n",
     );
-    drop(server);
 
     let listing = String::from_utf8_lossy(&second.stdout);
     let root = listing.matches("repo/AGENTS.md").count();
@@ -218,16 +167,7 @@ fn what_a_resume_believes_was_sent_comes_from_the_session_not_the_wire() {
     // the record finds nothing and offers the rule again.
     let dir = workspace();
     let home = TempDir::new().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
-    let addr = listener.local_addr().expect("an addr");
-    let bodies: Bodies = Arc::default();
-    let server = serve(listener, &bodies, |seen| {
-        tool_call_per_user_turn(
-            seen,
-            "read_file",
-            &serde_json::json!({"path": "crates/api/src/lib.rs"}),
-        )
-    });
+    let (addr, bodies) = endpoint(reads_the_api_crate);
 
     let first = repl_afi_in(
         &home,
@@ -262,9 +202,8 @@ fn what_a_resume_believes_was_sent_comes_from_the_session_not_the_wire() {
         &["--resume", &session, "--instructions", "project"],
         "read it again\n/quit\n",
     );
-    drop(server);
 
-    let sent = sent_with_roles(&bodies, LAST, &["tool", "user"]);
+    let sent = tool_results(&bodies);
     let carrying = sent.iter().filter(|text| text.contains(API_RULE)).count();
     assert_eq!(
         carrying, 2,
@@ -281,16 +220,7 @@ fn a_resumed_session_reports_the_blocks_it_replays() {
     // and this run must not send them a second time.
     let dir = workspace();
     let home = TempDir::new().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
-    let addr = listener.local_addr().expect("an addr");
-    let bodies: Bodies = Arc::default();
-    let server = serve(listener, &bodies, |seen| {
-        tool_call_per_user_turn(
-            seen,
-            "read_file",
-            &serde_json::json!({"path": "crates/api/src/lib.rs"}),
-        )
-    });
+    let (addr, bodies) = endpoint(reads_the_api_crate);
 
     // Run one loads the subtree file and saves the session.
     let first = repl_afi_in(
@@ -311,14 +241,13 @@ fn a_resumed_session_reports_the_blocks_it_replays() {
         &["--resume", &session, "--instructions", "none"],
         "read it again\n/instructions\n/quit\n",
     );
-    drop(server);
 
     let listing = String::from_utf8_lossy(&second.stdout);
     assert!(
         listing.contains("carried in from the resumed session"),
         "the replayed block has to be reported: {listing}"
     );
-    let carrying = sent_with_roles(&bodies, LAST, &["tool", "user"])
+    let carrying = tool_results(&bodies)
         .iter()
         .filter(|text| text.contains(API_RULE))
         .count();
@@ -326,6 +255,6 @@ fn a_resumed_session_reports_the_blocks_it_replays() {
         carrying,
         1,
         "and not sent again on top of the replay: {:#?}",
-        sent_with_roles(&bodies, LAST, &["tool", "user"])
+        tool_results(&bodies)
     );
 }

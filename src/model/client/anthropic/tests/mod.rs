@@ -294,7 +294,7 @@ fn completion_is_reshaped_into_openai_form() {
 
 #[test]
 fn a_text_free_response_is_an_error_not_an_empty_summary() {
-    // The only caller feeds this into apply_compression, which replaces the
+    // The only caller feeds this into CompressionPlan::apply, which replaces the
     // conversation with the summary and has no empty-summary guard. Returning
     // Ok("") here would wipe history while reporting success.
     for body in [

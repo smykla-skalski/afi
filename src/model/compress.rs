@@ -8,8 +8,10 @@
 
 mod auto;
 mod plan;
-pub(crate) use auto::{AutoCompress, Fold, completion_content, fold_after_turn};
+mod summary;
+pub(crate) use auto::{AutoCompress, Fold, fold_after_turn};
 pub(crate) use plan::plan_compression;
+pub(crate) use summary::{Summary, fetch};
 
 /// How many recent turns to leave untouched in a manual `/compress`.
 pub const COMPRESS_KEEP: usize = 2;

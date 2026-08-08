@@ -211,6 +211,18 @@ pub fn instruction_paths(output: &Output) -> Vec<String> {
         .collect()
 }
 
+/// The session id a finished run says to resume with.
+#[allow(dead_code)]
+pub fn session_of(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .split("resume with: afi --resume ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("the run must save a session: {stdout}"))
+        .to_string()
+}
+
 /// A finished process's stderr, where every refusal is reported.
 #[allow(dead_code)]
 pub fn stderr_of(output: &Output) -> String {

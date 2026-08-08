@@ -271,8 +271,11 @@ fn apply_choice(chunk: &mut StreamChunk, choice: &Value) {
             .and_then(|c| c.as_str())
             .map(String::from);
         // `reasoning_content` is what vLLM, `SGLang`, and `DeepSeek` emit;
-        // `reasoning` is the spelling `OpenRouter` and Bedrock's open-weight
-        // models use. Each is read as a string before the other is considered,
+        // `reasoning` is the spelling `OpenRouter` uses. Bedrock's open-weight
+        // surface sends neither - it wraps deliberation in `<reasoning>` inside
+        // `content`, which [`tags`] lifts back out.
+        //
+        // Each is read as a string before the other is considered,
         // so anything the first key holds that is not one - a `null` from a
         // serializer that emits every delta field, or an object from a provider
         // that reports reasoning structurally - falls through to the second
@@ -335,6 +338,8 @@ pub fn parse_sse_body(body: &str) -> Vec<StreamChunk> {
     }
     chunks
 }
+
+pub(crate) mod tags;
 
 #[cfg(test)]
 mod tests;

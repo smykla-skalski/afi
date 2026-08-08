@@ -8,6 +8,7 @@ use std::time::Instant;
 use serde_json::{Value, json};
 
 use crate::metrics::abbr;
+use crate::model::stream::tags::ReasoningTags;
 use crate::model::stream::{StreamChunk, ThinkingDelta, Timings, Usage};
 use crate::model::turn_dispatch::ToolCallAccum;
 use crate::term::{MessageKind, StreamKind, UserInterface};
@@ -99,6 +100,9 @@ pub(crate) struct StreamAccumulator {
     /// The reasoning-only cutoff for this turn. `0` disables the cut, which is
     /// what the Anthropic path uses while thinking is on.
     reasoning_only_char_limit: usize,
+    /// Lifts `<think>` and `<reasoning>` spans back out of `content`, for the
+    /// endpoints that put deliberation there instead of in its own field.
+    tags: ReasoningTags,
     t_first: Option<f64>,
 }
 
@@ -116,6 +120,7 @@ impl StreamAccumulator {
             streamed_chars: 0,
             reasoning_only_chars: 0,
             reasoning_only_char_limit,
+            tags: ReasoningTags::default(),
             t_first: None,
         }
     }
@@ -204,21 +209,19 @@ impl StreamAccumulator {
         if let Some(reasoning) = &chunk.reasoning_content
             && self.handle_reasoning(reasoning, ui)
         {
-            ui.finish_stream();
-            ui.message(
-                MessageKind::Warning,
-                format!(
-                    "REASONING-ONLY LIMIT - {} chars; cutting",
-                    abbr(self.reasoning_only_chars as u64)
-                ),
-            );
-            return Some(StreamResult::ReasoningStall {
-                chars: self.reasoning_only_chars,
-                reasoning_parts: take(&mut self.reasoning_parts),
-            });
+            return Some(self.stall(ui));
         }
+        // Content is divided before it is folded, so an endpoint that wrapped
+        // its deliberation in tags reaches the same two channels as one that
+        // reported it in `reasoning_content`.
         if let Some(content) = &chunk.content {
-            self.handle_content(content, ui);
+            let split = self.tags.split(content);
+            if !split.is_empty() {
+                if !split.reasoning.is_empty() && self.handle_reasoning(&split.reasoning, ui) {
+                    return Some(self.stall(ui));
+                }
+                self.handle_content(&split.content, ui);
+            }
         }
         if !chunk.tool_calls.is_empty() {
             self.handle_tool_calls(chunk);
@@ -229,9 +232,34 @@ impl StreamAccumulator {
         None
     }
 
+    /// Report the reasoning-only cutoff and hand back what was deliberated.
+    fn stall(&mut self, ui: &mut dyn UserInterface) -> StreamResult {
+        ui.finish_stream();
+        ui.message(
+            MessageKind::Warning,
+            format!(
+                "REASONING-ONLY LIMIT - {} chars; cutting",
+                abbr(self.reasoning_only_chars as u64)
+            ),
+        );
+        StreamResult::ReasoningStall {
+            chars: self.reasoning_only_chars,
+            reasoning_parts: take(&mut self.reasoning_parts),
+        }
+    }
+
     /// Complete a normally exhausted SSE stream and return its accumulated
     /// model/tool data.
-    pub(crate) fn finish(self, ui: &mut dyn UserInterface) -> StreamResult {
+    ///
+    /// A stream that ended mid-tag still has text held back waiting for the rest
+    /// of it, and that text is the model's, so it is released here rather than
+    /// dropped. The cutoff is not consulted: the stream is already over.
+    pub(crate) fn finish(mut self, ui: &mut dyn UserInterface) -> StreamResult {
+        let last = self.tags.flush();
+        if !last.is_empty() {
+            self.handle_reasoning(&last.reasoning, ui);
+            self.handle_content(&last.content, ui);
+        }
         ui.finish_stream();
         StreamResult::Done(Box::new(self.into_accumulated()))
     }

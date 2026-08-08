@@ -3,6 +3,12 @@
 All notable changes to `afi`. Generated from the commit history; maintained by
 release-plz from the conventional-commit messages on `main`.
 
+## [0.8.0] - 2026-08-08
+
+### Added
+
+- **model** Run the open-weight Bedrock models ([#69](https://github.com/smykla-skalski/afi/pull/69))
+
 ## [0.7.0] - 2026-08-07
 
 ### Added

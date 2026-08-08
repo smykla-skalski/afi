@@ -34,7 +34,7 @@ fn a_workflow_identity_and_a_role_are_enough_to_reach_bedrock() {
     let src = &rt.sources["bedrock"];
     assert_eq!(
         src.base_url,
-        "https://bedrock-runtime.us-east-1.amazonaws.com/v1"
+        "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
     );
     assert_eq!(src.model.as_deref(), Some("zai.glm-5"));
     assert!(rt.refusals().is_empty(), "got {:?}", rt.refusals());

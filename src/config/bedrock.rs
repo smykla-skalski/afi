@@ -20,10 +20,19 @@ use super::{AWS_IDENTITY, Identity};
 
 /// Bedrock's `OpenAI`-compatible endpoint, one host per Region.
 ///
-/// `/v1` rather than the older `/openai/v1` on the same host: it is the path
-/// AWS documents a `SigV4` request against, and the one whose examples use the
-/// unversioned model ids (`zai.glm-5`). Override with `AFI_BEDROCK_BASE_URL`.
-const ENDPOINT: &str = "https://bedrock-runtime.{region}.{suffix}/v1";
+/// `/openai/v1`, and the prefix is not optional. This read `/v1` for a release,
+/// on the argument that it is the path AWS documents a `SigV4` request against.
+/// Bedrock does not serve it: `/v1/chat/completions` answers
+/// `UnknownOperationException` in a Query-protocol envelope, which is the
+/// routing layer reporting no operation at that path rather than the service
+/// refusing the request. Signing was never the problem, which is why it read as
+/// a parse failure rather than a 403.
+///
+/// Checked against a live account on both model-id styles (`zai.glm-5` and
+/// `openai.gpt-oss-20b-1:0`) and in two Regions (`us-east-1` and `us-west-2`),
+/// so it is specific to neither. The test below pins the whole url for that
+/// reason. Override with `AFI_BEDROCK_BASE_URL`.
+const ENDPOINT: &str = "https://bedrock-runtime.{region}.{suffix}/openai/v1";
 
 /// The role session name when `AWS_ROLE_SESSION_NAME` names none. It reaches
 /// `CloudTrail` as the tail of the assumed-role identity, so a call afi made is

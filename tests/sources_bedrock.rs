@@ -27,7 +27,7 @@ fn registers_from_aws_credentials_with_the_region_as_the_endpoint() {
     let src = &rt.sources["bedrock"];
     assert_eq!(
         src.base_url,
-        "https://bedrock-runtime.us-east-1.amazonaws.com/v1"
+        "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
     );
     assert_eq!(src.model.as_deref(), Some("zai.glm-5"));
     assert!(src.protocol.is_bedrock());
@@ -117,7 +117,7 @@ fn a_named_source_opts_in_with_the_protocol_value() {
     assert!(src.protocol.is_bedrock());
     assert_eq!(src.model.as_deref(), Some("openai.gpt-oss-20b-1:0"));
     assert_eq!(
-        src.base_url, "https://bedrock-runtime.us-east-1.amazonaws.com/v1",
+        src.base_url, "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
         "a Bedrock source needs no BASE_URL; its Region names the endpoint"
     );
 }

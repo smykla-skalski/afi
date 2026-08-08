@@ -19,6 +19,10 @@ pub(crate) struct Accumulated {
     pub content_parts: Vec<String>,
     pub tool_calls: HashMap<u32, ToolCallAccum>,
     pub reasoning_parts: Vec<String>,
+    /// The subset of `reasoning_parts` that was lifted out of `content` by the
+    /// tag splitter, kept apart because only this text was ever a candidate for
+    /// the answer. See [`Accumulated::answer_text`].
+    pub tag_reasoning: String,
     /// Anthropic thinking blocks, in the order the model emitted them, ready to
     /// be replayed verbatim on the request carrying this turn's tool results.
     /// Always empty on the `OpenAI` path.
@@ -41,20 +45,22 @@ impl Accumulated {
     /// answer. `parse_text_calls` only ever reads the answer, so the call would
     /// never be dispatched and the turn would report a reasoning stall instead.
     ///
-    /// Only consulted when there is nothing else to run. Scanning reasoning
-    /// unconditionally would dispatch a call a model merely drafted in its
-    /// scratchpad and then thought better of.
+    /// Only `tag_reasoning` is eligible, and only when there is nothing else to
+    /// run. Reasoning a provider reported in its own field was never part of the
+    /// answer, and scanning it would dispatch a call the model merely quoted -
+    /// afi's own system prompt carries unfenced text-protocol examples with real
+    /// tool names, so a model restating its instructions in a scratchpad
+    /// reproduces one exactly. Emptiness of `content` does not distinguish a
+    /// misrouted call from an abandoned one; provenance does.
     pub(crate) fn answer_text(&self) -> String {
         let text = self.content_parts.join("");
-        if !text.trim().is_empty() || !self.tool_calls.is_empty() {
+        if !text.trim().is_empty()
+            || !self.tool_calls.is_empty()
+            || parse_text_calls(&self.tag_reasoning).is_empty()
+        {
             return text;
         }
-        let reasoning = self.reasoning_parts.join("");
-        if parse_text_calls(&reasoning).is_empty() {
-            text
-        } else {
-            reasoning
-        }
+        self.tag_reasoning.clone()
     }
 }
 
@@ -117,6 +123,10 @@ pub(crate) struct StreamAccumulator {
     content_parts: Vec<String>,
     tool_calls: HashMap<u32, ToolCallAccum>,
     reasoning_parts: Vec<String>,
+    /// Only what the splitter took out of `content`, so `answer_text` can tell
+    /// a misrouted tool call from one a model quoted in a scratchpad afi never
+    /// had a claim on.
+    tag_reasoning: String,
     /// Keyed by Anthropic's content-block index, so iteration restores the
     /// order the model emitted the blocks in.
     thinking: BTreeMap<u32, ThinkingAccum>,
@@ -145,6 +155,7 @@ impl StreamAccumulator {
             content_parts: Vec::new(),
             tool_calls: HashMap::new(),
             reasoning_parts: Vec::new(),
+            tag_reasoning: String::new(),
             thinking: BTreeMap::new(),
             usage: None,
             timings: None,
@@ -248,10 +259,16 @@ impl StreamAccumulator {
         // reported it in `reasoning_content`.
         if let Some(content) = &chunk.content {
             let split = self.tags.split(content);
-            if !split.reasoning.is_empty() && self.handle_reasoning(&split.reasoning, ui) {
+            self.tag_reasoning.push_str(&split.reasoning);
+            let cut = !split.reasoning.is_empty() && self.handle_reasoning(&split.reasoning, ui);
+            // The answer goes out before the cut is acted on. One delta can
+            // carry the end of a span and the start of the reply, and stalling
+            // first would throw away text the model had already answered with -
+            // then nudge it to act, which it just had.
+            self.handle_content(&split.content, ui);
+            if cut && split.content.trim().is_empty() {
                 return Some(self.stall(ui));
             }
-            self.handle_content(&split.content, ui);
         }
         if !chunk.tool_calls.is_empty() {
             self.handle_tool_calls(chunk);
@@ -286,6 +303,7 @@ impl StreamAccumulator {
     /// dropped. The cutoff is not consulted: the stream is already over.
     pub(crate) fn finish(mut self, ui: &mut dyn UserInterface) -> StreamResult {
         let last = self.tags.flush();
+        self.tag_reasoning.push_str(&last.reasoning);
         self.handle_reasoning(&last.reasoning, ui);
         self.handle_content(&last.content, ui);
         ui.finish_stream();
@@ -297,6 +315,7 @@ impl StreamAccumulator {
             content_parts: self.content_parts,
             tool_calls: self.tool_calls,
             reasoning_parts: self.reasoning_parts,
+            tag_reasoning: self.tag_reasoning,
             thinking_blocks: self
                 .thinking
                 .into_values()

@@ -1,6 +1,8 @@
 //! Fold tests: live deltas, incremental tool-call merging, the reasoning-only
 //! cut, and the thinking blocks the Anthropic path has to replay.
 
+mod reasoning_tags;
+
 use super::*;
 use crate::model::stream::{ThinkingDelta, ToolCallDelta};
 use crate::risk::ApprovalChoice;
@@ -135,92 +137,6 @@ fn reasoning_limit_returns_terminal_result() {
             .iter()
             .any(|event| matches!(event, OutputEvent::StreamFinished))
     );
-}
-
-/// Reasoning wrapped in tags reaches the cut the same way the field does, and
-/// keeps reaching it across spans.
-///
-/// The whitespace between two spans is the trap: emitted as content it would
-/// fill `content_parts`, and `no_output_yet` reads that as the answer having
-/// started - so nothing would count toward the limit again and a looping model
-/// would run to stream end.
-#[test]
-fn tagged_reasoning_reaches_the_cut_across_spans() {
-    let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(12, true);
-    let mut push = |text: &str, accumulator: &mut StreamAccumulator| {
-        accumulator.push(
-            &StreamChunk {
-                content: Some(text.to_string()),
-                ..StreamChunk::default()
-            },
-            Instant::now(),
-            &mut ui,
-        )
-    };
-
-    // Seven characters, then five, against a limit of twelve.
-    assert!(
-        push("<think>1234567</think>\n\n", &mut accumulator).is_none(),
-        "under the limit, and the newlines are not an answer"
-    );
-    let result = push("<think>89abc</think>", &mut accumulator)
-        .expect("the second span must reach the limit");
-    let StreamResult::ReasoningStall { chars, .. } = result else {
-        panic!("expected reasoning stall");
-    };
-    assert_eq!(chars, 12, "both spans counted, the whitespace did not");
-}
-
-/// A server with no native tool calling puts its call in the message body, and
-/// a model there can emit it inside a span. The splitter routes that off the
-/// answer, and `parse_text_calls` only reads the answer - so without taking it
-/// back the call is never dispatched and the turn reports a reasoning stall.
-#[test]
-fn a_tool_call_captured_as_reasoning_is_taken_back() {
-    let call =
-        "[afi_tool_call]{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}[/afi_tool_call]";
-    let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(0, true);
-    accumulator.push(
-        &StreamChunk {
-            content: Some(format!("<think>I should look. {call}</think>")),
-            ..StreamChunk::default()
-        },
-        Instant::now(),
-        &mut ui,
-    );
-
-    let StreamResult::Done(acc) = accumulator.finish(&mut ui) else {
-        panic!("expected a completed turn");
-    };
-    assert!(acc.content_parts.join("").is_empty(), "still reasoning");
-    assert!(
-        acc.answer_text().contains("[afi_tool_call]"),
-        "the dispatcher must see it: {:?}",
-        acc.answer_text()
-    );
-}
-
-/// Reasoning without a call is left where it is, so a turn that really did
-/// nothing but deliberate still reports as one.
-#[test]
-fn reasoning_without_a_call_is_not_taken_back() {
-    let mut ui = RecordingUi::default();
-    let mut accumulator = StreamAccumulator::new(0, true);
-    accumulator.push(
-        &StreamChunk {
-            content: Some("<think>just deliberating</think>".to_string()),
-            ..StreamChunk::default()
-        },
-        Instant::now(),
-        &mut ui,
-    );
-
-    let StreamResult::Done(acc) = accumulator.finish(&mut ui) else {
-        panic!("expected a completed turn");
-    };
-    assert_eq!(acc.answer_text(), "");
 }
 
 #[test]

@@ -62,6 +62,21 @@ impl Accumulated {
         }
         self.tag_reasoning.clone()
     }
+
+    /// What the provider counted as this turn's prompt: the whole context it was
+    /// sent, cached prefix included. `0` when it reported nothing.
+    ///
+    /// `usage` first, then llama.cpp's `timings`, which is the only place that
+    /// server puts the figure. Read here rather than at each use so the stats
+    /// footer, the run totals, and the auto-compress threshold cannot end up
+    /// disagreeing about how full the context was.
+    pub(crate) fn prompt_tokens(&self) -> u64 {
+        self.usage
+            .as_ref()
+            .map(|usage| usage.prompt_tokens)
+            .or_else(|| self.timings.as_ref().map(|timings| timings.prompt_n))
+            .unwrap_or(0)
+    }
 }
 
 /// Either the folded turn, or a reasoning-only stall the caller must handle.

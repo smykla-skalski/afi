@@ -367,3 +367,44 @@ fn a_named_file_replaces_the_one_that_was_found() {
         "the default must not be read"
     );
 }
+
+#[test]
+fn the_file_can_say_how_much_context_a_source_holds() {
+    // The window a source declares is what the auto-compress threshold is a
+    // percentage of, so a key that lowered to the wrong variable would leave the
+    // run silently uncompressed - the failure the setting exists to prevent.
+    let home = TempDir::new().unwrap();
+    let file = config(
+        home.path(),
+        r#"{
+          "context_window": 65536,
+          "sources": {
+            "big":   {"base_url": "http://127.0.0.1:1/v1", "model": "m", "context_window": 131072},
+            "small": {"base_url": "http://127.0.0.1:2/v1", "model": "m"}
+          },
+          "source_order": ["big", "small"]
+        }"#,
+    );
+    let mut rt = build(&["afi"], &[], &file);
+    assert_eq!(rt.sources["big"].context_window, Some(131_072));
+    // The source that declares nothing falls back to the run-wide key.
+    assert!(rt.switch_source("small", None));
+    assert_eq!(rt.sources["small"].context_window, Some(65536));
+}
+
+#[test]
+fn a_context_window_that_is_not_a_number_refuses_the_run() {
+    let home = TempDir::new().unwrap();
+    let file = config(
+        home.path(),
+        r#"{"sources": {"x": {"base_url": "http://127.0.0.1:1/v1", "context_window": "lots"}}}"#,
+    );
+    let rt = build(&["afi"], &[], &file);
+    let refusals = rt.refusals();
+    assert!(
+        refusals
+            .iter()
+            .any(|error| error.message.contains("context_window")),
+        "the file must name the key it cannot read: {refusals:?}"
+    );
+}

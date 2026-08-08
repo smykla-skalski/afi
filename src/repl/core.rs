@@ -55,6 +55,10 @@ pub(crate) struct TurnParams<'a> {
     pub shared: &'a Shared<'a>,
     pub force_final: bool,
     pub recovery_sampling: bool,
+    /// Whether the conversation carries on after this loop - see
+    /// `LoopRequest::session_persists`. A REPL turn sets it; a one-shot run does
+    /// not, because nothing reads the conversation once it has printed.
+    pub session_persists: bool,
 }
 
 /// Run one model loop without owning terminal/runtime lifecycle.
@@ -85,6 +89,7 @@ pub(crate) async fn run_turn_loop(
             env: params.shared.env,
             force_final: params.force_final,
             recovery_sampling: params.recovery_sampling,
+            session_persists: params.session_persists,
         },
         ui,
     )
@@ -224,6 +229,7 @@ impl ReplCore {
                 },
                 force_final: false,
                 recovery_sampling: false,
+                session_persists: true,
             },
             ui,
         )
@@ -341,6 +347,9 @@ async fn one_shot_run(
             },
             force_final: false,
             recovery_sampling: false,
+            // The answer is printed and the process exits, so a fold on the way
+            // out would buy a summary nothing ever reads.
+            session_persists: false,
         },
         ui,
     )

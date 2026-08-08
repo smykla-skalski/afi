@@ -214,6 +214,7 @@ pub(super) const TOP: &[Setting] = &[
         count,
     ),
     row("autocompress_percent", "AFI_AUTOCOMPRESS_PERCENT", percent),
+    row("context_window", "AFI_CONTEXT_WINDOW", wide_count),
     row("read_file_lines", "AFI_READ_FILE_LINES", whole),
     row("tool_result_chars", "AFI_TOOL_RESULT_CHARS", wide_count),
     row("max_model_turns", "AFI_MAX_MODEL_TURNS", count),
@@ -271,6 +272,7 @@ pub(super) const SOURCE: &[Setting] = &[
     mine("protocol", "PROTOCOL", protocol_name),
     row("app_name", "APP_NAME", text),
     row("app_url", "APP_URL", text),
+    row("context_window", "CONTEXT_WINDOW", wide_count),
     joins("extra_body", "EXTRA_BODY", object, Merge::Object),
 ];
 
@@ -280,6 +282,7 @@ pub(super) const SOURCE: &[Setting] = &[
 pub(super) const ANTHROPIC: &[Setting] = &[
     mine("base_url", "AFI_ANTHROPIC_BASE_URL", text),
     row("model", "AFI_ANTHROPIC_MODEL", text),
+    row("context_window", "AFI_ANTHROPIC_CONTEXT_WINDOW", wide_count),
     joins(
         "extra_body",
         "AFI_ANTHROPIC_EXTRA_BODY",
@@ -305,6 +308,7 @@ pub(super) const ANTHROPIC: &[Setting] = &[
 pub(super) const BEDROCK: &[Setting] = &[
     mine("base_url", "AFI_BEDROCK_BASE_URL", text),
     row("model", "AFI_BEDROCK_MODEL", text),
+    row("context_window", "AFI_BEDROCK_CONTEXT_WINDOW", wide_count),
     joins(
         "extra_body",
         "AFI_BEDROCK_EXTRA_BODY",

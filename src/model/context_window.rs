@@ -4,12 +4,21 @@
 //! Probe order depends on host locality:
 //! - Local (llama.cpp etc.): /v1/models meta -> /props -> overrun probe
 //! - Remote (Together, Z.ai, ...): overrun probe -> /v1/models -> /props
+//!
+//! None of that is on the request path. What a run actually resolves its window
+//! from is [`table`], a compiled model-to-window table an operator can override
+//! per source - a static fact about a model, learned without a round trip. The
+//! probes here answer the same question over the network and stay for a caller
+//! that wants to ask a server directly.
 
 use regex::Regex;
 use serde_json::Value;
 
 use crate::config::Source;
 use std::sync::LazyLock;
+
+pub mod table;
+pub use table::context_window_for;
 
 /// Pull `n_ctx` / `context_length` from GET /v1/models. llama.cpp stashes it
 /// under `data[0].meta.n_ctx`; some hosts expose `context_length` as a

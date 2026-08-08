@@ -18,6 +18,7 @@ mod runtime;
 mod sources;
 mod system_prompt;
 mod tools;
+mod window;
 pub use args::{ParsedArgs, parse_args};
 pub(crate) use bedrock::dns_suffix;
 pub use bedrock::{Bedrock, WebIdentity};

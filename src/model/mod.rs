@@ -37,11 +37,14 @@ pub const TURN_STALL: &str = "stall";
 /// a one-shot run exit 0 after printing an HTTP error.
 pub const TURN_FAILED: &str = "failed";
 
-/// How a turn ended: its TURN_* status, and why it failed when it did.
+/// How a turn ended: its TURN_* status, why it failed when it did, and how much
+/// context it was charged for.
 ///
 /// The status is what the retry loop branches on. The failure rides along because
 /// it has to reach the run summary, and the `ClientError` explaining it is gone by
-/// then - rendered to the ui and dropped.
+/// then - rendered to the ui and dropped. The token count rides along for the
+/// same kind of reason: the loop decides whether the next turn still fits, and the
+/// only authority on how full the context is is the provider that just counted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnOutcome {
     /// One of the `TURN_*` constants. Borrowed rather than owned, so a status
@@ -52,6 +55,11 @@ pub struct TurnOutcome {
     /// reverse. [`Self::error`] is the only read, and it covers a `TURN_FAILED`
     /// that reached here by some other route.
     error: Option<RunError>,
+    /// What the provider counted as this turn's prompt, `None` for a turn that
+    /// never got an answer to count. Private for the same reason as `error`:
+    /// [`Self::with_prompt_tokens`] is the only way in, so a count can only come
+    /// from a turn that actually reported one.
+    prompt_tokens: Option<u64>,
 }
 
 impl TurnOutcome {
@@ -66,6 +74,7 @@ impl TurnOutcome {
         Self {
             status,
             error: None,
+            prompt_tokens: None,
         }
     }
 
@@ -75,7 +84,30 @@ impl TurnOutcome {
         Self {
             status: TURN_FAILED,
             error: Some(error),
+            prompt_tokens: None,
         }
+    }
+
+    /// Record what the provider counted as this turn's prompt.
+    ///
+    /// Set once, by the turn that read the usage off the stream, whatever status
+    /// that turn ended on: a turn that was paid for has a context size worth
+    /// knowing even when it produced no answer.
+    #[must_use]
+    pub fn with_prompt_tokens(mut self, prompt_tokens: u64) -> Self {
+        self.prompt_tokens = Some(prompt_tokens);
+        self
+    }
+
+    /// How full the context was on this turn's request, `None` when the provider
+    /// reported nothing - a turn that never reached one, or one whose answer
+    /// carried no usage.
+    ///
+    /// Zero is reported as `None` rather than as a count: no request has an empty
+    /// prompt, so a zero is a provider that declined to say.
+    #[must_use]
+    pub fn prompt_tokens(&self) -> Option<u64> {
+        self.prompt_tokens.filter(|tokens| *tokens > 0)
     }
 
     /// Fail a turn and say so on the ui, in one sentence sent to both.
@@ -131,6 +163,7 @@ mod tests {
         let outcome = TurnOutcome {
             status: TURN_FAILED,
             error: None,
+            prompt_tokens: None,
         };
         let error = outcome.error().expect("a failure explains itself");
         assert_eq!(error.kind, ErrorKind::Internal);

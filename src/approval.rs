@@ -118,6 +118,51 @@ pub fn approval_display(state: &ApprovalState) -> &'static str {
     }
 }
 
+/// The approval state a run starts in: the `AFI_APPROVAL` variable first, then
+/// the `--approval` level, then a bare `--yolo`. Unknown levels warn and are
+/// ignored rather than refusing the run, because the fallback is the *stricter*
+/// posture - a typo prompts for everything instead of silently permitting it.
+///
+/// Here rather than in `config::runtime` because every piece it works with lives
+/// here, and it takes the two settings rather than the parsed command line so
+/// that stays true.
+#[must_use]
+pub fn starting_approval(
+    configured: Option<&str>,
+    flag: Option<&str>,
+    yolo: bool,
+) -> ApprovalState {
+    let mut approval = ApprovalState::default();
+    if let Some(val) = configured.filter(|v| !v.trim().is_empty()) {
+        if let Some(kind) = normalize_approval(val) {
+            apply_approval(&mut approval, kind, true);
+        } else {
+            eprintln!(
+                "  \u{2717} unknown AFI_APPROVAL={val:?} \
+                 (want all|low|medium|high|yolo); prompting for all actions"
+            );
+        }
+    }
+    if let Some(level) = flag {
+        if let Some(kind) = normalize_approval(level) {
+            apply_approval(&mut approval, kind, true);
+        } else {
+            eprintln!(
+                "  \u{2717} unknown --approval level {level:?} \
+                 (want all|low|medium|high|yolo); keeping {}",
+                approval_display(&approval)
+            );
+        }
+    }
+    if yolo {
+        // bare --yolo: short-circuit everything, never prompt. Does NOT touch
+        // default_approve_level (matches the Python --yolo path).
+        approval.yolo = true;
+        approval.approve_level = None;
+    }
+    approval
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

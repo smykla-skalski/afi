@@ -16,6 +16,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--summary json`                            | print a machine-readable run summary on stdout ([details](#run-summary)) |
 | `--summary-file <path>`                     | also write that summary to a path ([details](#writing-the-summary-to-a-file)) |
 | `--effort <low\|medium\|high\|xhigh\|max>`  | how hard the model is asked to think ([details](#reasoning-effort))  |
+| `--context-window <tokens>`                 | how much context the model holds ([details](#auto-compress))         |
 | `--system-prompt-file <path>`               | send these standing instructions to the model ([details](#system-prompt)) |
 | `--system-prompt-mode <replace\|append>`    | against the built-in prompt, default `replace` ([details](#system-prompt)) |
 | `--instructions <value>`                    | `project`, `none`, or paths to load standing rules from ([details](#project-instructions)) |
@@ -68,7 +69,8 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AWS_ROLE_ARN`                               | registers the same source with no key at all ([details](#bedrock-without-a-key)) |
 | `AFI_BACKEND`                                | set to `vllm` to disable llama.cpp-only recovery knobs               |
 | `AFI_HOME` / `AFI_SESSIONS_DIR`              | where session JSON files are stored                                  |
-| `AFI_AUTOCOMPRESS_PERCENT`                   | auto-compress threshold (default 85, 0=off)                          |
+| `AFI_AUTOCOMPRESS_PERCENT`                   | auto-compress threshold (default 85, 0=off) ([details](#auto-compress)) |
+| `AFI_CONTEXT_WINDOW` / `AFI_SOURCE_*_CONTEXT_WINDOW` | how much context the model holds ([details](#auto-compress)) |
 | `AFI_MAX_TOKENS`                             | token cap for normal streaming requests (default 16000)              |
 | `AFI_READ_FILE_LINES`                        | default lines returned by `read_file` (default 400)                  |
 | `AFI_TOOL_RESULT_CHARS`                      | per-tool-result char cap (default 20000)                             |
@@ -108,7 +110,7 @@ The project walk stops at the directory holding `.git`, so a file above the repo
       "base_url": "https://api.z.ai/api/paas/v4",
       "model": "glm-4.6"
     },
-    "local": { "base_url": "http://localhost:8080/v1" }
+    "local": { "base_url": "http://localhost:8080/v1", "context_window": 32768 }
   },
   "source_order": ["zai", "local"],
   "prices": {
@@ -312,6 +314,37 @@ The ceilings above belong to the wire formats, which are stable. **Individual mo
 On the Anthropic path one default gives way. `thinking` is sent as `disabled` unless [`AFI_ANTHROPIC_EXTRA_BODY`](#anthropic) says otherwise, and `claude-opus-5` rejects an explicit `disabled` above effort `high`; at `xhigh` and `max` the key is therefore omitted, leaving the model at its own default. Anything explicit in `EXTRA_BODY` is still sent as written, `disabled` included.
 
 **Thinking is charged against `max_tokens`, so the floor moves with it.** Anthropic caps thinking and visible text with one number, and afi's forced-final turn asks for only 2048. Whenever a request may think - because `EXTRA_BODY` turned it on, or because the effort is above `high` - that request's `max_tokens` is floored at 16000 rather than 4096, so the budget cannot go entirely on reasoning and leave nothing to say. Higher effort wants more than the floor, and `AFI_MAX_TOKENS` is how to give it (Anthropic's own guidance is 64000 at `xhigh` and `max`). A turn that ends with no answer at all now prints `FORCED FINAL RETURNED NO ANSWER`, exits 1, and reports `"ok": false` rather than a successful empty answer.
+
+## Auto-compress
+
+A long session eventually outgrows the model's context window. Rather than let the provider refuse a request for length, afi folds the older turns into a summary and carries on: the system message stays, roughly the last third of the conversation stays verbatim, and everything before it becomes one summary turn. `AFI_AUTOCOMPRESS_PERCENT` is how full the context has to get first, as a percentage - 85 by default, and `0` switches folding off.
+
+The fold happens after any turn whose usage crosses the threshold, so the next request already fits. It costs one request, which is billed like any other and counted in the [run summary](#run-summary)'s `requests`. Esc cancels it, and a fold that is cancelled, refused, or answered with nothing leaves the conversation exactly as it was - the next turn simply measures again.
+
+A percentage needs something to be a percentage *of*, and no provider reports its context window on the request path. afi resolves one from the first of these that answers:
+
+| where                                                     | for                                              |
+| --------------------------------------------------------- | ------------------------------------------------ |
+| `--context-window <tokens>`                               | every source this run touches                    |
+| `AFI_SOURCE_<NAME>_CONTEXT_WINDOW`                        | one named source                                 |
+| `AFI_ANTHROPIC_CONTEXT_WINDOW` / `AFI_BEDROCK_CONTEXT_WINDOW` | the built-in source of that name             |
+| `AFI_CONTEXT_WINDOW`                                      | every source that declares nothing of its own    |
+| a table compiled into afi                                 | the model ids it knows                           |
+
+The compiled table is keyed by provider-native model id, and it is deliberately literal: the same weights are served at different sizes by different hosts, so `glm-5.2` on Z.ai, `z-ai/glm-5.2` on OpenRouter, and `zai-org/GLM-5.2` on Together each get their own figure, and nothing is inferred from a family name. Bedrock's Region prefixes and version suffixes are normalized away, so `us.anthropic.claude-opus-5-v1:0` resolves like `anthropic.claude-opus-5`.
+
+**A model the table has never heard of leaves the window unknown, and a run with an unknown window does not fold.** That is the case for a local llama.cpp server, where the window is whatever `-c` was passed rather than anything about the weights. The run says so once, on stderr, naming the setting - silence would be indistinguishable from a session that simply never filled up.
+
+```bash
+# A local server started with -c 32768, so say so.
+AFI_SOURCE_LOCAL_CONTEXT_WINDOW=32768 afi
+# Or for one run, whatever the source says:
+afi --context-window 32768 -f task.txt
+```
+
+Declaring `0` turns folding off for that source alone, which is the difference between "do not compress this one" and `AFI_AUTOCOMPRESS_PERCENT=0`, which turns it off everywhere. A value that is not a whole number is ignored on a variable and falls through to the next one; on the flag it exits 2 without starting, since a flag typed for this run has nowhere to fall through to.
+
+One-shot runs (`-f`) skip the fold on the turn that produces the answer: the process is about to exit, so the summary would be bought and thrown away. Mid-run folds happen as normal, which is what keeps a long agentic run inside the window.
 
 ## Run summary
 

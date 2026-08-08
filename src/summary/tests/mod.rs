@@ -32,6 +32,12 @@ pub(in crate::summary) fn summary(ok: bool, answer: &str, usage: UsageTotals) ->
         effort: None,
         refused_tool_calls: RefusedToolCalls::default(),
         auth: Some(RunAuth::ApiKey),
+        sources: vec![SourceSpend {
+            source: "anthropic".to_string(),
+            usage,
+            cost_usd: None,
+            auth: Some(RunAuth::ApiKey),
+        }],
         system_prompt_mode: Some("builtin"),
         system_prompt_file: None,
     }
@@ -248,6 +254,105 @@ fn a_cost_without_usage_to_back_it_is_not_invented() {
     let mut run = summary(true, "x", UsageTotals::default());
     run.cost_usd = Some(1.0);
     assert_eq!(run.to_json()["usage"], Value::Null);
+}
+
+// --- what each source spent ---------------------------------------------------
+
+#[test]
+fn a_single_source_run_reads_the_same_as_it_always_did() {
+    // The breakdown is a key a consumer can ignore. Everything it was already
+    // reading has to keep the value it had, or an added field is a breaking one.
+    let json = summary(true, "x", totals(3)).to_json();
+    assert_eq!(json["source"], "anthropic");
+    assert_eq!(json["auth"]["mode"], "api_key");
+    assert_eq!(json["usage"]["total_tokens"], 4085 + 509 + 6837 + 2279);
+    // And the one entry says what the flat fields do, under the name that paid.
+    assert_eq!(json["sources"].as_array().expect("an array").len(), 1);
+    assert_eq!(json["sources"][0]["source"], json["source"]);
+    assert_eq!(json["sources"][0]["auth"], json["auth"]);
+}
+
+/// A run that spent 3 of its 4 requests on `local` and the last on `bedrock`,
+/// which is the case the run-level `auth` answers null for.
+fn switched_session() -> RunSummary<'static> {
+    let mut run = summary(true, "x", totals(3));
+    run.auth = None;
+    run.sources = vec![
+        SourceSpend {
+            source: "local".to_string(),
+            usage: totals(3),
+            cost_usd: Some(0.02),
+            auth: Some(RunAuth::ApiKey),
+        },
+        SourceSpend {
+            source: "bedrock".to_string(),
+            usage: UsageTotals {
+                input_tokens: 100,
+                requests: 1,
+                ..UsageTotals::default()
+            },
+            cost_usd: Some(0.000_5),
+            auth: Some(RunAuth::SigV4 {
+                region: "us-east-1",
+                access_key_id: "AKIAEXAMPLE",
+            }),
+        },
+    ];
+    run.usage = UsageTotals {
+        input_tokens: totals(3).input_tokens + 100,
+        requests: 4,
+        ..totals(3)
+    };
+    run
+}
+
+#[test]
+fn a_switched_session_reports_each_source_and_the_credential_that_paid_it() {
+    // Nothing else in the summary says that the personal key bought the first
+    // 4085 input tokens and the assumed role the last 100.
+    let json = switched_session().to_json();
+    assert_eq!(json["auth"], Value::Null, "no single credential paid");
+    assert_eq!(json["sources"][0]["source"], "local");
+    assert_eq!(json["sources"][0]["auth"]["mode"], "api_key");
+    assert_eq!(json["sources"][0]["usage"]["cost_usd"], 0.02);
+    assert_eq!(json["sources"][1]["source"], "bedrock");
+    assert_eq!(json["sources"][1]["auth"]["access_key_id"], "AKIAEXAMPLE");
+}
+
+#[test]
+fn the_breakdown_accounts_for_the_run_it_breaks_down() {
+    // The reason it is readable at all: it covers the same tokens the flat block
+    // does, so a consumer can sum one and check it against the other. A
+    // breakdown that does not add up leaves two figures charted and one wrong.
+    let json = switched_session().to_json();
+    let sources = json["sources"].as_array().expect("an array");
+    let summed = |field: &str| -> u64 {
+        sources
+            .iter()
+            .map(|entry| entry["usage"][field].as_u64().expect("a number"))
+            .sum()
+    };
+    assert_eq!(summed("total_tokens"), json["usage"]["total_tokens"]);
+    assert_eq!(summed("input_tokens"), json["usage"]["input_tokens"]);
+    assert_eq!(summed("requests"), json["usage"]["requests"]);
+}
+
+#[test]
+fn a_run_that_billed_nothing_breaks_down_into_nothing() {
+    // A refusal never reached a source, and a source that was configured and
+    // never sent a request has nothing to report. Both are the empty list.
+    let refused = RunSummary::refused("--disallowed-tools needs a value", ErrorKind::Policy);
+    assert_eq!(refused.to_json()["sources"], json!([]));
+
+    let mut failed = summary(false, "", UsageTotals::default());
+    failed.error = Some("HTTP 401: authentication_error");
+    failed.error_kind = Some(ErrorKind::Auth);
+    failed.sources = Vec::new();
+    let json = failed.to_json();
+    assert_eq!(json["sources"], json!([]));
+    // The credential it tried is still named, which is what a failed run has to
+    // show - the breakdown reports spend, and there was none.
+    assert_eq!(json["auth"]["mode"], "api_key");
 }
 
 // --- final answer extraction --------------------------------------------------

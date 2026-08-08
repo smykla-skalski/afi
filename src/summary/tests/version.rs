@@ -51,6 +51,7 @@ fn the_shape_the_version_stands_for_is_pinned() {
             "ok",
             "schema_version",
             "source",
+            "sources",
             "system_prompt",
             "tools",
             "usage",
@@ -93,7 +94,7 @@ fn the_types_the_shape_promises_are_pinned_too() {
     // content is: `error` and `error_kind` in `super`, `effort` beside the
     // source that resolved it.
     let json = summary(true, "done", totals(3)).to_json();
-    let pinned: [Pinned; 9] = [
+    let pinned: [Pinned; 10] = [
         ("schema_version", Value::is_u64, "a number"),
         ("ok", Value::is_boolean, "a boolean"),
         ("source", Value::is_string, "a string"),
@@ -102,6 +103,9 @@ fn the_types_the_shape_promises_are_pinned_too() {
         ("elapsed_secs", Value::is_f64, "a number"),
         ("tools", Value::is_array, "an array"),
         ("auth", Value::is_object, "an object"),
+        // An array on every run, empty when nothing was billed - a consumer
+        // iterates it without checking for null first.
+        ("sources", Value::is_array, "an array"),
         ("system_prompt", Value::is_object, "an object"),
     ];
     for (name, holds, expected) in pinned {

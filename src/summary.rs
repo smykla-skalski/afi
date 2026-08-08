@@ -28,10 +28,12 @@ mod auth;
 mod file;
 mod format;
 mod schema;
+mod spend;
 pub use auth::RunAuth;
 pub use file::{summary_path, writable, write_file};
 pub use format::SummaryFormat;
 pub use schema::SCHEMA_VERSION;
+pub use spend::SourceSpend;
 
 /// Why a run failed, as a closed set a caller can branch on.
 ///
@@ -152,6 +154,9 @@ pub struct RunSummary<'a> {
     /// The credential the run billed. `None` when no single one can be named:
     /// a run with no source at all, or a session that spent on two of them.
     pub auth: Option<RunAuth<'a>>,
+    /// What each source spent, for the session that `auth` cannot answer for.
+    /// Empty when nothing was billed - see [`SourceSpend`].
+    pub sources: Vec<SourceSpend<'a>>,
     /// How the run's system prompt was built: `builtin`, `replace`, or
     /// `append`. Reported for the same reason as `tools` - a job told to review
     /// under its own instructions and a job that fell back to afi's produce
@@ -198,8 +203,10 @@ impl<'a> RunSummary<'a> {
             // refused nothing.
             refused_tool_calls: RefusedToolCalls::default(),
             // No credential to name, for the reason `source` is none: the run was
-            // refused before it resolved one.
+            // refused before it resolved one, and nothing was billed to break
+            // down either.
             auth: None,
+            sources: Vec::new(),
             // Nothing was sent, so there is no prompt to name - including when the
             // prompt itself is what the run was refused over.
             system_prompt_mode: None,
@@ -231,6 +238,7 @@ impl<'a> RunSummary<'a> {
             "tools": self.tools,
             "effort": self.effort,
             "auth": RunAuth::json(self.auth),
+            "sources": SourceSpend::json(&self.sources),
             "system_prompt": self.system_prompt_json(),
         })
     }
@@ -253,28 +261,47 @@ impl<'a> RunSummary<'a> {
         if self.usage.is_empty() && self.refused_tool_calls.is_empty() {
             return Value::Null;
         }
-        let mut usage = json!({
-            "input_tokens": self.usage.input_tokens,
-            "output_tokens": self.usage.output_tokens,
-            "cache_read_tokens": self.usage.cache_read_tokens,
-            "cache_write_tokens": self.usage.cache_write_tokens,
-            "reasoning_tokens": self.usage.reasoning_tokens,
-            "total_tokens": self.usage.total_tokens(),
-            "requests": self.usage.requests,
-            "refused_tool_calls": self.refused_tool_calls.total(),
-            "refused_by_policy": self.refused_tool_calls.by_policy,
-            "refused_by_approval": self.refused_tool_calls.by_approval,
-        });
-        // Inserted rather than declared in the object above, because an unpriced
-        // run must have no key here at all: a null would read as "the run was
-        // free" to anything summing the field.
-        if let (Some(cost), Some(fields)) = (self.cost_usd, usage.as_object_mut())
-            && let Some(number) = Number::from_f64(cost)
-        {
-            fields.insert("cost_usd".to_string(), Value::Number(number));
+        let mut usage = counts_json(&self.usage, self.cost_usd);
+        // Only the run has these. A refusal is counted where it was refused,
+        // which is a dispatch that knows of no request and therefore of no
+        // source to bill it to - see `crate::model::usage_totals`.
+        if let Some(fields) = usage.as_object_mut() {
+            let refused = self.refused_tool_calls;
+            fields.insert("refused_tool_calls".to_string(), refused.total().into());
+            fields.insert("refused_by_policy".to_string(), refused.by_policy.into());
+            fields.insert(
+                "refused_by_approval".to_string(),
+                refused.by_approval.into(),
+            );
         }
         usage
     }
+}
+
+/// The counts every usage block reports, and the money when the caller priced
+/// them.
+///
+/// Shared by the run's flat block and by each source's share of it, so the two
+/// cannot come to report the same tokens under different names.
+fn counts_json(usage: &UsageTotals, cost_usd: Option<f64>) -> Value {
+    let mut counts = json!({
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "total_tokens": usage.total_tokens(),
+        "requests": usage.requests,
+    });
+    // Inserted rather than declared in the object above, because an unpriced run
+    // must have no key here at all: a null would read as "the run was free" to
+    // anything summing the field.
+    if let (Some(cost), Some(fields)) = (cost_usd, counts.as_object_mut())
+        && let Some(number) = Number::from_f64(cost)
+    {
+        fields.insert("cost_usd".to_string(), Value::Number(number));
+    }
+    counts
 }
 
 /// Trim float noise so the field is stable enough to assert on.

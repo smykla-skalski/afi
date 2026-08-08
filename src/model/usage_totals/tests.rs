@@ -110,6 +110,8 @@ fn the_process_accumulator_records_and_resets() {
     reset();
     names_every_source_that_was_billed();
     reset();
+    keeps_sources_apart_while_still_totalling();
+    reset();
 }
 
 fn records_one_model() {
@@ -182,6 +184,57 @@ fn names_every_source_that_was_billed() {
         vec!["local".to_string(), "anthropic".to_string()],
         "first-seen order, and a source that spent twice is named once"
     );
+}
+
+/// The split the summary attributes spend with: each source keeps its own
+/// counts, and folding them back together has to reproduce the flat totals a
+/// consumer already reads.
+fn keeps_sources_apart_while_still_totalling() {
+    record("local", "shared-model", &usage(100, 20, 0, 0));
+    record("anthropic", "shared-model", &usage(300, 40, 0, 0));
+    record("local", "cheap", &usage(7, 1, 0, 0));
+    record("local", "shared-model", &usage(50, 10, 0, 0));
+
+    let by_source = snapshot_by_source();
+    let named: Vec<_> = by_source
+        .iter()
+        .map(|(source, by_model)| {
+            let totals = total(by_model);
+            (source.clone(), totals.input_tokens, totals.requests)
+        })
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            ("local".to_string(), 157, 3),
+            ("anthropic".to_string(), 300, 1),
+        ],
+        "sources keep first-seen order and accumulate on their own"
+    );
+
+    // A model two sources both served is one rate, so pricing sees one entry
+    // however many sources routed to it.
+    let folded: Vec<_> = by_model(&by_source)
+        .iter()
+        .map(|(model, totals)| (model.clone(), totals.input_tokens, totals.requests))
+        .collect();
+    assert_eq!(
+        folded,
+        vec![
+            ("shared-model".to_string(), 450, 3),
+            ("cheap".to_string(), 7, 1),
+        ]
+    );
+
+    // The invariant the breakdown is only worth reading with: every entry adds
+    // up to the flat counts, because each request is billed to exactly one
+    // source.
+    let per_source = by_source.iter().fold(UsageTotals::default(), |mut acc, e| {
+        acc.merge(&total(&e.1));
+        acc
+    });
+    assert_eq!(per_source, snapshot());
+    assert_eq!(snapshot().requests, 4);
 }
 
 #[test]

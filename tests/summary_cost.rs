@@ -97,6 +97,26 @@ fn a_priced_run_reports_what_it_cost() {
 }
 
 #[test]
+fn one_source_spending_everything_breaks_down_into_the_flat_block() {
+    // The compatibility half of the breakdown: a run that never switched has one
+    // entry saying what the flat fields say, under the name that paid, so a
+    // consumer reading those needs no change at all.
+    let addr = billing_server(&billed_usage(), 4);
+    let home = TempDir::new().unwrap();
+    let summary = summary_of(&run_afi(&home, addr, Some(RATES), None));
+
+    let sources = summary["sources"].as_array().expect("an array");
+    assert_eq!(sources.len(), 1, "one source was billed: {summary}");
+    assert_eq!(sources[0]["source"], "local");
+    assert_eq!(sources[0]["auth"], summary["auth"]);
+    // The entry is the flat block itself, minus the three refusal counts - those
+    // belong to calls that were never sent and so to no source.
+    let mut flat = summary["usage"].as_object().expect("an object").clone();
+    flat.retain(|name, _| !name.starts_with("refused"));
+    assert_eq!(sources[0]["usage"], Value::Object(flat));
+}
+
+#[test]
 fn a_run_that_worked_writes_the_same_object_to_the_summary_file() {
     // The `--summary-file` tests elsewhere all run against a closed port, which
     // leaves the case a workflow actually collects unproven: a run that answered,

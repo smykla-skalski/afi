@@ -9,8 +9,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::config::{Runtime, Source};
-use crate::model::usage_totals;
-use crate::summary::{self, RunError, RunSummary, final_answer};
+use crate::model::usage_totals::{self, BySource};
+use crate::summary::{self, RunError, RunSummary, SourceSpend, final_answer};
 use crate::term::{MessageKind, UserInterface};
 
 /// Report the finished run wherever the caller asked for it. Returns whether the
@@ -53,10 +53,11 @@ fn build<'a>(
     error: Option<&'a RunError>,
     elapsed: Duration,
 ) -> RunSummary<'a> {
-    // One read of the accumulator, folded for the counts and priced for the
-    // cost. Reading it twice would let the two describe different instants.
-    let by_model = usage_totals::snapshot_by_model();
-    let billed = usage_totals::billed_sources();
+    // One read of the accumulator: folded for the counts, priced for the cost,
+    // and split for the per-source breakdown. Reading it three times would let
+    // the three describe different instants.
+    let billed = usage_totals::snapshot_by_source();
+    let by_model = usage_totals::by_model(&billed);
     RunSummary {
         ok: error.is_none(),
         error: error.map(|error| error.message.as_str()),
@@ -78,11 +79,39 @@ fn build<'a>(
         effort: rt.active_source().and_then(Source::resolved_effort),
         refused_tool_calls: usage_totals::refused_tool_calls(),
         auth: billing_source(rt, &billed).map(Source::run_auth),
+        sources: spend_by_source(rt, &billed),
         // A run that reaches here resolved its prompt; the refusal path reports
         // `None` instead - see `RunSummary::refused`.
         system_prompt_mode: Some(rt.prompt().mode()),
         system_prompt_file: rt.prompt().file(),
     }
+}
+
+/// What each billed source spent, priced on its own.
+///
+/// Per source *and* per model, because the two questions have different answers:
+/// rates belong to the model, and budgets belong to the source. Pricing each
+/// source over the models it actually served keeps a switched session's figures
+/// right even when both sources ran the same model, or one source ran two.
+///
+/// Each figure is rounded to the micro-dollar on its own, so entries can sum to
+/// a hair under or over the run's `cost_usd`, which rounds once over everything.
+/// A source whose model has no rate simply carries no figure, and takes the run
+/// total with it - the same rule the flat field already follows - while the
+/// other entries keep theirs.
+fn spend_by_source<'a>(rt: &'a Runtime, billed: &BySource) -> Vec<SourceSpend<'a>> {
+    billed
+        .iter()
+        .map(|(source, by_model)| SourceSpend {
+            source: source.clone(),
+            usage: usage_totals::total(by_model),
+            cost_usd: rt
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.run_cost_usd(by_model)),
+            auth: rt.sources.get(source).map(Source::run_auth),
+        })
+        .collect()
 }
 
 /// The source whose credential paid for the run, if exactly one did.
@@ -98,10 +127,10 @@ fn build<'a>(
 /// neither is reported. Nothing billed at all falls back to the active source:
 /// no spend can be misattributed when there was none, and a failed run still
 /// shows which credential it tried.
-fn billing_source<'a>(rt: &'a Runtime, billed: &[String]) -> Option<&'a Source> {
-    match billed {
+fn billing_source<'a>(rt: &'a Runtime, billed: &BySource) -> Option<&'a Source> {
+    match billed.as_slice() {
         [] => rt.active_source(),
-        [only] => rt.sources.get(only),
+        [(only, _)] => rt.sources.get(only),
         _ => None,
     }
 }

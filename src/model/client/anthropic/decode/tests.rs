@@ -386,6 +386,9 @@ fn the_run_summary_reports_those_writes_separately() {
         effort: None,
         refused_tool_calls: RefusedToolCalls::default(),
         auth: Some(RunAuth::ApiKey),
+        // The flat counts are what this asserts on; the per-source breakdown
+        // reports the same tokens and is proved where it is built.
+        sources: Vec::new(),
         system_prompt_mode: Some("builtin"),
         system_prompt_file: None,
     }

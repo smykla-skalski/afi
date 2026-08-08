@@ -5,18 +5,21 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::approval::ApprovalState;
 use crate::config::Source;
+use crate::cost::{self, Verdict};
 use crate::model::client::ChatClient;
 use crate::model::compress::{AutoCompress, Fold, fold_after_turn};
+use crate::model::recovery::BUDGET_CONVERGE_NUDGE;
 use crate::model::turn::{TurnRequest, model_turn};
 use crate::model::{
     ModelConfig, TURN_DONE, TURN_EMPTY, TURN_ESC, TURN_FORCE_FINAL, TURN_STREAM_CUT, TURN_TOOL,
     TurnOutcome,
 };
 use crate::risk::RiskClassifier;
+use crate::summary::ErrorKind;
 use crate::term::{MessageKind, UserInterface};
 
 /// Bundles the parameters for the model turn loop.
@@ -166,6 +169,9 @@ pub async fn run_model_turn_loop(
     };
 
     while steps < max_turns {
+        if let Some(outcome) = budget_gate(messages, ui) {
+            return outcome;
+        }
         let outcome = model_turn(messages, build_request(&lr, &c, c.force_final), ui).await;
         c.force_final = false;
         c.recovery_sampling = false;
@@ -180,6 +186,11 @@ pub async fn run_model_turn_loop(
     }
 
     if steps >= max_turns && !c.force_final {
+        // The forced final is one more billed request, so the budget answers
+        // first. `Soft` has already latched by now, so no second note can exist.
+        if let Some(outcome) = budget_gate(messages, ui) {
+            return outcome;
+        }
         ui.message(
             MessageKind::Warning,
             format!("MODEL TURN LIMIT ({max_turns}) - forcing final"),
@@ -189,4 +200,56 @@ pub async fn run_model_turn_loop(
         return model_turn(messages, build_request(&lr, &c, true), ui).await;
     }
     TurnOutcome::new(TURN_DONE)
+}
+
+/// Enforce the run's budget before the request that would spend more.
+///
+/// `None` means carry on. The soft threshold is one of those: it says something
+/// and returns `None`, because the point of a soft threshold is that the run
+/// continues.
+///
+/// Called at the top of the loop body rather than after a turn, because that is
+/// the first place the previous turn's spend is visible - `finalize_turn`
+/// records into the ledger before `model_turn` returns. afi cannot know what a
+/// turn will cost before it runs; what a cap can promise is that the turn
+/// *after* the one that crossed never happens.
+fn budget_gate(messages: &mut Vec<Value>, ui: &mut dyn UserInterface) -> Option<TurnOutcome> {
+    match cost::checkpoint() {
+        Verdict::Unlimited | Verdict::Under => None,
+        Verdict::Soft(at) => {
+            ui.message(
+                MessageKind::Warning,
+                format!(
+                    "COST SOFT BUDGET ({}) - telling the model to converge",
+                    at.describe()
+                ),
+            );
+            // Appended rather than folded into the last user turn. That one is
+            // several tool calls back, and rewriting it invalidates the cached
+            // prefix - so the note announcing the budget would itself be billed
+            // a full cache write of the whole history, which on a large context
+            // costs more than the gap it is trying to land inside.
+            messages.push(json!({
+                "role": "user",
+                "content": format!("[Runtime note: {BUDGET_CONVERGE_NUDGE}]"),
+            }));
+            None
+        }
+        Verdict::Hard(at) => {
+            ui.message(
+                MessageKind::Warning,
+                format!("COST HARD BUDGET ({}) - stopping the run", at.describe()),
+            );
+            // No forced final. That is one more billed request, and the headroom
+            // the hard ratio leaves is a fraction of the cap rather than the
+            // price of a turn - at 0.95 on a $1 budget it is $0.05, which does
+            // not buy a request against a large context. Whatever the model
+            // already said out loud is in `messages`, and `summary::final_answer`
+            // walks back to it.
+            Some(TurnOutcome::new(TURN_DONE))
+        }
+        // Not a cap hit: the measurement failed, so the run failed. A budget that
+        // cannot be measured must never be treated as no budget.
+        Verdict::Unpriceable(why) => Some(TurnOutcome::report(ui, why, ErrorKind::Input)),
+    }
 }

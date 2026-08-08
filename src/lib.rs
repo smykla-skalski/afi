@@ -13,6 +13,7 @@ pub mod approval;
 pub mod atomic;
 pub mod cli;
 pub mod config;
+pub mod cost;
 pub mod envfile;
 pub mod log;
 pub mod memory;

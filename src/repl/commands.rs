@@ -14,7 +14,7 @@ use super::core::session_meta;
 use super::failure::RunFailure;
 use super::{NO_ACTIVE_SOURCE, Shared, TurnParams, header, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
-use crate::config::{Runtime, nested};
+use crate::config::{Runtime, Source, nested};
 use crate::memory::{list_memories, remember_memories};
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
 use crate::model::{ModelConfig, TurnOutcome};
@@ -164,10 +164,33 @@ fn cmd_source(rt: &mut Runtime, arg: &str, ui: Ui<'_>) {
     let model_override = source_parts.get(1).map(ToString::to_string);
     if rt.switch_source(name, model_override.as_deref()) {
         say(ui, Info, format!("Switched to {name}"));
+        if let Some(warning) = budget_switch_note(rt) {
+            say(ui, Warning, warning);
+        }
         ui.header(header(rt));
     } else {
         say(ui, Error, format!("Unknown source {name:?}"));
     }
+}
+
+/// What to say when `/source` lands a budgeted run somewhere it cannot be priced.
+///
+/// It cannot refuse, because the operator typed it and the REPL has no refusal
+/// channel, so it lands before the next prompt is sent rather than after the
+/// turn that would stop the run. The stop itself is the turn loop's, at its next
+/// checkpoint, and it is a failure rather than a cap hit: a budget that cannot
+/// be measured must never be treated as no budget.
+fn budget_switch_note(rt: &Runtime) -> Option<String> {
+    let budget = rt.budget?;
+    let why = rt.pricing.as_ref()?.unpriceable(
+        rt.active_source().and_then(Source::price_provider),
+        rt.model.as_deref()?,
+    )?;
+    Some(format!(
+        "{} cannot be enforced here: {why} - the next turn will stop the run rather \
+         than spend under a cap afi cannot measure",
+        budget.named()
+    ))
 }
 
 fn cmd_save(rt: &Runtime, messages: &mut Vec<Value>, session_id: &str, arg: &str, ui: Ui<'_>) {

@@ -51,6 +51,14 @@ pub struct UsageTotals {
     /// provider gave no numbers for is not counted, so a caller can tell "nothing
     /// ran" from "the provider said nothing".
     pub requests: u64,
+    /// How many of the tokens above afi counted rather than was told.
+    ///
+    /// A subset marker over the five classes, not a sixth class, so it is
+    /// deliberately *not* part of [`Self::total_tokens`]. Zero is the ordinary
+    /// case. Anything else means part of any cost computed from these counts
+    /// rests on afi's arithmetic rather than the provider's - which is why a
+    /// budgeted run stops rather than capping against it.
+    pub estimated_tokens: u64,
 }
 
 impl UsageTotals {
@@ -69,6 +77,16 @@ impl UsageTotals {
             .saturating_add(usage.cache_write_tokens);
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
         self.requests = self.requests.saturating_add(1);
+        if usage.estimated {
+            self.estimated_tokens = self.estimated_tokens.saturating_add(
+                usage
+                    .input_tokens
+                    .saturating_add(usage.output_tokens)
+                    .saturating_add(usage.cache_read_tokens)
+                    .saturating_add(usage.cache_write_tokens)
+                    .saturating_add(usage.reasoning_tokens),
+            );
+        }
     }
 
     /// Fold another model's totals in, for the run-wide flat counts.
@@ -83,10 +101,12 @@ impl UsageTotals {
             .saturating_add(other.cache_write_tokens);
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
         self.requests = self.requests.saturating_add(other.requests);
+        self.estimated_tokens = self.estimated_tokens.saturating_add(other.estimated_tokens);
     }
 
     /// Every token the run was billed for. The five fields are disjoint, so this
-    /// is their sum rather than a separate provider figure.
+    /// is their sum rather than a separate provider figure. `estimated_tokens`
+    /// is a marker over those five and is deliberately not among them.
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens
@@ -100,6 +120,13 @@ impl UsageTotals {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.requests == 0
+    }
+
+    /// Whether any of these counts is afi's own arithmetic rather than a
+    /// provider's. A spend cap cannot hold over one of these.
+    #[must_use]
+    pub fn has_estimates(&self) -> bool {
+        self.estimated_tokens > 0
     }
 }
 

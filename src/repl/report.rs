@@ -10,6 +10,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::config::{Runtime, Source, nested};
+use crate::cost;
 use crate::model::usage_totals::{self, Billed, UsageTotals};
 use crate::pricing::Pricing;
 use crate::summary::{self, RunError, RunSummary, SourceSpend, final_answer};
@@ -78,6 +79,10 @@ fn build<'a>(
         // the requests carried - including a level `EXTRA_BODY` set by hand.
         effort: rt.active_source().and_then(Source::resolved_effort),
         refused_tool_calls: usage_totals::refused_tool_calls(),
+        // Read the same way the counts beside it are: the guard is
+        // process-wide because a budget is a fact about the run, so nothing
+        // had to be threaded here to ask it.
+        budget: cost::outcome(),
         auth: billing_source(&rt.sources, rt.active_source(), &by_source).map(Source::run_auth),
         sources: spend_by_source(&rt.sources, rt.pricing.as_ref(), &by_source),
         // A run that reaches here resolved its prompt; the refusal path reports

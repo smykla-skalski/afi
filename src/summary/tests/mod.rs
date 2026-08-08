@@ -14,6 +14,7 @@ pub(in crate::summary) fn totals(requests: u64) -> UsageTotals {
         cache_write_tokens: 2279,
         reasoning_tokens: 0,
         requests,
+        estimated_tokens: 0,
     }
 }
 
@@ -41,6 +42,7 @@ pub(in crate::summary) fn summary(ok: bool, answer: &str, usage: UsageTotals) ->
         answer,
         usage,
         cost_usd: None,
+        budget: None,
         elapsed_secs: 14.2341,
         tools: known_tool_names().to_vec(),
         effort: None,

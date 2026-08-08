@@ -21,6 +21,17 @@ pub const EMPTY_TURN_NUDGE: &str = "Your previous response was empty - you produ
     emit the next tool call now. If you have everything you need, use the final_answer tool \
     (or reply with a concise visible answer). Do not repeat the empty turn.";
 
+/// Nudge for the soft budget threshold: converge on what matters most.
+///
+/// One line, once, and it is a signal rather than a standing instruction - any
+/// later nudge strips it, and nothing depends on it surviving. What stops the
+/// run is the turn loop, not this. Telling the model at all is only worth doing
+/// because output that wraps up beats output cut off mid-thought.
+pub const BUDGET_CONVERGE_NUDGE: &str = "This run is near its spending limit and will be \
+    stopped shortly. Do not start new lines of investigation. Finish the highest-value \
+    work you have already begun, report what you are confident in, and say plainly what \
+    you did not get to. Prefer a short complete answer over a thorough incomplete one.";
+
 /// Nudge for `/recover` (manual recovery).
 pub const MANUAL_RECOVERY_NUDGE: &str = "Manual recovery requested by the user because the \
     previous response appeared off the rails or corrupted. Discard any corrupted \

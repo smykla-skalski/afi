@@ -130,6 +130,13 @@ pub struct NormalizedUsage {
     /// this; every other provider leaves it 0.
     pub cache_write_tokens: u64,
     pub reasoning_tokens: u64,
+    /// Whether afi counted these itself because nobody else did.
+    ///
+    /// A request is wholly counted or wholly reported. It rides on the counts
+    /// rather than being inferred from their shape because the one thing a
+    /// caller must never do with an estimate is present it as a measurement -
+    /// and a spend cap must never act on one as though it were.
+    pub estimated: bool,
 }
 
 /// Pull a normalized usage dict from whichever the server gave us: the
@@ -158,6 +165,7 @@ pub fn normalize_usage(
             // and reporting one here would be an invention.
             cache_write_tokens: 0,
             reasoning_tokens: 0,
+            estimated: false,
         });
     }
 
@@ -181,10 +189,17 @@ pub fn normalize_usage(
             cache_read_tokens: cache_read_n,
             cache_write_tokens: cache_write_n,
             reasoning_tokens: reasoning_n,
+            estimated: false,
         });
     }
 
-    // Fallback: estimate from client-side char count (~4 chars/token).
+    // Nobody counted this request, so afi counts it - at one character in four,
+    // which is wrong in a known direction and says so. `estimated` is not
+    // decoration: it is what stops a spend cap acting on a guess, and what tells
+    // a reader of the summary that part of `cost_usd` is afi's arithmetic.
+    //
+    // `input_tokens` stays 0 because afi has no honest figure for it, which is
+    // exactly why a budgeted run cannot be measured on this path.
     if fallback_chars > 0 {
         let estimated = (fallback_chars / 4).max(1);
         return Some(NormalizedUsage {
@@ -193,6 +208,7 @@ pub fn normalize_usage(
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             reasoning_tokens: 0,
+            estimated: true,
         });
     }
 

@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use super::{Ui, say};
 use crate::config::Runtime;
+use crate::cost;
 use crate::model::client::ReqwestClient;
 use crate::model::compress::{self as model_compress, COMPRESS_KEEP, Summary, plan_compression};
 use crate::term::MessageKind::{Error, Info, Warning};
@@ -38,6 +39,16 @@ pub(super) async fn cmd_compress(
         say(ui, Error, "No active source");
         return;
     };
+    // The one slash command that spends. A run whose cap has already stopped the
+    // turn loop must not be able to spend more by typing a command.
+    if !cost::may_spend() {
+        say(
+            ui,
+            Warning,
+            "COST HARD BUDGET - /compress is a billed request and this run has stopped spending",
+        );
+        return;
+    }
 
     let cancel = ui.start_activity("Compressing context");
     let summary = model_compress::fetch(client, source, model, plan.prompt(), &cancel).await;

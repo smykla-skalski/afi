@@ -6,6 +6,10 @@
 
 use super::shape::sorted_keys;
 use super::{summary, totals};
+use std::collections::HashMap;
+
+use crate::config::resolve_budget_for_tests;
+use crate::cost::Outcome;
 use crate::model::usage_totals::UsageTotals;
 use crate::summary::{ErrorKind, RunSummary, SCHEMA_VERSION};
 use serde_json::Value;
@@ -66,6 +70,7 @@ fn the_shape_the_version_stands_for_is_pinned() {
         [
             "cache_read_tokens",
             "cache_write_tokens",
+            "estimated_tokens",
             "input_tokens",
             "output_tokens",
             "reasoning_tokens",
@@ -117,8 +122,84 @@ fn the_types_the_shape_promises_are_pinned_too() {
         assert!(holds(&json[name]), "{name} must stay {expected}: {json}");
     }
     // Every count in `usage` is one a consumer adds up or charts, so a string
-    // among them is the change that would be read as a zero.
+    // among them is the change that would be read as a zero. Two keys are not
+    // counts and are excepted by name rather than by the fixture happening not
+    // to set them: `cost_usd` is money, and `budget` is an object.
     for (name, count) in json["usage"].as_object().expect("an object") {
+        if name == "cost_usd" || name == "budget" {
+            continue;
+        }
         assert!(count.is_u64(), "usage.{name} must stay a number: {count}");
+    }
+}
+
+#[test]
+fn an_uncapped_run_carries_no_budget_key_at_all() {
+    // The key's presence is itself the answer to "was this run capped", so a
+    // consumer branches on it and it has to mean exactly that.
+    let uncapped = summary(true, "x", totals(3)).to_json();
+    assert!(
+        uncapped["usage"].get("budget").is_none(),
+        "an uncapped run must carry no budget key at all: {uncapped}"
+    );
+}
+
+#[test]
+fn the_budget_block_is_pinned_too() {
+    let mut run = summary(true, "x", totals(3));
+    run.budget = Some(capped());
+    let json = run.to_json();
+    assert_eq!(
+        sorted_keys(&json["usage"]["budget"]),
+        [
+            "converged",
+            "hard_ratio",
+            "limit_usd",
+            "soft_ratio",
+            "spent_usd",
+            "stopped",
+        ]
+    );
+    let block = &json["usage"]["budget"];
+    let reported = [
+        block["limit_usd"].as_f64(),
+        block["soft_ratio"].as_f64(),
+        block["hard_ratio"].as_f64(),
+        block["spent_usd"].as_f64(),
+    ];
+    assert_eq!(
+        reported,
+        [Some(5.0), Some(0.8), Some(0.95), Some(4.83)],
+        "the cap, both thresholds as they were written, and the spend: {json}"
+    );
+    assert_eq!(
+        [block["stopped"].as_bool(), block["converged"].as_bool()],
+        [Some(true), Some(true)]
+    );
+}
+
+#[test]
+fn a_cap_that_never_measured_anything_reports_a_null_rather_than_a_zero() {
+    // A run stopped because it could not be priced spent an unknown amount, and
+    // a zero there would read as "this run was free" - the same failure
+    // `cost_usd` is absent to avoid.
+    let mut run = summary(true, "x", totals(3));
+    run.budget = Some(Outcome {
+        spent: None,
+        stopped: false,
+        ..capped()
+    });
+    let json = run.to_json();
+    assert!(json["usage"]["budget"]["spent_usd"].is_null(), "{json}");
+    assert_eq!(json["usage"]["budget"]["stopped"], false);
+}
+
+/// A $5 cap that stopped a run at $4.83, at the default thresholds.
+fn capped() -> Outcome {
+    Outcome {
+        budget: resolve_budget_for_tests("5", &HashMap::new()),
+        spent: Some(4_830_000),
+        converged: true,
+        stopped: true,
     }
 }

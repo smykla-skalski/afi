@@ -20,6 +20,7 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::approval::Level;
 use crate::config::{Runtime, nested};
+use crate::cost;
 use crate::pricing::refresh;
 use crate::summary::{ErrorKind, RunError};
 use crate::term::plain::PlainUi;
@@ -181,6 +182,7 @@ fn styled_approval(rt: &Runtime) -> String {
 pub fn run_repl(rt: &mut Runtime) -> bool {
     let mut owned = rt.clone();
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
+    cost::install(owned.budget, owned.pricing.as_ref());
     start_price_refresh(&runtime, &owned);
     if let Some(prompt_file) = owned.prompt_file.clone() {
         restore_prompt_resume(&mut owned);
@@ -212,6 +214,7 @@ pub fn run_repl(rt: &mut Runtime) -> bool {
 #[must_use]
 pub fn run_one_shot(prompt_file: &str, rt: &Runtime) -> bool {
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
+    cost::install(rt.budget, rt.pricing.as_ref());
     start_price_refresh(&runtime, rt);
     let mut ui = plain_ui_for(rt);
     runtime.block_on(run_one_shot_async(prompt_file, rt, &mut ui))

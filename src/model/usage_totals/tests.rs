@@ -8,6 +8,7 @@ fn usage(input: u64, output: u64, cache: u64, reasoning: u64) -> NormalizedUsage
         cache_read_tokens: cache,
         cache_write_tokens: 0,
         reasoning_tokens: reasoning,
+        estimated: false,
     }
 }
 
@@ -28,6 +29,7 @@ fn requests_accumulate_rather_than_overwrite() {
             cache_write_tokens: 0,
             reasoning_tokens: 0,
             requests: 3,
+            estimated_tokens: 0,
         }
     );
 }
@@ -43,6 +45,7 @@ fn cache_writes_accumulate_on_their_own_rather_than_into_input() {
         cache_read_tokens: 0,
         cache_write_tokens: 2279,
         reasoning_tokens: 0,
+        estimated: false,
     });
     totals.add(&NormalizedUsage {
         input_tokens: 50,
@@ -50,6 +53,7 @@ fn cache_writes_accumulate_on_their_own_rather_than_into_input() {
         cache_read_tokens: 2279,
         cache_write_tokens: 900,
         reasoning_tokens: 0,
+        estimated: false,
     });
     assert_eq!(totals.cache_write_tokens, 3179);
     assert_eq!(totals.input_tokens, 150, "writes must stay out of input");
@@ -65,6 +69,7 @@ fn total_is_the_sum_of_five_disjoint_fields() {
         cache_read_tokens: 300,
         cache_write_tokens: 50,
         reasoning_tokens: 4,
+        estimated: false,
     });
     assert_eq!(totals.total_tokens(), 474);
 }
@@ -92,6 +97,7 @@ fn saturates_instead_of_overflowing() {
         cache_read_tokens: u64::MAX,
         cache_write_tokens: u64::MAX,
         reasoning_tokens: u64::MAX,
+        estimated: false,
     };
     totals.add(&nonsense);
     totals.add(&usage(10, 10, 10, 10));
@@ -125,6 +131,7 @@ fn records_one_model() {
             cache_read_tokens: 9,
             cache_write_tokens: 5,
             reasoning_tokens: 1,
+            estimated: false,
         },
     );
     let snap = snapshot();
@@ -207,6 +214,7 @@ fn merging_two_models_totals_adds_every_field() {
             cache_write_tokens: 0,
             reasoning_tokens: 44,
             requests: 2,
+            estimated_tokens: 0,
         }
     );
 }
@@ -227,4 +235,54 @@ fn a_refusal_total_is_its_two_halves_and_nothing_more() {
     // Nothing refused is empty, which is what keeps `usage` null for a run that
     // never started - see `RunSummary::refused`.
     assert!(RefusedToolCalls::default().is_empty());
+}
+
+#[test]
+fn an_estimate_is_counted_apart_from_the_totals_it_is_part_of() {
+    // `estimated_tokens` is a marker over the five classes rather than a sixth
+    // one, so it says how much of the run afi counted itself without changing
+    // what the run is billed for.
+    let mut totals = UsageTotals::default();
+    totals.add(&usage(100, 20, 0, 0));
+    totals.add(&NormalizedUsage {
+        input_tokens: 0,
+        output_tokens: 300,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        estimated: true,
+    });
+    assert_eq!(
+        totals.total_tokens(),
+        420,
+        "100 + 20 + 300, and no double count"
+    );
+    assert_eq!(totals.estimated_tokens, 300, "only the guessed request");
+    assert!(totals.has_estimates());
+}
+
+#[test]
+fn a_run_nobody_guessed_at_carries_no_marker() {
+    let mut totals = UsageTotals::default();
+    totals.add(&usage(100, 20, 30, 4));
+    assert_eq!(totals.estimated_tokens, 0);
+    assert!(!totals.has_estimates());
+}
+
+#[test]
+fn merging_carries_the_marker_with_the_counts() {
+    let mut left = UsageTotals::default();
+    left.add(&NormalizedUsage {
+        input_tokens: 0,
+        output_tokens: 10,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        estimated: true,
+    });
+    let mut right = UsageTotals::default();
+    right.add(&usage(1, 2, 0, 0));
+    left.merge(&right);
+    assert_eq!(left.estimated_tokens, 10, "the guess survives the fold");
+    assert_eq!(left.total_tokens(), 13);
 }

@@ -160,7 +160,7 @@ fn keeps_models_apart_while_still_totalling() {
     record("local", "cheap", &usage(100, 20, 0, 0));
     record("local", "dear", &usage(300, 40, 0, 0));
     record("local", "cheap", &usage(50, 10, 0, 0));
-    let by_model: Vec<_> = snapshot_by_model()
+    let by_model: Vec<_> = by_model(&snapshot_by_source())
         .iter()
         .map(|(model, totals)| (model.clone(), totals.input_tokens, totals.requests))
         .collect();

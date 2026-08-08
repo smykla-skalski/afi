@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use super::{billing_source, spend_by_source};
-use crate::config::{Runtime, Source};
+use crate::config::Source;
 use crate::model::usage_totals::{ByModel, BySource, UsageTotals};
 use crate::pricing::Pricing;
 use crate::summary::RunAuth;
@@ -20,30 +20,28 @@ use crate::summary::RunAuth;
 const RATES: &str = r#"{"model-one": {"input": 1, "output": 2},
                         "model-two": {"input": 10, "output": 20}}"#;
 
-/// A runtime with two sources that authenticate differently, so an entry that
-/// took its credential from the wrong source cannot pass for the right one.
+/// Two sources that authenticate differently, so an entry that took its
+/// credential from the wrong source cannot pass for the right one.
 ///
-/// The sources are installed rather than discovered from an environment: what is
-/// under test is the derivation, and building it out of `AFI_SOURCE_*` variables
-/// would put source discovery and the config schema in the way of it.
+/// Built here rather than discovered from an environment: what is under test is
+/// the derivation, and going through `AFI_SOURCE_*` would put source discovery
+/// and the config schema in the way of it.
 ///
 /// `third` is configured and never billed - the ledger, not the configuration,
 /// decides who gets an entry.
-fn two_sources() -> Runtime {
-    let mut rt = Runtime::build(&["afi".to_string()], HashMap::new(), None);
-    rt.sources = [
+fn two_sources() -> HashMap<String, Source> {
+    [
         source("first", Some("sk-first")),
         source("second", None),
         source("third", Some("sk-third")),
     ]
     .into_iter()
     .map(|source| (source.name.clone(), source))
-    .collect();
-    // The session ends on `second`, so anything that reads a credential or a
-    // count off the active source rather than the billed one names this.
-    rt.active = Some("second".to_string());
-    rt.pricing = Pricing::parse(Some(RATES));
-    rt
+    .collect()
+}
+
+fn rates() -> Option<Pricing> {
+    Pricing::parse(Some(RATES))
 }
 
 /// A source holding a static key, or none at all - the llama.cpp case, which
@@ -87,8 +85,8 @@ fn each_entry_takes_its_counts_and_its_credential_from_its_own_source() {
         spent("first", "model-one", totals(MILLION, MILLION, 1)),
         spent("second", "model-two", totals(7, 3, 2)),
     ];
-    let rt = two_sources();
-    let spend = spend_by_source(&rt, &billed);
+    let sources = two_sources();
+    let spend = spend_by_source(&sources, rates().as_ref(), &billed);
 
     let named: Vec<(&str, u64, u64)> = spend
         .iter()
@@ -120,8 +118,8 @@ fn each_source_is_priced_at_the_rates_of_the_models_it_served() {
         spent("first", "model-one", totals(MILLION, MILLION, 1)),
         spent("second", "model-two", totals(MILLION, MILLION, 1)),
     ];
-    let rt = two_sources();
-    let spend = spend_by_source(&rt, &billed);
+    let sources = two_sources();
+    let spend = spend_by_source(&sources, rates().as_ref(), &billed);
     // 1M x $1 + 1M x $2, and 1M x $10 + 1M x $20.
     assert_eq!(spend[0].cost_usd, Some(3.0));
     assert_eq!(spend[1].cost_usd, Some(30.0));
@@ -139,8 +137,8 @@ fn a_source_that_served_two_models_bills_each_at_its_own_rate() {
             ("model-two".to_string(), totals(MILLION, 0, 1)),
         ],
     )];
-    let rt = two_sources();
-    let spend = spend_by_source(&rt, &billed);
+    let sources = two_sources();
+    let spend = spend_by_source(&sources, rates().as_ref(), &billed);
     assert_eq!(spend.len(), 1);
     assert_eq!(spend[0].usage.input_tokens, 2 * MILLION, "the counts fold");
     assert_eq!(spend[0].cost_usd, Some(11.0), "the rates do not");
@@ -154,8 +152,8 @@ fn an_unpriced_model_drops_that_entrys_figure_and_leaves_the_others_standing() {
         spent("first", "model-one", totals(MILLION, 0, 1)),
         spent("second", "unpriced-model", totals(MILLION, 0, 1)),
     ];
-    let rt = two_sources();
-    let spend = spend_by_source(&rt, &billed);
+    let sources = two_sources();
+    let spend = spend_by_source(&sources, rates().as_ref(), &billed);
     assert_eq!(spend[0].cost_usd, Some(1.0));
     assert_eq!(spend[1].cost_usd, None);
 }
@@ -164,18 +162,25 @@ fn an_unpriced_model_drops_that_entrys_figure_and_leaves_the_others_standing() {
 fn nothing_billed_is_no_entries_at_all() {
     // Not one entry per configured source: three are configured here and none of
     // them spent, and an entry of zeros would read as a source that ran for free.
-    let rt = two_sources();
-    assert!(spend_by_source(&rt, &BySource::new()).is_empty());
+    let sources = two_sources();
+    assert!(spend_by_source(&sources, rates().as_ref(), &BySource::new()).is_empty());
 }
 
 #[test]
 fn the_run_level_credential_is_the_one_that_paid_when_exactly_one_did() {
     // The rule the breakdown exists beside: one spender is attributable, two are
     // not, and nothing billed falls back to the source the run was pointed at.
-    let rt = two_sources();
+    // The session ends on `second`, so reading the credential off the active
+    // source rather than the billed one names that instead.
+    let sources = two_sources();
+    let active = sources.get("second");
+    let named = |billed: &BySource| {
+        billing_source(&sources, active, billed).map(|source| source.name.clone())
+    };
+
     let one = vec![spent("first", "model-one", totals(1, 1, 1))];
     assert_eq!(
-        billing_source(&rt, &one).map(|source| source.name.clone()),
+        named(&one),
         Some("first".to_string()),
         "the source that spent, not the active one"
     );
@@ -184,10 +189,10 @@ fn the_run_level_credential_is_the_one_that_paid_when_exactly_one_did() {
         spent("first", "model-one", totals(1, 1, 1)),
         spent("second", "model-two", totals(1, 1, 1)),
     ];
-    assert!(billing_source(&rt, &two).is_none(), "no single credential");
+    assert_eq!(named(&two), None, "no single credential paid");
 
     assert_eq!(
-        billing_source(&rt, &BySource::new()).map(|source| source.name.clone()),
+        named(&BySource::new()),
         Some("second".to_string()),
         "nothing billed reports the credential the run tried"
     );

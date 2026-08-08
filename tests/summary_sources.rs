@@ -77,18 +77,6 @@ fn run_switched_session(prices: Option<&str>) -> Output {
     run_session(prices, "hi\n/source second\nhi again\n/quit\n")
 }
 
-/// What one entry attributes: the source, what it spent, what that cost, and
-/// the credential that paid - read as a tuple so the whole breakdown is one
-/// assertion rather than a column of them.
-fn attributed(entry: &Value) -> (&str, u64, f64, &str) {
-    (
-        entry["source"].as_str().expect("a source name"),
-        entry["usage"]["input_tokens"].as_u64().expect("a count"),
-        entry["usage"]["cost_usd"].as_f64().expect("a figure"),
-        entry["auth"]["mode"].as_str().expect("a credential mode"),
-    )
-}
-
 #[test]
 fn each_source_reports_its_own_counts_its_own_cost_and_its_own_credential() {
     let summary = summary_of(&run_switched_session(Some(RATES)));
@@ -100,8 +88,20 @@ fn each_source_reports_its_own_counts_its_own_cost_and_its_own_credential() {
 
     // The attribution the flat block cannot make: this budget bought these
     // tokens, at this model's rates - in the order the run first spent on them.
+    // Read as tuples so the whole breakdown is one assertion rather than a
+    // column of them.
     let sources = summary["sources"].as_array().expect("an array");
-    let reported: Vec<(&str, u64, f64, &str)> = sources.iter().map(attributed).collect();
+    let reported: Vec<(&str, u64, f64, &str)> = sources
+        .iter()
+        .map(|entry| {
+            (
+                entry["source"].as_str().expect("a source name"),
+                entry["usage"]["input_tokens"].as_u64().expect("a count"),
+                entry["usage"]["cost_usd"].as_f64().expect("a figure"),
+                entry["auth"]["mode"].as_str().expect("a credential mode"),
+            )
+        })
+        .collect();
     assert_eq!(
         reported,
         vec![

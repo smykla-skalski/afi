@@ -150,7 +150,7 @@ pub fn record(source: &str, model: &str, usage: &NormalizedUsage) {
 /// The run's totals so far, every source and model folded together.
 #[must_use]
 pub fn snapshot() -> UsageTotals {
-    total(&snapshot_by_model())
+    total(&by_model(&snapshot_by_source()))
 }
 
 /// Fold a per-model snapshot into one set of counts.
@@ -182,13 +182,8 @@ pub fn snapshot_by_source() -> BySource {
         .clone()
 }
 
-/// The run's totals split by model, for anything that prices them.
-#[must_use]
-pub fn snapshot_by_model() -> ByModel {
-    by_model(&snapshot_by_source())
-}
-
-/// Fold a per-source snapshot into one entry per model.
+/// Fold a per-source snapshot into one entry per model, for anything that
+/// prices them.
 ///
 /// Two sources serving the same model land in one entry, because a rate belongs
 /// to the model and not to whoever routed to it. Order is first-seen within each

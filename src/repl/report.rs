@@ -4,12 +4,14 @@
 //! a path under `--summary-file`. Both render the same object, built once, so
 //! the file and the pipe can never describe different runs.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::config::{Runtime, Source};
-use crate::model::usage_totals::{self, BySource};
+use crate::model::usage_totals::{self, ByModel, BySource};
+use crate::pricing::Pricing;
 use crate::summary::{self, RunError, RunSummary, SourceSpend, final_answer};
 use crate::term::{MessageKind, UserInterface};
 
@@ -68,18 +70,15 @@ fn build<'a>(
         usage: usage_totals::total(&by_model),
         // Priced per model, so a session that switched models mid-run is still
         // billed at each one's own rates.
-        cost_usd: rt
-            .pricing
-            .as_ref()
-            .and_then(|pricing| pricing.run_cost_usd(&by_model)),
+        cost_usd: priced(rt.pricing.as_ref(), &by_model),
         elapsed_secs: elapsed.as_secs_f64(),
         tools: rt.tool_policy.permitted(),
         // Read off the source rather than the flag, so what is reported is what
         // the requests carried - including a level `EXTRA_BODY` set by hand.
         effort: rt.active_source().and_then(Source::resolved_effort),
         refused_tool_calls: usage_totals::refused_tool_calls(),
-        auth: billing_source(rt, &billed).map(Source::run_auth),
-        sources: spend_by_source(rt, &billed),
+        auth: billing_source(&rt.sources, rt.active_source(), &billed).map(Source::run_auth),
+        sources: spend_by_source(&rt.sources, rt.pricing.as_ref(), &billed),
         // A run that reaches here resolved its prompt; the refusal path reports
         // `None` instead - see `RunSummary::refused`.
         system_prompt_mode: Some(rt.prompt().mode()),
@@ -99,19 +98,30 @@ fn build<'a>(
 /// A source whose model has no rate simply carries no figure, and takes the run
 /// total with it - the same rule the flat field already follows - while the
 /// other entries keep theirs.
-fn spend_by_source<'a>(rt: &'a Runtime, billed: &BySource) -> Vec<SourceSpend<'a>> {
+///
+/// Takes the two things it reads rather than the whole `Runtime`, so what it
+/// depends on is in its signature and a test can hand it either one.
+fn spend_by_source<'a>(
+    sources: &'a HashMap<String, Source>,
+    pricing: Option<&Pricing>,
+    billed: &BySource,
+) -> Vec<SourceSpend<'a>> {
     billed
         .iter()
         .map(|(source, by_model)| SourceSpend {
             source: source.clone(),
             usage: usage_totals::total(by_model),
-            cost_usd: rt
-                .pricing
-                .as_ref()
-                .and_then(|pricing| pricing.run_cost_usd(by_model)),
-            auth: rt.sources.get(source).map(Source::run_auth),
+            cost_usd: priced(pricing, by_model),
+            auth: sources.get(source).map(Source::run_auth),
         })
         .collect()
+}
+
+/// What a set of per-model counts cost, or nothing when the caller configured no
+/// rates. Shared by the run's figure and each source's, so the two cannot come
+/// to price the same tokens by different routes.
+fn priced(pricing: Option<&Pricing>, by_model: &ByModel) -> Option<f64> {
+    pricing.and_then(|pricing| pricing.run_cost_usd(by_model))
 }
 
 /// The source whose credential paid for the run, if exactly one did.
@@ -127,10 +137,14 @@ fn spend_by_source<'a>(rt: &'a Runtime, billed: &BySource) -> Vec<SourceSpend<'a
 /// neither is reported. Nothing billed at all falls back to the active source:
 /// no spend can be misattributed when there was none, and a failed run still
 /// shows which credential it tried.
-fn billing_source<'a>(rt: &'a Runtime, billed: &BySource) -> Option<&'a Source> {
+fn billing_source<'a>(
+    sources: &'a HashMap<String, Source>,
+    active: Option<&'a Source>,
+    billed: &BySource,
+) -> Option<&'a Source> {
     match billed.as_slice() {
-        [] => rt.active_source(),
-        [(only, _)] => rt.sources.get(only),
+        [] => active,
+        [(only, _)] => sources.get(only),
         _ => None,
     }
 }

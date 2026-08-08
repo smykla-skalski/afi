@@ -332,23 +332,12 @@ fn a_switched_session_reports_each_source_and_the_credential_that_paid_it() {
     assert_eq!(json["sources"][1]["auth"]["access_key_id"], "AKIAEXAMPLE");
 }
 
-#[test]
-fn the_breakdown_accounts_for_the_run_it_breaks_down() {
-    // The reason it is readable at all: it covers the same tokens the flat block
-    // does, so a consumer can sum one and check it against the other. A
-    // breakdown that does not add up leaves two figures charted and one wrong.
-    let json = switched_session().to_json();
-    let sources = json["sources"].as_array().expect("an array");
-    let summed = |field: &str| -> u64 {
-        sources
-            .iter()
-            .map(|entry| entry["usage"][field].as_u64().expect("a number"))
-            .sum()
-    };
-    assert_eq!(summed("total_tokens"), json["usage"]["total_tokens"]);
-    assert_eq!(summed("input_tokens"), json["usage"]["input_tokens"]);
-    assert_eq!(summed("requests"), json["usage"]["requests"]);
-}
+// The invariant a reader looks for here - that the entries sum to the flat block
+// - is not asserted in this file. A fixture writes both sides, so the assertion
+// would only prove the fixture author added up. It is proved where the two are
+// actually derived from one another: `usage_totals::tests` folds a real ledger,
+// `repl::report::tests` derives the entries from one, and
+// `tests/summary_sources.rs` sums them off a real run's stdout.
 
 #[test]
 fn a_run_that_billed_nothing_breaks_down_into_nothing() {

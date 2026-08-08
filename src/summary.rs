@@ -265,15 +265,10 @@ impl<'a> RunSummary<'a> {
         // Only the run has these. A refusal is counted where it was refused,
         // which is a dispatch that knows of no request and therefore of no
         // source to bill it to - see `crate::model::usage_totals`.
-        if let Some(fields) = usage.as_object_mut() {
-            let refused = self.refused_tool_calls;
-            fields.insert("refused_tool_calls".to_string(), refused.total().into());
-            fields.insert("refused_by_policy".to_string(), refused.by_policy.into());
-            fields.insert(
-                "refused_by_approval".to_string(),
-                refused.by_approval.into(),
-            );
-        }
+        let refused = self.refused_tool_calls;
+        usage["refused_tool_calls"] = refused.total().into();
+        usage["refused_by_policy"] = refused.by_policy.into();
+        usage["refused_by_approval"] = refused.by_approval.into();
         usage
     }
 }
@@ -293,13 +288,11 @@ fn counts_json(usage: &UsageTotals, cost_usd: Option<f64>) -> Value {
         "total_tokens": usage.total_tokens(),
         "requests": usage.requests,
     });
-    // Inserted rather than declared in the object above, because an unpriced run
+    // Assigned rather than declared in the object above, because an unpriced run
     // must have no key here at all: a null would read as "the run was free" to
     // anything summing the field.
-    if let (Some(cost), Some(fields)) = (cost_usd, counts.as_object_mut())
-        && let Some(number) = Number::from_f64(cost)
-    {
-        fields.insert("cost_usd".to_string(), Value::Number(number));
+    if let Some(number) = cost_usd.and_then(Number::from_f64) {
+        counts["cost_usd"] = Value::Number(number);
     }
     counts
 }

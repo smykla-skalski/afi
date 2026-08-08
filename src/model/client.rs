@@ -31,14 +31,17 @@ pub type ChatCompletionStream =
 
 mod anthropic;
 mod bedrock;
+mod budgeted;
 mod expiry;
 mod identity;
 mod openai;
 mod redact;
 mod sse;
+
 use anthropic::TokenCache;
 use anthropic::thinking::strip_history;
 use bedrock::sts::CredentialCache;
+pub use budgeted::Budgeted;
 use redact::{Credential, Redactor};
 
 pub(crate) use anthropic::thinking::{THINKING_HISTORY_KEY, thinking_disabled};
@@ -136,6 +139,10 @@ pub enum ClientError {
     /// a bug rather than something a caller can fix.
     #[error("{0}")]
     Internal(String),
+    /// The run has spent its budget, so this request was never opened. Not a
+    /// provider failure and not a bug - the cap doing what it was asked to.
+    #[error("{0}")]
+    Budget(String),
 }
 
 impl ClientError {
@@ -149,6 +156,10 @@ impl ClientError {
             Self::Stream(_) | Self::Parse(_) => ErrorKind::ProviderStream,
             Self::Auth(_) => ErrorKind::Auth,
             Self::Internal(_) => ErrorKind::Internal,
+            // The run was told what it may spend and this call would exceed it -
+            // the same shape as a tool the policy rules out, and the same answer
+            // a caller wants: do not retry, the invocation said so.
+            Self::Budget(_) => ErrorKind::Policy,
         }
     }
 }

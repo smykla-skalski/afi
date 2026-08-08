@@ -12,13 +12,13 @@
 mod common;
 
 use std::io::Write;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::endpoint::{Bodies, serve};
+use common::endpoint::{Bodies, endpoint};
 use common::summary_of;
 
 /// $1.00 of input per million tokens, and every reply reports exactly a
@@ -70,12 +70,12 @@ fn reports_nothing() -> String {
 }
 
 /// An endpoint that answers every request the same way, recording each one.
+///
+/// Through `common::endpoint::endpoint`, which owns the listener and the thread:
+/// what this test needs is a reply that ignores the request body, so the count
+/// it asserts on is the number of requests afi chose to open and nothing else.
 fn endless(reply: fn() -> String) -> (SocketAddr, Bodies) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a port must bind");
-    let addr = listener.local_addr().expect("the port must be readable");
-    let bodies: Bodies = Bodies::default();
-    serve(listener, &bodies, move |_| reply());
-    (addr, bodies)
+    endpoint(move |_| reply())
 }
 
 fn run_afi(home: &TempDir, addr: SocketAddr, env: &[(&str, &str)]) -> Output {

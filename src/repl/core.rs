@@ -14,7 +14,7 @@ use super::resume::resume_session;
 use super::{CommandResult, NO_ACTIVE_SOURCE, header};
 use crate::approval::ApprovalState;
 use crate::config::{Runtime, Source, SystemPrompt, nested};
-use crate::model::client::ReqwestClient;
+use crate::model::client::{Budgeted, ReqwestClient};
 use crate::model::compress::{AutoCompress, fold_after_turn};
 use crate::model::turn::{LoopRequest, run_model_turn_loop};
 use crate::model::{ModelConfig, TurnOutcome};
@@ -33,7 +33,7 @@ use crate::term::{MessageKind, UserInterface};
 /// behind for a credential the previous turn had already paid for. On a busy
 /// account that is also afi throttling itself.
 pub(crate) struct Shared<'a> {
-    pub client: &'a ReqwestClient,
+    pub client: &'a Budgeted<ReqwestClient>,
     /// The merged environment the run was configured from, which is not the
     /// process environment - nothing copies `~/.env` or `AFI_ENV_FILE` into that
     /// one.
@@ -96,7 +96,9 @@ pub(crate) struct ReplCore {
     messages: Vec<Value>,
     /// One client for the whole session, so the credential caches on it are
     /// worth having. See [`Shared`].
-    client: ReqwestClient,
+    /// One client for the whole session, with the run's budget in front of
+    /// it - see [`Budgeted`]. Nothing can open a billed request around it.
+    client: Budgeted<ReqwestClient>,
     /// Set by any turn that failed outright, so the session's exit code and
     /// summary reflect the whole run rather than only its last turn.
     failure: RunFailure,
@@ -131,7 +133,7 @@ impl ReplCore {
             dir,
             session_id,
             messages,
-            client: ReqwestClient::new(),
+            client: Budgeted::new(ReqwestClient::new()),
             failure: RunFailure::default(),
         }
     }

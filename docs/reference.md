@@ -504,9 +504,9 @@ Three cases lose a block rather than risk the turn: a stream cut before the sign
 
 ## Bedrock
 
-Amazon Bedrock's open-weight models are reached through its OpenAI-compatible `/v1/chat/completions`, so afi sends the same request shape and reads the same SSE stream it does everywhere else. What differs is the credential: Bedrock takes no static key header and signs each request with AWS SigV4 instead.
+Amazon Bedrock's open-weight models are reached through its OpenAI-compatible `/openai/v1/chat/completions`, so afi sends the same request shape and reads the same SSE stream it does everywhere else. What differs is the credential: Bedrock takes no static key header and signs each request with AWS SigV4 instead.
 
-Set AWS credentials and a Region and a `bedrock` source registers itself, defaulting to `https://bedrock-runtime.<region>.amazonaws.com/v1` and `zai.glm-5`.
+Set AWS credentials and a Region and a `bedrock` source registers itself, defaulting to `https://bedrock-runtime.<region>.amazonaws.com/openai/v1` and `zai.glm-5`. Keep the `/openai` prefix on any override: Bedrock serves nothing at `/v1` and answers `UnknownOperationException` there, which surfaces as a parse failure rather than a rejection because the routing layer replies in the Query protocol rather than as an SSE stream.
 
 | env var                                        | what it does                                                    |
 | ------------------------------------------------ | --------------------------------------------------------------- |

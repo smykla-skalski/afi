@@ -100,12 +100,15 @@ fn three_missing_variables_read_as_a_sentence() {
     );
 }
 
+/// The path is pinned, not just the host. `/v1` shipped once and Bedrock serves
+/// nothing there - it answers `UnknownOperationException` for every model - so
+/// the whole url is asserted rather than the Region interpolation alone.
 #[test]
 fn the_region_names_the_endpoint() {
     let bedrock = Bedrock::from_env(&env(&[REGION]));
     assert_eq!(
         bedrock.base_url().as_deref(),
-        Some("https://bedrock-runtime.us-east-1.amazonaws.com/v1")
+        Some("https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1")
     );
     assert_eq!(Bedrock::default().base_url(), None);
 }
@@ -122,7 +125,7 @@ fn a_china_region_gets_the_china_suffix() {
     let bedrock = Bedrock::from_env(&env(&[("AWS_REGION", "cn-north-1")]));
     assert_eq!(
         bedrock.base_url().as_deref(),
-        Some("https://bedrock-runtime.cn-north-1.amazonaws.com.cn/v1")
+        Some("https://bedrock-runtime.cn-north-1.amazonaws.com.cn/openai/v1")
     );
 }
 

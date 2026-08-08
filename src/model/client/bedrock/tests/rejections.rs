@@ -14,6 +14,7 @@ fn reject(status: u16, error_type: &str, body: &str) -> ClientError {
         status,
         error_type: Some(error_type.to_string()),
         body: body.to_string(),
+        federating: false,
     })
 }
 
@@ -135,6 +136,7 @@ fn a_body_echoing_the_prompt_is_never_classified() {
         status: 400,
         error_type: None,
         body: echoed,
+        federating: false,
     });
     let message = error.to_string();
     assert!(!message.contains("throttled"), "got {message}");
@@ -156,6 +158,7 @@ fn a_headerless_403_is_not_called_an_entitlement_problem() {
         status: 403,
         error_type: None,
         body: "<html>403 Forbidden</html>".to_string(),
+        federating: false,
     });
     assert_eq!(error.to_string(), "HTTP 403: <html>403 Forbidden</html>");
 }
@@ -169,11 +172,12 @@ fn a_headerless_429_is_still_a_throttle() {
         status: 429,
         error_type: None,
         body: String::new(),
+        federating: false,
     });
     assert_eq!(error.to_string(), "HTTP 429: AWS throttled the request");
 }
 
-/// The credentials are read once at startup, so re-selecting the source hands
+/// A static credential is read once at startup, so re-selecting the source hands
 /// back the same expired struct. The message has to say so.
 #[test]
 fn the_credential_message_names_the_restart() {
@@ -183,6 +187,30 @@ fn the_credential_message_names_the_restart() {
         r#"{"message":"The security token included in the request is expired"}"#,
     );
     assert!(error.to_string().contains("needs a restart"), "got {error}");
+}
+
+/// A federated source re-assumes the role on its own, so the restart advice is
+/// not merely unhelpful there - it is wrong, and it costs whoever is holding the
+/// run the one thing the message was for. AWS says the same `ExpiredTokenException`
+/// either way, so only the mode can tell them apart.
+#[test]
+fn a_federated_source_is_not_told_to_restart() {
+    let error = rejection(&Rejection {
+        model: "zai.glm-5",
+        tools_sent: true,
+        status: 403,
+        error_type: Some("ExpiredTokenException".to_string()),
+        body: r#"{"message":"The security token included in the request is expired"}"#.to_string(),
+        federating: true,
+    });
+    let message = error.to_string();
+    assert!(!message.contains("needs a restart"), "got {message}");
+    assert!(message.contains("restart changes nothing"), "got {message}");
+    assert!(message.contains("revoked"), "got {message}");
+    assert!(
+        message.contains("AWS rejected the credentials"),
+        "the verdict itself does not change: {message}"
+    );
 }
 
 /// AWS returns a bodyless 4xx on some denials.
@@ -261,6 +289,7 @@ fn a_request_without_tools_gets_no_hint() {
         status: 400,
         error_type: Some("ValidationException".to_string()),
         body: r#"{"message":"Malformed input request"}"#.to_string(),
+        federating: false,
     });
     assert_eq!(error.to_string(), "HTTP 400: Malformed input request");
 }
@@ -306,6 +335,25 @@ fn the_reference_quotes_the_messages_this_module_produces() {
     assert!(
         doc.contains(expired),
         "the documented credential row is not the message produced: {expired}"
+    );
+
+    // Both halves of the credential message, because the reference documents
+    // both and the federated one is the half that was wrong for a release.
+    let federated = flat(
+        &rejection(&Rejection {
+            model: "zai.glm-5",
+            tools_sent: false,
+            status: 403,
+            error_type: Some("ExpiredTokenException".to_string()),
+            body: String::new(),
+            federating: true,
+        })
+        .to_string(),
+    );
+    let federated = federated.strip_prefix("HTTP 403: ").unwrap_or(&federated);
+    assert!(
+        doc.contains(federated),
+        "the documented federated credential row is not the message produced: {federated}"
     );
 
     assert!(

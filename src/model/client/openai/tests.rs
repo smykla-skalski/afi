@@ -3,7 +3,7 @@
 //! endpoint on this protocol.
 
 use super::*;
-use crate::config::Bedrock;
+use crate::config::{Bedrock, Protocol};
 use crate::model::client::THINKING_HISTORY_KEY;
 use serde_json::json;
 
@@ -32,6 +32,7 @@ fn bedrock_source() -> Source {
         access_key_id: Some("AKIDEXAMPLE".to_string()),
         secret_access_key: Some("wJalrXUtnFEMI".to_string()),
         session_token: None,
+        web_identity: None,
     })))
 }
 

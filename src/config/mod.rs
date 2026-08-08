@@ -18,10 +18,14 @@ mod sources;
 mod system_prompt;
 mod tools;
 pub use args::{ParsedArgs, parse_args};
-pub use bedrock::Bedrock;
+pub(crate) use bedrock::dns_suffix;
+pub use bedrock::{Bedrock, WebIdentity};
 pub use effort::Effort;
 pub use file::{FileSettings, Origin, config_files};
-pub use protocol::{Federation, IdentitySource, NOOP_KEY, Protocol, is_placeholder};
+pub use protocol::{
+    ANTHROPIC_IDENTITY, AWS_IDENTITY, Federation, Identity, IdentitySource, IdentityVars, NOOP_KEY,
+    Protocol, is_placeholder,
+};
 pub use runtime::Runtime;
 pub use sources::discover_sources;
 pub use system_prompt::SystemPrompt;
@@ -179,10 +183,7 @@ impl Source {
             // Ahead of the placeholder guard below: this protocol has no static
             // key to store, so `api_key` holds the placeholder even though the
             // run is fully credentialed and billed to an AWS account.
-            Protocol::Bedrock(bedrock) => RunAuth::SigV4 {
-                region: bedrock.region.as_deref().unwrap_or_default(),
-                access_key_id: bedrock.access_key_id.as_deref().unwrap_or_default(),
-            },
+            Protocol::Bedrock(bedrock) => bedrock.run_auth(),
             // The llama.cpp case: `Source::new` stores the placeholder when
             // nothing was configured, so a keyless local server would otherwise
             // claim a credential it never had.

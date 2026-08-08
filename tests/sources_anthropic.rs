@@ -9,7 +9,7 @@ mod common;
 use std::fs;
 use std::path::PathBuf;
 
-use afi::config::{IdentitySource, Protocol};
+use afi::config::{ANTHROPIC_IDENTITY, Identity, IdentitySource, Protocol};
 
 const LOCAL: (&str, &str) = ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1");
 
@@ -207,7 +207,10 @@ fn federation_identity_from_an_env_file_reaches_the_source() {
     };
     assert_eq!(
         federation.identity,
-        Some(IdentitySource::File(PathBuf::from("/run/secrets/oidc"))),
+        Some(Identity {
+            vars: ANTHROPIC_IDENTITY,
+            source: IdentitySource::File(PathBuf::from("/run/secrets/oidc")),
+        }),
         "the identity source must come from the merged env map"
     );
 }

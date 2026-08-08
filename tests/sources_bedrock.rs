@@ -1,4 +1,7 @@
-//! Registration, endpoint derivation, and the refusals for a Bedrock source.
+//! Registration, endpoint derivation, and the refusals for a Bedrock source
+//! signing with a static key. The role-assuming half is in
+//! `sources_bedrock_role`, split off only to keep both files under the
+//! repository's per-file line cap.
 //!
 //! Every case goes through `common::build`, which takes an explicit env map and
 //! never reads the real shell env or `~/.env`, so an `AWS_*` variable in the
@@ -6,22 +9,15 @@
 
 mod common;
 
-use afi::Runtime;
-use afi::config::{Bedrock, Protocol};
+use afi::config::Protocol;
+use common::bedrock_of;
+
 use afi::summary::ErrorKind;
 
 const LOCAL: (&str, &str) = ("AFI_SOURCE_LOCAL_BASE_URL", "http://localhost:8080/v1");
 const KEY: (&str, &str) = ("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE");
 const SECRET: (&str, &str) = ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI");
 const REGION: (&str, &str) = ("AWS_REGION", "us-east-1");
-
-/// The credentials of a Bedrock source, or a panic naming what it is instead.
-fn bedrock_of(rt: &Runtime, name: &str) -> Bedrock {
-    match &rt.sources[name].protocol {
-        Protocol::Bedrock(bedrock) => (**bedrock).clone(),
-        other => panic!("source {name} is on {other:?}, not Bedrock"),
-    }
-}
 
 // --- the built-in source ------------------------------------------------------
 

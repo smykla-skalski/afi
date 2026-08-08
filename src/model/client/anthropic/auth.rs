@@ -9,19 +9,17 @@
 //! `Source::new` stores [`NOOP_KEY`] whenever no key was configured, the bearer
 //! modes must omit the header entirely rather than send a placeholder.
 
-use std::collections::HashMap;
-use std::fs;
 use std::time::{Duration, Instant};
 
+use reqwest::Client;
 use reqwest::header::HeaderMap;
-use reqwest::{Client, StatusCode, Url};
 use serde_json::Value;
-use tokio::sync::RwLock;
 
-use crate::config::{Federation, IdentitySource, Protocol, Source, is_placeholder};
+use crate::config::{ANTHROPIC_IDENTITY, Federation, Identity, Protocol, Source, is_placeholder};
+use crate::model::client::expiry::{Expiring, deadline};
+use crate::model::client::identity::{fetch, json_string_field, refused_credential};
 use crate::model::client::{
-    BODY_PREVIEW_CHARS, ClientError, Credential, Redactor, into_header_map, transport_error,
-    transport_error_at,
+    ClientError, Credential, Redactor, into_header_map, transport_error, transport_error_at,
 };
 
 /// Pinned API version. Anthropic requires this on every request.
@@ -30,10 +28,6 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 /// Additionally required on the token-exchange endpoint.
 const FEDERATION_BETA: &str = "oauth-2025-04-20,oidc-federation-2026-04-01";
-/// Audience the OIDC identity token must be minted for.
-const OIDC_AUDIENCE: &str = "https://api.anthropic.com";
-/// Re-mint this long before expiry so a request never races the deadline.
-const EXPIRY_SKEW: Duration = Duration::from_mins(1);
 
 /// Build the auth headers for an Anthropic request.
 ///
@@ -75,20 +69,18 @@ fn usable(credential: &str, label: &str) -> Result<String, ClientError> {
     Ok(credential.to_string())
 }
 
-#[derive(Debug, Clone)]
-struct CachedToken {
-    value: String,
-    expires_at: Instant,
-}
+/// A minted token and the deadline it stops working at.
+type Minted = (String, Instant);
 
 /// Per-source cache of minted federation tokens.
 ///
 /// Federated tokens are short-lived, which is fine for a one-shot CI run but
 /// would 401 partway through a long interactive session, so they are re-minted
-/// as they approach expiry.
+/// as they approach expiry. When that is lives in [`super::super::expiry`],
+/// which the Bedrock role assumption answers the same question through.
 #[derive(Debug, Default)]
 pub(crate) struct TokenCache {
-    entries: RwLock<HashMap<String, CachedToken>>,
+    tokens: Expiring<String>,
 }
 
 impl TokenCache {
@@ -115,128 +107,29 @@ impl TokenCache {
         source: &Source,
         federation: &Federation,
     ) -> Result<String, ClientError> {
-        if let Some(token) = self.fresh(&source.name).await {
+        if let Some(token) = self.tokens.fresh(&source.name).await {
             return Ok(token);
         }
         // Resolved at source discovery from the merged env map, so a value set in
         // `~/.env` or `AFI_ENV_FILE` is honoured - reading the process env here
         // would silently miss it.
         let identity = federation.identity.as_ref().ok_or_else(|| {
-            ClientError::Auth(
-                "no OIDC identity token available for the federated Anthropic source. \
-                 Set ANTHROPIC_IDENTITY_TOKEN or ANTHROPIC_IDENTITY_TOKEN_FILE, or run \
-                 inside GitHub Actions with `permissions: id-token: write`."
-                    .to_string(),
-            )
-        })?;
-        let assertion = fetch_identity_token(http, identity).await?;
-        let minted = exchange(http, &source.base_url, federation, &assertion).await?;
-        self.store(&source.name, &minted).await;
-        Ok(minted.value)
-    }
-
-    async fn fresh(&self, name: &str) -> Option<String> {
-        let entries = self.entries.read().await;
-        let cached = entries.get(name)?;
-        (cached.expires_at > Instant::now()).then(|| cached.value.clone())
-    }
-
-    async fn store(&self, name: &str, token: &CachedToken) {
-        self.entries
-            .write()
-            .await
-            .insert(name.to_string(), token.clone());
-    }
-}
-
-/// Fetch the OIDC identity token, rejecting a blank one.
-///
-/// A blank token is a local misconfiguration - an empty or whitespace-only token
-/// file, or an Actions response carrying an empty `value`. Left alone it would
-/// reach the exchange as an empty `assertion`, and the 400 that comes back names
-/// the grant rather than the empty file, hiding the real cause.
-async fn fetch_identity_token(
-    http: &Client,
-    source: &IdentitySource,
-) -> Result<String, ClientError> {
-    let token = read_identity_token(http, source).await?;
-    let token = token.trim();
-    if token.is_empty() {
-        return Err(ClientError::Auth(format!(
-            "the OIDC identity token from {} is empty",
-            identity_label(source)
-        )));
-    }
-    Ok(token.to_string())
-}
-
-/// Names the configured identity source for an error message. Never includes the
-/// token itself: it is a bearer credential in its own right.
-fn identity_label(source: &IdentitySource) -> String {
-    match source {
-        IdentitySource::Literal(_) => "ANTHROPIC_IDENTITY_TOKEN".to_string(),
-        IdentitySource::File(path) => {
-            format!("ANTHROPIC_IDENTITY_TOKEN_FILE {}", path.display())
-        }
-        IdentitySource::GithubActions { .. } => "the GitHub Actions OIDC endpoint".to_string(),
-    }
-}
-
-/// Read the raw token. Never logged.
-async fn read_identity_token(
-    http: &Client,
-    source: &IdentitySource,
-) -> Result<String, ClientError> {
-    match source {
-        IdentitySource::Literal(token) => Ok(token.clone()),
-        IdentitySource::File(path) => fs::read_to_string(path).map_err(|e| {
+            // The sentence comes from the variables rather than being written
+            // out here, so renaming one cannot leave this message naming the
+            // old spelling while every other refusal moves.
             ClientError::Auth(format!(
-                "cannot read ANTHROPIC_IDENTITY_TOKEN_FILE {}: {e}",
-                path.display()
+                "source {} federates with Anthropic but {}",
+                source.name,
+                Identity::absent(ANTHROPIC_IDENTITY)
             ))
-        }),
-        IdentitySource::GithubActions { url, request_token } => {
-            github_identity_token(http, url, request_token).await
-        }
+        })?;
+        let assertion = fetch(http, identity).await?;
+        let (token, expires_at) = exchange(http, &source.base_url, federation, &assertion).await?;
+        self.tokens
+            .store(&source.name, token.clone(), expires_at)
+            .await;
+        Ok(token)
     }
-}
-
-async fn github_identity_token(
-    http: &Client,
-    url: &str,
-    request_token: &str,
-) -> Result<String, ClientError> {
-    // The Actions runtime url already carries an `api-version` query, so the
-    // audience is appended rather than replacing the query string.
-    let mut endpoint = Url::parse(url)
-        // Supplied by the Actions runtime, so a malformed one is environmental.
-        .map_err(|e| ClientError::Auth(format!("bad ACTIONS_ID_TOKEN_REQUEST_URL: {e}")))?;
-    endpoint
-        .query_pairs_mut()
-        .append_pair("audience", OIDC_AUDIENCE);
-    let response = http
-        .get(endpoint)
-        .header("authorization", format!("Bearer {request_token}"))
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| transport_error_at(Some("OIDC token request failed"), &e))?;
-    let status = response.status();
-    let body = response.text().await.map_err(|e| transport_error(&e))?;
-    if !status.is_success() {
-        // Normally an Actions error rather than a credential - a 403 is the
-        // workflow lacking `permissions: id-token: write` - but the runtime token
-        // went out in the request header, so an endpoint or proxy that echoes the
-        // request hands it straight back.
-        return Err(refused_credential(
-            "the GitHub Actions OIDC endpoint refused the token request",
-            status,
-            &body,
-            &Redactor::default().with(request_token, Credential::RequestToken),
-        ));
-    }
-    json_string_field(&body, "value")
-        .ok_or_else(|| ClientError::Parse("OIDC response had no `value` field".to_string()))
 }
 
 /// Exchange the identity token for an Anthropic access token.
@@ -247,7 +140,7 @@ async fn exchange(
     base_url: &str,
     federation: &Federation,
     assertion: &str,
-) -> Result<CachedToken, ClientError> {
+) -> Result<Minted, ClientError> {
     let mut body = serde_json::json!({
         "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "assertion": assertion,
@@ -281,58 +174,19 @@ async fn exchange(
     parse_minted(&text)
 }
 
-/// A failing status from an endpoint that hands out credentials.
+/// The token and how long it lasts.
 ///
-/// A 4xx here is the credential itself being turned down - a 401 from the exchange
-/// almost always means the OIDC claims did not satisfy the federation rule, most
-/// often an unprotected ref - so it reports as an auth failure rather than as the
-/// transport error it arrives as. Retrying one spends the schedule to be refused
-/// in the same words. A 429 or a 5xx is the endpoint having a bad day and keeps
-/// its status, because that one is worth another attempt.
-///
-/// `redact` is taken rather than left to callers because both endpoints here are
-/// handed the credential they are being asked about, and both quote what comes
-/// back. Cleaning runs before the preview is cut, so the window can only ever
-/// trim a marker.
-fn refused_credential(
-    what: &str,
-    status: StatusCode,
-    body: &str,
-    redact: &Redactor,
-) -> ClientError {
-    let body = redact.clean(body);
-    if status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS {
-        let preview: String = body.chars().take(BODY_PREVIEW_CHARS).collect();
-        return ClientError::Auth(format!("{what} (HTTP {}): {preview}", status.as_u16()));
-    }
-    ClientError::Http {
-        status: status.as_u16(),
-        body,
-    }
-}
-
-fn parse_minted(body: &str) -> Result<CachedToken, ClientError> {
+/// A response carrying no `expires_in` reads as a zero lifetime, which
+/// [`deadline`] turns into a deadline already past: the token serves this
+/// request and is re-minted for the next one.
+fn parse_minted(body: &str) -> Result<Minted, ClientError> {
     let value = json_string_field(body, "access_token")
         .ok_or_else(|| ClientError::Parse("token exchange returned no access_token".to_string()))?;
     let lifetime = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|v| v.get("expires_in").and_then(Value::as_u64))
         .unwrap_or(0);
-    Ok(CachedToken {
-        value,
-        expires_at: Instant::now()
-            .checked_add(Duration::from_secs(lifetime).saturating_sub(EXPIRY_SKEW))
-            .unwrap_or_else(Instant::now),
-    })
-}
-
-fn json_string_field(body: &str, key: &str) -> Option<String> {
-    serde_json::from_str::<Value>(body)
-        .ok()?
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
+    Ok((value, deadline(Duration::from_secs(lifetime))))
 }
 
 #[cfg(test)]

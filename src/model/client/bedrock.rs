@@ -2,30 +2,126 @@
 //!
 //! Not a third wire protocol. Bedrock's `/v1/chat/completions` speaks the same
 //! request and SSE shapes as [`super::openai`], so the body builders, the
-//! decoder, and the turn loop are shared verbatim. Two things are Bedrock's own
-//! and live here: the credential, which is an AWS `SigV4` signature computed per
-//! request rather than a static header ([`sigv4`]), and the rejections, which
-//! arrive as AWS exceptions and have to be told apart before they read as a
-//! generic HTTP failure.
+//! decoder, and the turn loop are shared verbatim. Three things are Bedrock's
+//! own and live here: the credential, which is an AWS `SigV4` signature computed
+//! per request rather than a static header ([`sigv4`]); where that credential
+//! comes from, which is either the environment or a role assumed from an OIDC
+//! identity token ([`sts`]); and the rejections, which arrive as AWS exceptions
+//! and have to be told apart before they read as a generic HTTP failure.
 //!
 //! Anthropic models on Bedrock are out of scope; a source pointed at one still
 //! reaches Anthropic's own API through [`super::anthropic`].
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
 use chrono::Utc;
 use reqwest::{Client, RequestBuilder, Url};
 use serde_json::Value;
 
-use super::{ClientError, into_header_map};
-use crate::config::Bedrock;
+use super::{ClientError, Credential, Redactor, into_header_map};
+use crate::config::{Protocol, Source};
 
 pub(crate) mod sigv4;
+pub(crate) mod sts;
+
+use sts::CredentialCache;
 
 /// The signing service name for `bedrock-runtime`. `bedrock` for both the
 /// control plane and the runtime; only the host differs.
 const SERVICE: &str = "bedrock";
 const CONTENT_TYPE: &str = "application/json";
+
+/// The credential one Bedrock request is signed with, whichever way it was
+/// obtained.
+///
+/// Owned rather than borrowed from the `Source`, which the static credential
+/// could be: an assumed-role one is minted per exchange and belongs to no
+/// longer-lived value, and one type for both is what keeps [`signed_post`] from
+/// having to know which mode a source is in.
+#[derive(Clone)]
+pub(super) struct Signing {
+    pub region: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    /// Always present on an assumed-role credential, and on a static one only
+    /// when the shell exported `AWS_SESSION_TOKEN`.
+    pub session_token: Option<String>,
+}
+
+/// Redacts the two secret halves, for the reason [`crate::config::Bedrock`]'s
+/// does: the type is reached by `{:?}` from a test assertion's failure message,
+/// and a credential does not belong in one.
+impl fmt::Debug for Signing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Signing")
+            .field("region", &self.region)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<set>")
+            .field(
+                "session_token",
+                &if self.session_token.is_some() {
+                    "<set>"
+                } else {
+                    "<unset>"
+                },
+            )
+            .finish()
+    }
+}
+
+/// The credential a request to `source` signs with, or `None` when `source` is
+/// not a Bedrock one.
+///
+/// `None` rather than an error for the other protocols, so the caller has one
+/// value that answers both "is this signed" and "with what" - a bearer request
+/// and a signed one then differ in this module rather than in every call site.
+pub(super) async fn signing(
+    http: &Client,
+    cache: &CredentialCache,
+    source: &Source,
+) -> Result<Option<Signing>, ClientError> {
+    let Protocol::Bedrock(bedrock) = &source.protocol else {
+        return Ok(None);
+    };
+    // `Runtime::refusals` already refuses a run whose starting source cannot
+    // sign, but `/source` can switch to one mid-session, and that path has no
+    // refusal gate. `Auth` rather than a transport failure: nothing was sent,
+    // and no retry assembles the missing half of a credential.
+    if let Some(refusal) = bedrock.incomplete(&source.name) {
+        return Err(ClientError::Auth(refusal));
+    }
+    // Every `unwrap_or_default` below is unreachable past the guard above.
+    let region = bedrock.region.clone().unwrap_or_default();
+    match bedrock.federating() {
+        Some(web) => cache
+            .assumed(http, &source.name, &region, web)
+            .await
+            .map(Some),
+        None => Ok(Some(Signing {
+            region,
+            access_key_id: bedrock.access_key_id.clone().unwrap_or_default(),
+            secret_access_key: bedrock.secret_access_key.clone().unwrap_or_default(),
+            session_token: bedrock.session_token.clone(),
+        })),
+    }
+}
+
+/// The credentials one request carries, ready to be struck from its error body.
+///
+/// The session token is the half that travels: it rides `x-amz-security-token`
+/// on every signed request, so a gateway or proxy that echoes the request it
+/// refused hands it straight back, and under federation afi minted it itself,
+/// where nothing upstream has it registered for masking. The secret access key
+/// never leaves this process - `SigV4` sends a signature, not the key - so
+/// there is nothing to strike for it.
+pub(super) fn redactor(source: &Source, signing: Option<&Signing>) -> Redactor {
+    Redactor::for_source(source).with(
+        signing
+            .and_then(|signing| signing.session_token.as_deref())
+            .unwrap_or_default(),
+        Credential::SessionToken,
+    )
+}
 
 /// A POST carrying `body`, signed with `SigV4`.
 ///
@@ -34,18 +130,10 @@ const CONTENT_TYPE: &str = "application/json";
 /// would invalidate it.
 pub(super) fn signed_post(
     http: &Client,
-    bedrock: &Bedrock,
-    source_name: &str,
+    signing: &Signing,
     url: &str,
     body: String,
 ) -> Result<RequestBuilder, ClientError> {
-    // `Runtime::refusals` already refuses a run whose starting source cannot
-    // sign, but `/source` can switch to one mid-session, and that path has no
-    // refusal gate. `Auth` rather than a transport failure: nothing was sent,
-    // and no retry assembles the missing half of a credential.
-    if let Some(refusal) = bedrock.incomplete(source_name) {
-        return Err(ClientError::Auth(refusal));
-    }
     // `Internal`, because a signature is scoped to a host and afi assembles this
     // url itself: the Region is charset-checked before it gets here and the path
     // is a literal. The one route an operator has to it is an
@@ -55,9 +143,6 @@ pub(super) fn signed_post(
     let host = host_header(&parsed).ok_or_else(|| {
         ClientError::Internal(format!("Bedrock url {url:?} names no host to sign for"))
     })?;
-    // Every `unwrap_or_default` below is unreachable past the guard above.
-    // Borrowed rather than unwrapped into owned copies, so the secret is never
-    // duplicated out of the `Source` that holds it.
     let mut headers = vec![("content-type", CONTENT_TYPE.to_string())];
     headers.extend(sigv4::sign(
         &sigv4::CanonicalRequest {
@@ -67,14 +152,14 @@ pub(super) fn signed_post(
             query: parsed.query().unwrap_or_default(),
             content_type: CONTENT_TYPE,
             body: body.as_bytes(),
-            region: bedrock.region.as_deref().unwrap_or_default(),
+            region: &signing.region,
             service: SERVICE,
             timestamp: &Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
         },
         &sigv4::Credentials {
-            access_key_id: bedrock.access_key_id.as_deref().unwrap_or_default(),
-            secret_access_key: bedrock.secret_access_key.as_deref().unwrap_or_default(),
-            session_token: bedrock.session_token.as_deref(),
+            access_key_id: &signing.access_key_id,
+            secret_access_key: &signing.secret_access_key,
+            session_token: signing.session_token.as_deref(),
         },
     ));
     Ok(http.post(url).headers(into_header_map(headers)?).body(body))
@@ -101,6 +186,11 @@ pub(super) struct Rejection<'a> {
     /// that never reached the service, such as a proxy's own error page.
     pub error_type: Option<String>,
     pub body: String,
+    /// Whether this source mints its own credentials by assuming a role. AWS
+    /// turns down an expired credential the same way whichever mode produced
+    /// it, and the two modes are fixed differently, so where it came from has
+    /// to travel with the rejection rather than be guessed from it.
+    pub federating: bool,
 }
 
 /// Turn an AWS rejection into an error that says which kind it is.
@@ -177,9 +267,13 @@ fn classify(rejected: &Rejection<'_>) -> Option<String> {
     let names = |needles: &[&str]| needles.iter().any(|needle| exception.contains(needle));
 
     // Credentials first: an expired session token is a 403 like a denial is,
-    // and the fix is the opposite one. The restart is named because the
-    // credentials are read once at startup, so re-selecting the source with
-    // `/source` hands back the same expired struct.
+    // and the fix is the opposite one. Which fix, though, depends on where the
+    // credential came from. A static one is read once at startup, so
+    // re-selecting the source with `/source` hands back the same expired
+    // struct and only a restart picks up a new one. A federated source
+    // re-assumes the role on its own as the credential ages, so a restart
+    // repeats what afi already tried - what is left is the session having been
+    // revoked, or the role no longer accepting the token.
     if names(&[
         "expiredtoken",
         "invalidsignature",
@@ -188,11 +282,15 @@ fn classify(rejected: &Rejection<'_>) -> Option<String> {
         "incompletesignature",
         "missingauthenticationtoken",
     ]) {
-        return Some(
-            "AWS rejected the credentials (expired or wrong; afi reads them at \
-             startup, so a refresh needs a restart)"
-                .to_string(),
-        );
+        return Some(format!(
+            "AWS rejected the credentials (expired or wrong; {})",
+            if rejected.federating {
+                "afi re-assumes the role as they age, so a restart changes nothing - \
+                 the assumed session was revoked, or the role stopped accepting the token"
+            } else {
+                "afi reads them at startup, so a refresh needs a restart"
+            }
+        ));
     }
     if names(&["throttling", "toomanyrequests", "servicequotaexceeded"]) {
         return Some(THROTTLED.to_string());

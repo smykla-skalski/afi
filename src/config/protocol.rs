@@ -2,6 +2,7 @@
 //! protocol implies, and the workload-identity-federation parameters.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::hash::BuildHasher;
 use std::path::PathBuf;
 
@@ -25,17 +26,111 @@ pub fn is_placeholder(credential: &str) -> bool {
     credential.is_empty() || credential == NOOP_KEY
 }
 
+/// The variables one protocol reads its OIDC identity token from, and the
+/// audience that protocol's exchange requires the token to carry.
+///
+/// Two paths federate now - Anthropic's token exchange and AWS's role
+/// assumption - and they agree on the shape of the thing (a JWT, from a
+/// variable, a file, or minted by GitHub Actions) while agreeing on none of the
+/// three names. Held as one value rather than passed as three arguments so a
+/// token read from `AWS_WEB_IDENTITY_TOKEN_FILE` cannot be paired with an
+/// audience minted for Anthropic: the variable, the file, and the audience
+/// travel together or not at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityVars {
+    /// The variable carrying the token itself.
+    pub literal: &'static str,
+    /// The variable carrying a path to read it from.
+    pub file: &'static str,
+    /// The `aud` claim the exchange requires, and so the audience afi asks the
+    /// GitHub Actions endpoint to mint for.
+    pub audience: &'static str,
+}
+
+/// Anthropic's names, and the audience its token exchange accepts.
+pub const ANTHROPIC_IDENTITY: IdentityVars = IdentityVars {
+    literal: "ANTHROPIC_IDENTITY_TOKEN",
+    file: "ANTHROPIC_IDENTITY_TOKEN_FILE",
+    audience: "https://api.anthropic.com",
+};
+
+/// AWS's names, and the audience `sts:AssumeRoleWithWebIdentity` expects.
+///
+/// `AWS_WEB_IDENTITY_TOKEN_FILE` is the variable every AWS SDK already reads,
+/// so a job that has run `configure-aws-credentials`, or a pod given an EKS
+/// service-account identity, needs no afi-specific setup.
+/// `AWS_WEB_IDENTITY_TOKEN` is afi's own counterpart for a caller holding the
+/// token rather than a file, mirroring the pair the Anthropic SDKs define.
+///
+/// `sts.amazonaws.com` is the audience AWS's own GitHub Actions documentation
+/// registers on the IAM identity provider. An identity provider created with a
+/// different one is reached by minting the token elsewhere and passing it in
+/// the two variables above, which skips the Actions endpoint entirely.
+pub const AWS_IDENTITY: IdentityVars = IdentityVars {
+    literal: "AWS_WEB_IDENTITY_TOKEN",
+    file: "AWS_WEB_IDENTITY_TOKEN_FILE",
+    audience: "sts.amazonaws.com",
+};
+
+/// An OIDC identity token to exchange, together with the names it was resolved
+/// under.
+///
+/// The names ride along because they are what a refusal has to say. A token
+/// that turns out to be blank is a misconfiguration of one particular variable,
+/// and "the identity token is empty" without that variable's name sends the
+/// reader looking through both protocols' spellings of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub vars: IdentityVars,
+    pub source: IdentitySource,
+}
+
+impl Identity {
+    /// Resolve an identity token under `vars`, or `None` when none is
+    /// configured.
+    #[must_use]
+    pub fn from_env<S: BuildHasher>(
+        env: &HashMap<String, String, S>,
+        vars: IdentityVars,
+    ) -> Option<Self> {
+        IdentitySource::from_env(env, vars).map(|source| Self { vars, source })
+    }
+
+    /// Names the configured identity source for an error message. Never
+    /// includes the token itself: it is a bearer credential in its own right.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match &self.source {
+            IdentitySource::Literal(_) => self.vars.literal.to_string(),
+            IdentitySource::File(path) => format!("{} {}", self.vars.file, path.display()),
+            IdentitySource::GithubActions { .. } => "the GitHub Actions OIDC endpoint".to_string(),
+        }
+    }
+
+    /// What to tell whoever configured a federating source with no identity
+    /// token at all, naming both variables and the workflow permission that
+    /// makes a third one unnecessary.
+    #[must_use]
+    pub fn absent(vars: IdentityVars) -> String {
+        format!(
+            "no OIDC identity token is available. Set {} or {}, or run inside \
+             GitHub Actions with `permissions: id-token: write`",
+            vars.literal, vars.file
+        )
+    }
+}
+
 /// Where the OIDC identity token for a federation exchange comes from.
 ///
-/// Resolved here, from the same merged env map as every other setting, rather
-/// than from the process env at request time - otherwise a value set in `~/.env`
-/// or `AFI_ENV_FILE` would be invisible, since nothing copies those into the
-/// process environment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Resolved at source discovery, from the same merged env map as every other
+/// setting, rather than from the process env at request time - otherwise a
+/// value set in `~/.env` or `AFI_ENV_FILE` would be invisible, since nothing
+/// copies those into the process environment.
+#[derive(Clone, PartialEq, Eq)]
 pub enum IdentitySource {
-    /// `ANTHROPIC_IDENTITY_TOKEN` - the token itself.
+    /// [`IdentityVars::literal`] - the token itself.
     Literal(String),
-    /// `ANTHROPIC_IDENTITY_TOKEN_FILE` - a path to read it from.
+    /// [`IdentityVars::file`] - a path to read it from.
     File(PathBuf),
     /// GitHub Actions' OIDC endpoint, which is what `core.getIDToken` calls.
     GithubActions { url: String, request_token: String },
@@ -46,12 +141,15 @@ impl IdentitySource {
     /// official SDKs use, with GitHub Actions as an afi-specific fallback so a
     /// workflow needs no explicit token-minting step.
     #[must_use]
-    pub fn from_env<S: BuildHasher>(env: &HashMap<String, String, S>) -> Option<Self> {
+    pub fn from_env<S: BuildHasher>(
+        env: &HashMap<String, String, S>,
+        vars: IdentityVars,
+    ) -> Option<Self> {
         let get = |key: &str| env.get(key).map(String::as_str).filter(|v| !v.is_empty());
-        if let Some(token) = get("ANTHROPIC_IDENTITY_TOKEN") {
+        if let Some(token) = get(vars.literal) {
             return Some(Self::Literal(token.to_string()));
         }
-        if let Some(path) = get("ANTHROPIC_IDENTITY_TOKEN_FILE") {
+        if let Some(path) = get(vars.file) {
             return Some(Self::File(PathBuf::from(path)));
         }
         let url = get("ACTIONS_ID_TOKEN_REQUEST_URL")?;
@@ -60,6 +158,27 @@ impl IdentitySource {
             url: url.to_string(),
             request_token: request_token.to_string(),
         })
+    }
+}
+
+/// Redacts the two token-bearing variants, so the `Debug` that `Source`,
+/// `Runtime`, and [`Protocol`] all derive cannot carry a live credential into a
+/// panic message or a log. The same reason [`Bedrock`]'s is hand-written.
+///
+/// The path a token is read from stays readable, and so does the Actions url:
+/// neither authenticates anything, and a dump with both struck out says nothing
+/// about which of the three variants was even in play.
+impl fmt::Debug for IdentitySource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Literal(_) => f.debug_tuple("Literal").field(&"<set>").finish(),
+            Self::File(path) => f.debug_tuple("File").field(path).finish(),
+            Self::GithubActions { url, .. } => f
+                .debug_struct("GithubActions")
+                .field("url", url)
+                .field("request_token", &"<set>")
+                .finish(),
+        }
     }
 }
 
@@ -75,7 +194,7 @@ pub struct Federation {
     /// Where to get the identity token to exchange. `None` when none is
     /// configured, which surfaces as an actionable error on the first request
     /// rather than hiding the source entirely.
-    pub identity: Option<IdentitySource>,
+    pub identity: Option<Identity>,
 }
 
 impl Federation {
@@ -96,7 +215,7 @@ impl Federation {
             organization_id: get("ANTHROPIC_ORGANIZATION_ID")?,
             service_account_id: get("ANTHROPIC_SERVICE_ACCOUNT_ID")?,
             workspace_id: get("ANTHROPIC_WORKSPACE_ID"),
-            identity: IdentitySource::from_env(env),
+            identity: Identity::from_env(env, ANTHROPIC_IDENTITY),
         })
     }
 }

@@ -26,13 +26,30 @@ use crate::sessions::{self, new_session_id, safe_title};
 use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
 
+/// What a turn borrows from the session instead of building for itself.
+///
+/// The HTTP client is here for its caches. A federated source assumes its AWS
+/// role - or exchanges its Anthropic token - and holds the credential until it
+/// nears expiry, which only means anything while the client outlives the turn
+/// that minted it. Built per turn, as it was, every turn opened with a round
+/// trip to the OIDC endpoint and another to STS, and left a `CloudTrail` entry
+/// behind for a credential the previous turn had already paid for. On a busy
+/// account that is also afi throttling itself.
+pub(crate) struct Shared<'a> {
+    pub client: &'a ReqwestClient,
+    /// The merged environment the run was configured from, which is not the
+    /// process environment - nothing copies `~/.env` or `AFI_ENV_FILE` into that
+    /// one.
+    pub env: &'a HashMap<String, String>,
+}
+
 /// Inputs for one model loop shared by REPL, one-shot, and `/recover`.
 pub(crate) struct TurnParams<'a> {
     pub config: &'a ModelConfig,
     pub source: &'a Source,
     pub model: &'a str,
     pub approval: &'a ApprovalState,
-    pub env: &'a HashMap<String, String>,
+    pub shared: &'a Shared<'a>,
     pub force_final: bool,
     pub recovery_sampling: bool,
 }
@@ -44,7 +61,6 @@ pub(crate) async fn run_turn_loop(
     params: &TurnParams<'_>,
     ui: &mut dyn UserInterface,
 ) -> TurnOutcome {
-    let client = ReqwestClient::new();
     let classifier = HighDefaultClassifier;
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_root = detect_project_root(Some(&cwd));
@@ -52,14 +68,14 @@ pub(crate) async fn run_turn_loop(
         messages,
         LoopRequest {
             config: params.config,
-            client: &client,
+            client: params.shared.client,
             source: params.source,
             model: params.model,
             approval: params.approval,
             classifier: &classifier,
             cwd: &cwd,
             project_root: &project_root,
-            env: params.env,
+            env: params.shared.env,
             force_final: params.force_final,
             recovery_sampling: params.recovery_sampling,
         },
@@ -74,6 +90,9 @@ pub(crate) struct ReplCore {
     dir: PathBuf,
     session_id: String,
     messages: Vec<Value>,
+    /// One client for the whole session, so the credential caches on it are
+    /// worth having. See [`Shared`].
+    client: ReqwestClient,
     /// Set by any turn that failed outright, so the session's exit code and
     /// summary reflect the whole run rather than only its last turn.
     failure: RunFailure,
@@ -108,6 +127,7 @@ impl ReplCore {
             dir,
             session_id,
             messages,
+            client: ReqwestClient::new(),
             failure: RunFailure::default(),
         }
     }
@@ -121,13 +141,19 @@ impl ReplCore {
         if input.is_empty() {
             return CoreAction::Continue;
         }
+        // Cloned because the commands take the runtime mutably, and the client is
+        // borrowed alongside it - a disjoint field, so the two do not collide.
         let env = self.rt.env.clone();
+        let shared = Shared {
+            client: &self.client,
+            env: &env,
+        };
         match handle_slash_command(
             input,
             &mut self.rt,
             &mut self.messages,
             &mut self.session_id,
-            &env,
+            &shared,
             ui,
             &mut self.failure,
         )
@@ -184,7 +210,10 @@ impl ReplCore {
                 source,
                 model,
                 approval: &self.rt.approval,
-                env: &self.rt.env,
+                shared: &Shared {
+                    client: &self.client,
+                    env: &self.rt.env,
+                },
                 force_final: false,
                 recovery_sampling: false,
             },
@@ -331,6 +360,9 @@ async fn one_shot_run(
         return Err(RunError::new(error, ErrorKind::Input));
     };
     let config = ModelConfig::from_env(&rt.env);
+    // One turn, so this client caches nothing anyone gets to reuse - which is
+    // the shape a one-shot run has anyway.
+    let client = ReqwestClient::new();
     let outcome = run_turn_loop(
         messages,
         &TurnParams {
@@ -338,7 +370,10 @@ async fn one_shot_run(
             source,
             model,
             approval: &rt.approval,
-            env: &rt.env,
+            shared: &Shared {
+                client: &client,
+                env: &rt.env,
+            },
             force_final: false,
             recovery_sampling: false,
         },

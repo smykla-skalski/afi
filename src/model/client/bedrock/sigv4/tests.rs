@@ -14,7 +14,7 @@
 //!      http://127.0.0.1:8731/v1/chat/completions
 //! ```
 
-use super::{CanonicalRequest, Credentials, canonical_query, sign, uri_encode};
+use super::{CanonicalRequest, Credentials, canonical_query, form_encode, sign, uri_encode};
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 
@@ -219,6 +219,21 @@ fn uri_encode_keeps_an_escape_that_is_already_there() {
     // Not a well-formed escape, so the `%` is a literal to be encoded.
     assert_eq!(uri_encode("100%"), "100%25");
     assert_eq!(uri_encode("%zz"), "%25zz");
+}
+
+/// The one case that tells the two encoders apart, and the whole reason both
+/// exist. Everything the role assumption actually posts - an ARN, a session
+/// name, a base64url JWT - encodes identically under either, so without this the
+/// form path could be pointed at [`uri_encode`] and nothing would fail.
+#[test]
+fn form_encode_treats_a_percent_as_a_per_cent_sign() {
+    // `uri_encode` reads this as an escape and leaves it; a form value has not
+    // been encoded by anything yet, so `%41` is three characters and stays three.
+    assert_eq!(form_encode("role%41name"), "role%2541name");
+    assert_eq!(uri_encode("role%41name"), "role%41name");
+    // Where there is no escape to disagree about, the two answer the same.
+    assert_eq!(form_encode("100%"), "100%25");
+    assert_eq!(form_encode("a b"), "a%20b");
 }
 
 #[test]

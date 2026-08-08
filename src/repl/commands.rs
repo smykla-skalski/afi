@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 use super::failure::RunFailure;
-use super::{NO_ACTIVE_SOURCE, TurnParams, header, run_turn_loop};
+use super::{NO_ACTIVE_SOURCE, Shared, TurnParams, header, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
 use crate::config::{Runtime, Source};
 use crate::memory::{list_memories, remember_memories};
@@ -47,7 +47,10 @@ pub(crate) async fn handle_slash_command(
     rt: &mut Runtime,
     messages: &mut Vec<Value>,
     session_id: &mut String,
-    env: &Env,
+    // The session's environment and its HTTP client. `/compress` and `/recover`
+    // take the client from here rather than building one, which is what keeps a
+    // federated source from re-assuming its role for each of them.
+    shared: &Shared<'_>,
     ui: Ui<'_>,
     // Fed by any command that runs a model turn. `/recover` is one, so without
     // this a session whose only failure came from `/recover` reported success and
@@ -69,13 +72,13 @@ pub(crate) async fn handle_slash_command(
         "/yolo" => cmd_yolo(rt, ui),
         "/approval" => cmd_approval(rt, arg, ui),
         "/source" => cmd_source(rt, arg, ui),
-        "/compress" | "/compact" => cmd_compress(rt, messages, ui).await,
-        "/save" => cmd_save(messages, session_id, arg, env, ui),
-        "/sessions" => cmd_sessions(session_id, env, ui),
-        "/delete" => cmd_delete(session_id, arg, env, ui),
-        "/memory" => cmd_memory(arg, env, ui),
-        "/recover" => failure.record(&cmd_recover(rt, messages, arg, env, ui).await),
-        "/autocompress" => cmd_autocompress(arg, env, ui),
+        "/compress" | "/compact" => cmd_compress(rt, messages, shared.client, ui).await,
+        "/save" => cmd_save(messages, session_id, arg, shared.env, ui),
+        "/sessions" => cmd_sessions(session_id, shared.env, ui),
+        "/delete" => cmd_delete(session_id, arg, shared.env, ui),
+        "/memory" => cmd_memory(arg, shared.env, ui),
+        "/recover" => failure.record(&cmd_recover(rt, messages, arg, shared, ui).await),
+        "/autocompress" => cmd_autocompress(arg, shared.env, ui),
         "/provider" => cmd_provider(rt, arg, ui),
         "/help" => print_help(ui),
         _ => {
@@ -160,7 +163,7 @@ fn cmd_source(rt: &mut Runtime, arg: &str, ui: Ui<'_>) {
     }
 }
 
-async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, ui: Ui<'_>) {
+async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, client: &ReqwestClient, ui: Ui<'_>) {
     let body_len = messages.len().saturating_sub(1);
     if body_len <= COMPRESS_KEEP {
         say(ui, Info, "Nothing to compress (too few turns)");
@@ -173,7 +176,7 @@ async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, ui: Ui<'_>) {
 
     let cancel = ui.start_activity("Compressing context");
     let result = tokio::select! {
-        result = request_compression(source, model) => Some(result),
+        result = request_compression(client, source, model) => Some(result),
         () = cancel.cancelled() => None,
     };
     ui.stop_activity();
@@ -191,8 +194,11 @@ async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, ui: Ui<'_>) {
 }
 
 /// Ask the model for a one-shot summary of the conversation so far.
-async fn request_compression(source: &Source, model: &str) -> Result<Option<String>, String> {
-    let client = ReqwestClient::new();
+async fn request_compression(
+    client: &ReqwestClient,
+    source: &Source,
+    model: &str,
+) -> Result<Option<String>, String> {
     let prompt = "Summarize the following conversation history for context retention.";
     let text = client
         .chat_completions(
@@ -346,7 +352,7 @@ async fn cmd_recover(
     rt: &Runtime,
     messages: &mut Vec<Value>,
     arg: &str,
-    env: &Env,
+    shared: &Shared<'_>,
     ui: Ui<'_>,
 ) -> TurnOutcome {
     let note = if arg.is_empty() {
@@ -361,7 +367,7 @@ async fn cmd_recover(
         say(ui, Error, error);
         return TurnOutcome::failed(RunError::new(error, ErrorKind::Input));
     };
-    let config = ModelConfig::from_env(env);
+    let config = ModelConfig::from_env(shared.env);
     run_turn_loop(
         messages,
         &TurnParams {
@@ -369,7 +375,7 @@ async fn cmd_recover(
             source,
             model,
             approval: &rt.approval,
-            env,
+            shared,
             force_final: true,
             recovery_sampling: true,
         },

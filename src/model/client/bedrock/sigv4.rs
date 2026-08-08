@@ -197,6 +197,27 @@ fn canonical_query(query: &str) -> String {
 /// gap the other way: `Url` leaves `+`, `:`, and `,` alone in a path, and AWS
 /// counts all three as reserved.
 fn uri_encode(value: &str) -> String {
+    encode(value, true)
+}
+
+/// The same set, over a value nothing has encoded yet - a form field of the
+/// Query-protocol request [`super::sts`] posts.
+///
+/// The difference from [`uri_encode`] is the whole reason both exist: a raw
+/// value's `%` is a per-cent sign and has to become `%25`, where a url's `%` is
+/// the start of an escape and has to be left alone. Reaching for the wrong one
+/// here would silently rewrite a role name containing `%41` into one containing
+/// `A`.
+///
+/// AWS's unreserved set is a subset of what `application/x-www-form-urlencoded`
+/// leaves alone, and a space encodes as `%20` rather than `+`, which every form
+/// decoder reads back as a space. So this is a valid, if conservative, form
+/// encoding.
+pub(super) fn form_encode(value: &str) -> String {
+    encode(value, false)
+}
+
+fn encode(value: &str, keep_escapes: bool) -> String {
     let bytes = value.as_bytes();
     let mut out = String::with_capacity(value.len());
     let mut index = 0;
@@ -205,7 +226,7 @@ fn uri_encode(value: &str) -> String {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
             out.push(char::from(byte));
             index += 1;
-        } else if is_escape(bytes, index) {
+        } else if keep_escapes && is_escape(bytes, index) {
             // Uppercased, as AWS requires. The two digits were just checked, so
             // they are ASCII by construction.
             out.push('%');

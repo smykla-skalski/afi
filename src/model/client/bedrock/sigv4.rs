@@ -16,7 +16,7 @@
 //! path on this surface. The `curl` vectors cannot catch the difference either,
 //! being plain ASCII, so it is written down rather than left to be rediscovered.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 use crate::util::hex;

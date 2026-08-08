@@ -19,6 +19,7 @@ fn totals(input: u64, output: u64, cache_read: u64, cache_write: u64) -> UsageTo
         cache_write_tokens: cache_write,
         reasoning_tokens: 0,
         requests: 1,
+        estimated_tokens: 0,
     }
 }
 
@@ -40,22 +41,22 @@ fn billed(model: &str) -> Billed {
 
 #[test]
 fn a_rate_is_read_as_an_exact_decimal() {
-    assert_eq!(micros_per_million("3"), Some(3_000_000));
-    assert_eq!(micros_per_million("0.3"), Some(300_000));
-    assert_eq!(micros_per_million("3.75"), Some(3_750_000));
-    assert_eq!(micros_per_million(".5"), Some(500_000));
-    assert_eq!(micros_per_million("0.000001"), Some(1));
-    assert_eq!(micros_per_million("0"), Some(0));
+    assert_eq!(millionths("3"), Some(3_000_000));
+    assert_eq!(millionths("0.3"), Some(300_000));
+    assert_eq!(millionths("3.75"), Some(3_750_000));
+    assert_eq!(millionths(".5"), Some(500_000));
+    assert_eq!(millionths("0.000001"), Some(1));
+    assert_eq!(millionths("0"), Some(0));
 }
 
 #[test]
 fn an_exponent_is_the_number_it_denotes_rather_than_a_rejection() {
     // These reach the parser whenever serde_json renders a rate that way, which
     // it does by magnitude and not by how the caller wrote it.
-    assert_eq!(micros_per_million("3e-1"), Some(300_000));
-    assert_eq!(micros_per_million("1e-6"), Some(1));
-    assert_eq!(micros_per_million("1.5e3"), Some(1_500_000_000));
-    assert_eq!(micros_per_million("3E1"), Some(30_000_000));
+    assert_eq!(millionths("3e-1"), Some(300_000));
+    assert_eq!(millionths("1e-6"), Some(1));
+    assert_eq!(millionths("1.5e3"), Some(1_500_000_000));
+    assert_eq!(millionths("3E1"), Some(30_000_000));
 }
 
 #[test]
@@ -73,7 +74,7 @@ fn a_rate_that_is_not_a_usable_number_is_refused() {
         "1e-9",
         "3.0000001",
     ] {
-        assert_eq!(micros_per_million(bad), None, "{bad:?} must not parse");
+        assert_eq!(millionths(bad), None, "{bad:?} must not parse");
     }
 }
 
@@ -333,3 +334,5 @@ fn an_unusable_table_still_prices_nothing_at_all() {
     );
     assert_eq!(Pricing::from_env(&env), None);
 }
+
+mod budget;

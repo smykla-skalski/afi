@@ -26,6 +26,7 @@ pub struct ParsedArgs {
     pub allowed_tools: Option<String>,
     pub disallowed_tools: Option<String>,
     pub effort: Option<String>,
+    pub budget_usd: Option<String>,
     pub config: Option<String>,
     /// The context window this run measures the auto-compress threshold against,
     /// for every source it touches. Kept as written so `Runtime` reports an
@@ -150,6 +151,9 @@ fn apply_value_flag(out: &mut ParsedArgs, flag: &str, value: Option<&str>) -> Op
     Some(match flag {
         "--approval" => set_required_value(&mut out.flag_errors, &mut out.approval, flag, value),
         "--source" => set_required_value(&mut out.flag_errors, &mut out.source, flag, value),
+        "--budget-usd" => {
+            set_required_value(&mut out.flag_errors, &mut out.budget_usd, flag, value)
+        }
         "--session" => set_required_value(&mut out.flag_errors, &mut out.session, flag, value),
         "--summary" => set_required_value(&mut out.flag_errors, &mut out.summary, flag, value),
         "--summary-file" => {

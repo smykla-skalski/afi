@@ -24,7 +24,7 @@ const CATALOGUE: &str = r#"{
 #[test]
 fn the_projection_keeps_only_what_afi_can_bill() {
     let projected = ModelsDev
-        .project(CATALOGUE, &ALL)
+        .project(CATALOGUE.as_bytes(), &ALL)
         .expect("the slice must project");
     assert_eq!(
         projected.keys().copied().collect::<Vec<_>>(),
@@ -47,7 +47,9 @@ fn a_class_afi_does_not_model_is_dropped_rather_than_carried() {
     // `RawRates` is `deny_unknown_fields`, so a `tiers` key written into the
     // cache would refuse the whole table the next time afi read it back - the
     // rates for every model, gone, over a key afi never wanted.
-    let projected = ModelsDev.project(CATALOGUE, &ALL).expect("must project");
+    let projected = ModelsDev
+        .project(CATALOGUE.as_bytes(), &ALL)
+        .expect("must project");
     let kept: Vec<&str> = projected[&Provider::OpenAi]["gpt-5"]
         .keys()
         .copied()
@@ -62,18 +64,20 @@ fn the_catalogue_is_asked_for_afi_s_providers_under_its_own_names() {
     // replacing the catalogue never moves a key in `assets/prices.json`.
     assert_eq!(slug(Provider::Bedrock), "amazon-bedrock");
     assert_eq!(Provider::Bedrock.key(), "bedrock");
-    let projected = ModelsDev.project(CATALOGUE, &ALL).expect("must project");
+    let projected = ModelsDev
+        .project(CATALOGUE.as_bytes(), &ALL)
+        .expect("must project");
     assert!(projected.contains_key(&Provider::Bedrock));
 }
 
 #[test]
 fn a_body_that_is_not_this_catalogue_projects_nothing() {
-    assert!(ModelsDev.project("not json", &ALL).is_none());
+    assert!(ModelsDev.project(b"not json", &ALL).is_none());
     // Valid JSON of the wrong shape reads as a catalogue that priced nothing,
     // which the caller refuses to write over a working table.
     assert_eq!(
         ModelsDev
-            .project(r#"{"anthropic": {}}"#, &ALL)
+            .project(br#"{"anthropic": {}}"#, &ALL)
             .map(|p| p.len()),
         Some(0)
     );
@@ -82,7 +86,7 @@ fn a_body_that_is_not_this_catalogue_projects_nothing() {
 #[test]
 fn asking_for_fewer_providers_returns_fewer() {
     let projected = ModelsDev
-        .project(CATALOGUE, &[Provider::OpenAi])
+        .project(CATALOGUE.as_bytes(), &[Provider::OpenAi])
         .expect("must project");
     assert_eq!(
         projected.keys().copied().collect::<Vec<_>>(),
@@ -97,4 +101,17 @@ fn every_provider_afi_bills_has_a_name_here() {
     for provider in ALL {
         assert!(!slug(provider).is_empty(), "{provider:?}");
     }
+}
+
+#[test]
+fn a_provider_this_catalogue_does_not_carry_is_simply_absent() {
+    // Not an error here: models.dev may never have carried a provider afi can
+    // reach. Whether *losing* one is safe to write is `refresh::run`'s call,
+    // because only it can see the table being replaced.
+    let renamed = CATALOGUE.replace(r#""openai":"#, r#""openai-renamed":"#);
+    let projected = ModelsDev
+        .project(renamed.as_bytes(), &ALL)
+        .expect("the rest still projects");
+    assert!(!projected.contains_key(&Provider::OpenAi));
+    assert!(projected.contains_key(&Provider::Anthropic));
 }

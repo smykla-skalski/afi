@@ -287,8 +287,13 @@ fn report_client_error(
         }
         ClientError::Parse(message) => format!("parse error: {message}"),
         // Already complete, actionable sentences - no prefix, and nothing added
-        // about the server, which neither one is a verdict on.
-        ClientError::Auth(message) | ClientError::Internal(message) => message,
+        // about the server, which none of them is a verdict on. `Budget` reaches
+        // here only if something opened a request around the turn loop's own
+        // checkpoint, which stops the run before this.
+        ClientError::Auth(message)
+        | ClientError::Internal(message)
+        | ClientError::Budget(message)
+        | ClientError::Unmeasurable(message) => message,
     };
     ui.message(MessageKind::Error, message.clone());
     // Not TURN_DONE: the run failed, and reporting it as done is what made a

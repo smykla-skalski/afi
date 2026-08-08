@@ -12,6 +12,7 @@ use crate::tools::policy::ToolPolicy;
 
 use super::Source;
 use super::args::parse_args;
+use super::budget::{self, Budget};
 use super::effort;
 use super::file::{FileSettings, config_files};
 use super::refusals;
@@ -61,6 +62,9 @@ pub struct Runtime {
     /// `window::resolve` - because it is the one figure typed for this run rather
     /// than stored for all of them.
     pub context_window: Option<u64>,
+    /// What this run may spend, `None` when no cap was given - which is every
+    /// run before this existed, and every run that sets none.
+    pub budget: Option<Budget>,
     /// The system prompt every turn of this run sends, resolved once here so a
     /// file named on the command line is read before the run is paid for rather
     /// than on the first request. The project's own instruction files are read
@@ -175,6 +179,13 @@ impl Runtime {
             .collect();
         flag_errors.extend(parsed.flag_errors);
         let context_window = window::from_flag(parsed.context_window.as_deref(), &mut flag_errors);
+        // `Input`: a cap afi cannot read is the invocation naming an amount it
+        // has no answer for, and retrying it lands in the same place.
+        let budget =
+            budget::resolve_budget(parsed.budget_usd.as_deref(), &env).unwrap_or_else(|refusal| {
+                flag_errors.push(RunError::new(refusal, ErrorKind::Input));
+                None
+            });
         let effort = effort::resolve(
             parsed.effort.as_deref(),
             env.get("AFI_EFFORT").map(String::as_str),
@@ -218,6 +229,7 @@ impl Runtime {
             // At startup, so a typo is heard about before the run, not after.
             pricing: Pricing::from_env(&env),
             context_window,
+            budget,
             system_prompt,
             env,
         };
@@ -318,6 +330,26 @@ impl Runtime {
     #[must_use]
     pub fn active_source(&self) -> Option<&Source> {
         self.active.as_ref().and_then(|n| self.sources.get(n))
+    }
+
+    /// Why a budget this run was given could not be enforced, if it could not.
+    ///
+    /// One expression, two callers: `refusals` turns it into a refusal before the
+    /// run starts, and `/source` into a warning when a switch lands somewhere
+    /// unpriceable. They used to compute it separately and had already drifted -
+    /// only one of them treated an unreadable rate table as unenforceable.
+    ///
+    /// `None` when there is no budget, no model yet, or nothing wrong. Only the
+    /// *active* model is checked; the ledger-side question - can what was already
+    /// spent be priced - is the turn loop's, and catches what this cannot see.
+    #[must_use]
+    pub fn budget_unenforceable(&self) -> Option<String> {
+        self.budget?;
+        let model = self.model.as_deref()?;
+        let Some(pricing) = self.pricing.as_ref() else {
+            return Some("no rate table could be read".to_string());
+        };
+        pricing.unpriceable(self.active_source().and_then(Source::price_provider), model)
     }
 
     /// Why this run must not start, if it must not. See [`super::refusals`],

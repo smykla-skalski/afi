@@ -125,7 +125,18 @@ impl Lowered<'_> {
     /// names. What the numbers may be (nothing negative, nothing finer than the
     /// sixth decimal place, no model named twice) belongs to `Pricing`, which
     /// already reports it at startup and disables cost reporting for the run.
+    ///
+    /// Operator-only, which the `Scope` column cannot say for a block: a block
+    /// carries structure rather than one value, so it never reaches `one`. It
+    /// belongs with `budget_usd` rather than beside the settings a repository
+    /// may state, because a cap is enforced by pricing what the run used - so a
+    /// rate here is not a description of the world, it is the cap's own input,
+    /// and moving it moves the cap in either direction.
     fn prices(&mut self, value: &Value) {
+        if self.origin == Origin::WorkingTree {
+            self.refuse("prices", PROJECT_REFUSAL);
+            return;
+        }
         let Some(table) = self.object("prices", value) else {
             return;
         };
@@ -277,8 +288,9 @@ impl Lowered<'_> {
 /// file may set.
 const PROJECT_REFUSAL: &str = "cannot be set by a file in the working directory - \
      a repository does not choose where requests go, whose instructions the model \
-     follows, or whether you are asked before a tool runs; move it to \
-     $AFI_HOME/config.json, or name this file with --config";
+     follows, whether you are asked before a tool runs, or how much of your money \
+     the run may spend; move it to $AFI_HOME/config.json, or name this file with \
+     --config";
 
 /// `prefix.key`, or bare `key` at the root, which has no prefix to join.
 fn key_path(prefix: &str, key: &str) -> String {

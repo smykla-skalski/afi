@@ -46,19 +46,19 @@ fn slug(provider: Provider) -> &'static str {
 }
 
 impl Catalog for ModelsDev {
-    fn name(&self) -> &'static str {
-        "models.dev"
-    }
-
     fn url(&self) -> &'static str {
         "https://models.dev/api.json"
     }
 
-    fn project(&self, body: &str, wanted: &[Provider]) -> Option<Projection> {
-        let catalogue: Catalogue = serde_json::from_str(body).ok()?;
+    fn project(&self, body: &[u8], wanted: &[Provider]) -> Option<Projection> {
+        let catalogue: Catalogue = serde_json::from_slice(body).ok()?;
         let mut out = Projection::new();
         for provider in wanted {
-            let Some(entry) = catalogue.providers.get(slug(*provider)) else {
+            // Absent is not an error here: this catalogue may simply never
+            // have carried a provider afi can reach. Losing one it *did* carry
+            // is the dangerous case, and only `refresh::run` can see that,
+            // because only it knows the table being replaced.
+            let Some(entry) = catalogue.get(slug(*provider)) else {
                 continue;
             };
             let models: BTreeMap<String, ModelRates> = entry
@@ -74,14 +74,17 @@ impl Catalog for ModelsDev {
     }
 }
 
-/// Just the shape the projection needs. models.dev carries far more per model -
-/// context windows, modalities, release dates - and none of it prices a token.
-#[derive(Debug, Deserialize)]
-struct Catalogue {
-    #[serde(flatten)]
-    providers: HashMap<String, CatalogueProvider>,
-}
+/// The document, keyed by this catalogue's provider names.
+///
+/// Deserialized directly rather than through a wrapper with `#[serde(flatten)]`:
+/// flatten cannot stream, so it buffers all 3.6 MB into an intermediate value
+/// tree before a single field is read - measured at 19-23 ms and +22 MB against
+/// 7-10 ms and +5 MB without it.
+type Catalogue = HashMap<String, CatalogueProvider>;
 
+/// Just the shape the projection needs. models.dev carries far more per model -
+/// context windows, modalities, release dates - and none of it prices a token,
+/// so everything else is ignored without allocating.
 #[derive(Debug, Deserialize)]
 struct CatalogueProvider {
     #[serde(default)]

@@ -12,6 +12,7 @@
 
 use serde_json::Value;
 
+use crate::config::budget::{amount, fraction};
 use crate::summary::SummaryFormat;
 
 use super::super::effort::{self, Effort};
@@ -94,6 +95,40 @@ pub(super) fn decimal(value: &Value) -> Result<String, String> {
     match value {
         Value::Number(n) => Ok(n.to_string()),
         other => Err(expected("a number", other)),
+    }
+}
+
+/// An amount in USD, above zero and no finer than a millionth of a dollar.
+///
+/// Its own converter rather than [`decimal`] because the reader downstream is
+/// exact and this has to agree with it: `pricing::millionths` refuses a
+/// negative, a sub-micro figure, and anything too large to hold, so a value the
+/// file accepted and the reader refused would be reported by the variable's name
+/// for a mistake written under the key's.
+///
+/// Zero is refused here too. A budget of nothing stops a run before its first
+/// request and reports success, which is the one shape a cap must not be able to
+/// take by accident.
+pub(super) fn money(value: &Value) -> Result<String, String> {
+    let Value::Number(n) = value else {
+        return Err(expected("an amount in USD", value));
+    };
+    match amount(&n.to_string()) {
+        Some(_) => Ok(n.to_string()),
+        None => Err(
+            "must be an amount in USD above 0, no finer than a millionth of a dollar".to_string(),
+        ),
+    }
+}
+
+/// A fraction of the budget: above 0 and at most 1.
+pub(super) fn ratio(value: &Value) -> Result<String, String> {
+    let Value::Number(n) = value else {
+        return Err(expected("a fraction of the budget", value));
+    };
+    match fraction(&n.to_string()) {
+        Some(_) => Ok(n.to_string()),
+        None => Err("must be a number above 0 and at most 1".to_string()),
     }
 }
 

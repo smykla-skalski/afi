@@ -31,8 +31,8 @@
 use crate::pricing::RATE_CLASSES;
 
 use super::value::{
-    Convert, allow_list, count, decimal, effort_level, flag, list, object, percent, prompt_mode,
-    protocol_name, summary_format, text, whole, wide_count,
+    Convert, allow_list, count, decimal, effort_level, flag, list, money, object, percent,
+    prompt_mode, protocol_name, ratio, summary_format, text, whole, wide_count,
 };
 
 /// Which files may set a key. The other half of the pair is
@@ -206,11 +206,36 @@ pub(super) const TOP: &[Setting] = &[
     // rather than beside the blocks because it carries one value like the rest of
     // this table - the `env` column is what the exception needs.
     row("source_order", "AFI_SOURCES", list),
-    // What a token costs. A repository has a legitimate say here - the rates are
-    // a description of the world rather than a decision about this machine - so
-    // these are `row` like `prices` itself.
-    row("price_refresh", "AFI_PRICE_REFRESH", flag),
-    row("price_stale_days", "AFI_PRICE_STALE_DAYS", count),
+    // What a run may spend. `mine`, not `row`, and deliberately not one of the
+    // bounding keys either: a project file may neither raise a cap nor lower
+    // one. A hard stop is a *successful* exit - 0, `ok: true`, whatever the run
+    // had produced - so a repository able to write `budget_usd: 0.01` could end
+    // every run in a checkout after one request and have the summary say it
+    // worked. `read_only` is safe to tighten from a project file because a
+    // denied tool shows up in `refused_by_policy`; a truncated answer that
+    // reports success shows up nowhere.
+    mine("budget_usd", "AFI_BUDGET_USD", money),
+    mine("soft_budget_ratio", "AFI_SOFT_BUDGET_RATIO", ratio),
+    mine("hard_budget_ratio", "AFI_HARD_BUDGET_RATIO", ratio),
+    // What a token costs. `mine`, for the same reason as the three above and by
+    // the same argument: a cap is enforced by pricing what the run used, so a
+    // rate is not a description of the world here - it is the cap's own input.
+    // A repository writing `{"prices": {"m": {"input": 10000}}}` ends every run
+    // in the checkout after one request with `ok: true` and exit 0, which is
+    // verbatim what `mine("budget_usd")` exists to prevent, reached through a
+    // sibling key. Writing a rate of nothing is the other direction: the cap
+    // never fires at all.
+    //
+    // The refresh pair goes with them. A project file able to turn the refresh
+    // off and set the staleness warning past any horizon can leave a checkout
+    // billing against rates that moved years ago, silently - which is a cap that
+    // is quietly wrong rather than one that is loudly absent.
+    //
+    // The `prices` block itself is refused the same way, in `lower::prices` -
+    // blocks carry structure rather than one value, so they never reach the
+    // `Scope` column here.
+    mine("price_refresh", "AFI_PRICE_REFRESH", flag),
+    mine("price_stale_days", "AFI_PRICE_STALE_DAYS", count),
     // Sizes and caps.
     row("max_tokens", "AFI_MAX_TOKENS", count),
     row(

@@ -16,8 +16,7 @@ use super::report::report_run;
 use crate::config::Runtime;
 use crate::log::log_event;
 use crate::model::ModelConfig;
-use crate::model::client::ReqwestClient;
-use crate::model::usage_totals;
+use crate::model::client::{Budgeted, ReqwestClient};
 use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
 
@@ -31,8 +30,6 @@ pub(crate) async fn run_one_shot_async(
     rt: &Runtime,
     ui: &mut dyn UserInterface,
 ) -> bool {
-    // One process is one run, but tests share a process.
-    usage_totals::reset();
     let started = Instant::now();
     let mut messages = Vec::new();
     let outcome = one_shot_run(prompt_file, rt, ui, &mut messages).await;
@@ -64,7 +61,9 @@ async fn one_shot_run(
     let config = ModelConfig::from_env(&rt.env);
     // One turn, so this client caches nothing anyone gets to reuse - which is
     // the shape a one-shot run has anyway.
-    let client = ReqwestClient::new();
+    // Wrapped, like the session's own: the cap has to hold on the path a CI job
+    // actually takes, and `Budgeted` is what makes that true by construction.
+    let client = Budgeted::new(ReqwestClient::new());
     let outcome = run_turn_loop(
         messages,
         &TurnParams {

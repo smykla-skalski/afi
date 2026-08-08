@@ -18,6 +18,21 @@ pub fn nonblank(raw: Option<&str>) -> Option<&str> {
     raw.map(str::trim).filter(|value| !value.is_empty())
 }
 
+/// Whether a value is an explicit "off".
+///
+/// The words afi accepts for it, in one place. Three settings read them - the
+/// read-only posture, the config file's either-on merge, and the price refresh -
+/// and they differ only in what an *absent* value means, which is each caller's
+/// own business. Spelling the list three times meant adding a word was three
+/// edits, and the first two disagreeing was nothing's fault in particular.
+#[must_use]
+pub fn is_off(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
 /// Current Unix time as fractional seconds. Computed with an integer split and
 /// `f64::from(u32)` so there is no lossy `i64 -> f64` cast; exact for every
 /// timestamp before year 2106 (`u32` seconds).

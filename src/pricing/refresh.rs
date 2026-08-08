@@ -18,11 +18,13 @@ use std::hash::BuildHasher;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use tokio::task::spawn_blocking;
+
 use super::provider::ALL;
 use super::{catalog, table};
 use crate::atomic;
 use crate::sessions::afi_home;
-use crate::util::nonblank;
+use crate::util::{is_off, nonblank};
 
 /// How long afi waits for the whole catalogue. Generous, because nothing is
 /// blocked on it, and finite, because a socket that never answers would leave
@@ -55,12 +57,11 @@ pub(crate) fn plan<S: BuildHasher>(
 }
 
 /// Whether `AFI_PRICE_REFRESH` leaves the refresh on. On unless it plainly says
-/// otherwise, so an air-gapped setup opts out rather than everyone opting in.
+/// otherwise, so an air-gapped setup opts out rather than everyone opting in -
+/// which is the opposite default to the other two readers of [`is_off`], and the
+/// only thing that differs between them.
 fn enabled(raw: Option<&str>) -> bool {
-    !matches!(
-        nonblank(raw).map(str::to_ascii_lowercase).as_deref(),
-        Some("0" | "false" | "no" | "off")
-    )
+    !nonblank(raw).is_some_and(is_off)
 }
 
 /// Fetch the catalogue and write the projection to the cache.
@@ -78,22 +79,37 @@ pub(crate) async fn run(plan: Plan) {
     let Ok(response) = client.get(catalog.url()).send().await else {
         return;
     };
-    let Ok(body) = response.text().await else {
+    // Bytes rather than `text`: `response.text()` runs a UTF-8 validation pass
+    // and allocates a multi-megabyte `String` that `serde_json` then validates
+    // again.
+    let Ok(body) = response.bytes().await else {
         return;
     };
-    let Some(projection) = catalog.project(&body, &ALL) else {
+    // ~20 ms of parsing is CPU, and this task shares a runtime with the SSE
+    // stream the run is reading. `spawn_blocking` keeps it off those workers.
+    let Ok(Some(projection)) = spawn_blocking(move || catalog.project(&body, &ALL)).await else {
         return;
     };
-    // An empty projection is a catalogue that answered and priced nothing afi
-    // asked about. Writing it would replace a working table with an empty one,
-    // which is the single worst outcome available here.
-    if projection.is_empty() {
+    // A cache outranks the shipped table by date rather than by coverage, and
+    // the next day's refresh rewrites the same hole with a fresher date - so a
+    // projection that lost a provider takes its rates away permanently. Refuse
+    // any table that covers less than the one it would replace, which also
+    // covers the empty case: a catalogue that answered and priced nothing.
+    let (replacing, _) = table::layers(&plan.home, &plan.today);
+    if loses_coverage(&replacing, &projection) {
         return;
     }
     // Atomic, so a run reading the cache sees the old table or the new one and
     // never the prefix of one still being written.
     let body = catalog::render(&projection, &plan.today);
     let _ = atomic::write(&table::cache_path(&plan.home), body.as_bytes());
+}
+
+/// Whether writing `projection` would drop a provider the current table has.
+fn loses_coverage(replacing: &table::Providers, projection: &catalog::Projection) -> bool {
+    replacing
+        .keys()
+        .any(|provider| !projection.contains_key(provider))
 }
 
 #[cfg(test)]

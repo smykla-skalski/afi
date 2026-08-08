@@ -14,14 +14,14 @@ use serde_json::Value;
 
 use super::{Ui, say};
 use crate::config::Runtime;
-use crate::model::client::ReqwestClient;
+use crate::model::client::{Budgeted, ReqwestClient};
 use crate::model::compress::{self as model_compress, COMPRESS_KEEP, Summary, plan_compression};
 use crate::term::MessageKind::{Error, Info, Warning};
 
 pub(super) async fn cmd_compress(
     rt: &Runtime,
     messages: &mut Vec<Value>,
-    client: &ReqwestClient,
+    client: &Budgeted<ReqwestClient>,
     ui: Ui<'_>,
 ) {
     // Through the same plan the automatic fold runs, so `/compress` gets the pieces it
@@ -38,7 +38,6 @@ pub(super) async fn cmd_compress(
         say(ui, Error, "No active source");
         return;
     };
-
     let cancel = ui.start_activity("Compressing context");
     let summary = model_compress::fetch(client, source, model, plan.prompt(), &cancel).await;
     ui.stop_activity();

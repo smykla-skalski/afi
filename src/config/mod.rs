@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 
 mod args;
 mod bedrock;
+pub(crate) mod budget;
 mod builtins;
 mod effort;
 mod file;
@@ -23,6 +24,7 @@ mod window;
 pub use args::{ParsedArgs, parse_args};
 pub(crate) use bedrock::dns_suffix;
 pub use bedrock::{Bedrock, WebIdentity};
+pub use budget::Budget;
 pub use effort::Effort;
 pub use file::{FileSettings, Origin, config_files};
 pub use instructions::nested;

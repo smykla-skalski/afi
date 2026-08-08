@@ -20,6 +20,8 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::approval::Level;
 use crate::config::{Runtime, nested};
+use crate::cost;
+use crate::model::usage_totals;
 use crate::pricing::refresh;
 use crate::summary::{ErrorKind, RunError};
 use crate::term::plain::PlainUi;
@@ -181,7 +183,7 @@ fn styled_approval(rt: &Runtime) -> String {
 pub fn run_repl(rt: &mut Runtime) -> bool {
     let mut owned = rt.clone();
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
-    start_price_refresh(&runtime, &owned);
+    begin_run(&owned);
     if let Some(prompt_file) = owned.prompt_file.clone() {
         restore_prompt_resume(&mut owned);
         let mut ui = plain_ui_for(&owned);
@@ -189,6 +191,8 @@ pub fn run_repl(rt: &mut Runtime) -> bool {
         *rt = owned;
         return ok;
     }
+    // Only a session refreshes. See `start_price_refresh`.
+    start_price_refresh(&runtime, &owned);
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
         match runtime.block_on(tui::run(owned)) {
             Ok(updated) => *rt = updated,
@@ -204,6 +208,20 @@ pub fn run_repl(rt: &mut Runtime) -> bool {
     ok
 }
 
+/// Arm everything that is scoped to one run, before anything spends.
+///
+/// The budget guard and the token ledger it reads have the same lifetime and are
+/// now armed together. They used to be set up a layer apart - the guard here,
+/// the ledger inside `run_one_shot_async` - which left the TUI and piped paths
+/// arming a guard over a ledger nothing had cleared.
+///
+/// One CLI process is one run, so in the binary this happens once; tests share a
+/// process, which is what both `reset`s are for.
+fn begin_run(rt: &Runtime) {
+    usage_totals::reset();
+    cost::install(rt.budget, rt.pricing.as_ref());
+}
+
 /// Public one-shot helper. Output stays plain even when caller owns a TTY.
 ///
 /// # Panics
@@ -212,7 +230,7 @@ pub fn run_repl(rt: &mut Runtime) -> bool {
 #[must_use]
 pub fn run_one_shot(prompt_file: &str, rt: &Runtime) -> bool {
     let runtime = TokioRuntime::new().expect("failed to create tokio runtime");
-    start_price_refresh(&runtime, rt);
+    begin_run(rt);
     let mut ui = plain_ui_for(rt);
     runtime.block_on(run_one_shot_async(prompt_file, rt, &mut ui))
 }
@@ -220,12 +238,17 @@ pub fn run_one_shot(prompt_file: &str, rt: &Runtime) -> bool {
 /// Refresh the cached rate table in the background, for the next run to read.
 ///
 /// Detached rather than awaited: a run must never wait on the rate catalogue,
-/// and the
-/// table this run bills against was already resolved when the `Runtime` was
-/// built. A session that ends before the fetch does simply leaves the cache as
-/// it was, and next time the same question gets asked again.
+/// and the table this run bills against was already resolved when the `Runtime`
+/// was built.
 ///
-/// It runs even for a run that sets no budget and reports no cost, which is the
+/// **Sessions only.** A one-shot run returns the moment its answer is in, drops
+/// the Tokio runtime, and takes the fetch down with it - so it would pull the
+/// whole catalogue, write nothing, and pull it again next time. In CI, where
+/// every invocation is one-shot against an ephemeral `AFI_HOME`, that is the
+/// entire catalogue downloaded per run for a cache nobody ever reads. A session
+/// outlives the fetch, which is the only place it can finish.
+///
+/// It runs for a session that sets no budget and reports no cost, which is the
 /// point - the table has to already be current the first time somebody caps a
 /// run, not a day after.
 fn start_price_refresh(runtime: &TokioRuntime, rt: &Runtime) {

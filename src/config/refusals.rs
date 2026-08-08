@@ -59,5 +59,28 @@ pub(super) fn of(rt: &Runtime) -> Vec<RunError> {
             .and_then(Source::config_error)
             .map(|m| RunError::new(m, ErrorKind::Auth)),
     );
+    // Last, after the credential check: a source that cannot assemble one spends
+    // nothing, so complaining about its unpriced model first would be
+    // second-order.
+    out.extend(unenforceable_budget(rt).map(|m| RunError::new(m, ErrorKind::Input)));
     out
+}
+
+/// Why a budget this run was given could never fire, if it could not.
+///
+/// afi caps what a run spends by pricing what it used, so a cap it cannot
+/// measure is not a cap. Every other setting that fails this way degrades into
+/// something plausible; this one degrades into a run carrying a cap it will
+/// never enforce, spending real money while the invocation says it is capped.
+///
+/// Only the *active* model is checked, for the same reason only the active
+/// source is: a `/source` switch afterwards is an interactive path with a human
+/// present, and the turn loop stops that run at its next checkpoint.
+fn unenforceable_budget(rt: &Runtime) -> Option<String> {
+    let why = rt.budget_unenforceable()?;
+    let named = rt.budget?.named();
+    Some(format!(
+        "{named} cannot be enforced: {why} - afi caps what a run spends by pricing what \
+         it used, so price it in AFI_PRICES or drop the budget"
+    ))
 }

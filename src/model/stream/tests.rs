@@ -218,3 +218,39 @@ fn parse_sse_body_joins_data_fields() {
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].content.as_deref(), Some("a"));
 }
+
+#[test]
+fn a_count_the_provider_reported_is_never_marked_estimated() {
+    // The marker has to mean something, so the two paths that carry real
+    // provider numbers must never set it - `cost_usd` and a spend cap both act
+    // differently on one that does.
+    let usage = Usage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        ..Usage::default()
+    };
+    let reported = normalize_usage(Some(&usage), None, 4000).expect("usage must normalize");
+    assert!(!reported.estimated);
+
+    let timings = Timings {
+        prompt_n: 100,
+        predicted_n: 20,
+        cache_n: 5,
+    };
+    let llama = normalize_usage(None, Some(&timings), 4000).expect("timings must normalize");
+    assert!(!llama.estimated);
+}
+
+#[test]
+fn a_count_afi_had_to_guess_says_so() {
+    // Nobody reported anything, so this is one character in four - wrong in a
+    // known direction, with no input side at all. A run capped against it would
+    // over-run by roughly the whole prompt, which is why the marker exists.
+    let guessed = normalize_usage(None, None, 8000).expect("chars must estimate");
+    assert!(guessed.estimated);
+    assert_eq!(guessed.output_tokens, 2000);
+    assert_eq!(
+        guessed.input_tokens, 0,
+        "afi has no honest input figure here, and does not invent one"
+    );
+}

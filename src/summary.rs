@@ -22,9 +22,11 @@
 
 use serde_json::{Number, Value, json};
 
+use crate::cost::Outcome;
 use crate::model::usage_totals::{RefusedToolCalls, UsageTotals};
 
 mod auth;
+mod budget;
 mod file;
 mod format;
 mod schema;
@@ -130,6 +132,14 @@ pub struct RunSummary<'a> {
     /// token class it used. `None` leaves the field out entirely rather than
     /// reporting a zero a consumer would chart as free.
     pub cost_usd: Option<f64>,
+    /// What the run was allowed to spend, and what enforcing that did. `None`
+    /// when no cap was set, which is nearly every run - so the key is absent
+    /// rather than an object of nulls in every summary. See [`budget`].
+    pub budget: Option<Outcome>,
+    /// What the cap makes of the same spend `cost_usd` prices, in whole
+    /// micro-USD - an upper bound, so it survives a class `cost_usd` refuses to
+    /// guess at. `None` when even a bound is not available.
+    pub spent_micros: Option<u128>,
     pub elapsed_secs: f64,
     /// The tools the run was permitted to call. Reported so an audit of a CI run
     /// can confirm the restriction from the output alone, without trusting that
@@ -201,6 +211,10 @@ impl<'a> RunSummary<'a> {
             answer: "",
             usage: UsageTotals::default(),
             cost_usd: None,
+            // Nothing ran, so the cap never applied - consistent with the
+            // empty `tools` and the absent `effort` beside it.
+            budget: None,
+            spent_micros: None,
             elapsed_secs: 0.0,
             tools: Vec::new(),
             // No request was ever sent, so no effort was carried. Reporting the
@@ -273,7 +287,10 @@ impl<'a> RunSummary<'a> {
         // reported no tokens at all: dropping it would hide the one thing this
         // field exists to report. `requests` is still 0 there, which is how a
         // consumer tells the silent provider apart from a run that used nothing.
-        if self.usage.is_empty() && self.refused_tool_calls.is_empty() {
+        // A budgeted run always reports its block, even having spent nothing:
+        // the key's presence is what answers "was this run capped at all", and a
+        // run that failed before its first request was still capped.
+        if self.usage.is_empty() && self.refused_tool_calls.is_empty() && self.budget.is_none() {
             return Value::Null;
         }
         let mut usage = counts_json(&self.usage, self.cost_usd);
@@ -284,6 +301,14 @@ impl<'a> RunSummary<'a> {
         usage["refused_tool_calls"] = refused.total().into();
         usage["refused_by_policy"] = refused.by_policy.into();
         usage["refused_by_approval"] = refused.by_approval.into();
+        // Absent for an uncapped run, because the key's presence is itself the
+        // answer to "was this run capped at all".
+        if let (Some(block), Some(fields)) = (
+            budget::json(self.budget, self.spent_micros),
+            usage.as_object_mut(),
+        ) {
+            fields.insert("budget".to_string(), block);
+        }
         usage
     }
 }
@@ -300,6 +325,10 @@ fn counts_json(usage: &UsageTotals, cost_usd: Option<f64>) -> Value {
         "cache_read_tokens": usage.cache_read_tokens,
         "cache_write_tokens": usage.cache_write_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
+        // A subset of the five above, not a sixth class, so it is not in
+        // `total_tokens`. Above zero means part of `cost_usd` is afi's
+        // arithmetic rather than the provider's.
+        "estimated_tokens": usage.estimated_tokens,
         "total_tokens": usage.total_tokens(),
         "requests": usage.requests,
     });

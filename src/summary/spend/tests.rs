@@ -9,6 +9,7 @@ fn totals(input: u64, output: u64, requests: u64) -> UsageTotals {
         cache_write_tokens: 0,
         reasoning_tokens: 0,
         requests,
+        estimated_tokens: 0,
     }
 }
 
@@ -72,6 +73,11 @@ fn the_shape_of_an_entry_is_pinned_like_the_object_around_it() {
         [
             "cache_read_tokens",
             "cache_write_tokens",
+            // Reported per entry as well as run-wide, because it is the shared
+            // counts that carry it: a source whose endpoint reported no usage
+            // is the one worth naming, and folding it into the run's figure
+            // alone would hide which source afi had to guess at.
+            "estimated_tokens",
             "input_tokens",
             "output_tokens",
             "reasoning_tokens",

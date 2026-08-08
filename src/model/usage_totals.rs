@@ -29,6 +29,8 @@
 //! that bought nothing. Only a request that reported usage is recorded, so
 //! `billed_sources` names the sources that were actually billed.
 
+#[cfg(test)]
+use std::sync::MutexGuard;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -51,24 +53,45 @@ pub struct UsageTotals {
     /// provider gave no numbers for is not counted, so a caller can tell "nothing
     /// ran" from "the provider said nothing".
     pub requests: u64,
+    /// How many of the tokens above afi counted rather than was told.
+    ///
+    /// A subset marker over the five classes, not a sixth class, so it is
+    /// deliberately *not* part of [`Self::total_tokens`]. Zero is the ordinary
+    /// case. Anything else means part of any cost computed from these counts
+    /// rests on afi's arithmetic rather than the provider's - which is why a
+    /// budgeted run stops rather than capping against it.
+    pub estimated_tokens: u64,
 }
 
 impl UsageTotals {
+    /// One request's usage as totals in its own right.
+    ///
+    /// A request afi counted itself has every one of its tokens marked, which is
+    /// [`Self::total_tokens`] over this one entry - the same five classes, summed
+    /// the same way, rather than a second chain that has to be remembered when a
+    /// class is added.
+    pub(crate) fn of(usage: &NormalizedUsage) -> Self {
+        let mut totals = Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+            requests: 1,
+            estimated_tokens: 0,
+        };
+        if usage.estimated {
+            totals.estimated_tokens = totals.total_tokens();
+        }
+        totals
+    }
+
     /// Fold one request's normalized usage in.
     ///
     /// Crate-internal, like `merge`: the counts are a public shape to read, but
     /// building one is afi's own business and not a semver commitment.
     pub(crate) fn add(&mut self, usage: &NormalizedUsage) {
-        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
-        self.cache_read_tokens = self
-            .cache_read_tokens
-            .saturating_add(usage.cache_read_tokens);
-        self.cache_write_tokens = self
-            .cache_write_tokens
-            .saturating_add(usage.cache_write_tokens);
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
-        self.requests = self.requests.saturating_add(1);
+        self.merge(&Self::of(usage));
     }
 
     /// Fold another model's totals in, for the run-wide flat counts.
@@ -83,10 +106,12 @@ impl UsageTotals {
             .saturating_add(other.cache_write_tokens);
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
         self.requests = self.requests.saturating_add(other.requests);
+        self.estimated_tokens = self.estimated_tokens.saturating_add(other.estimated_tokens);
     }
 
     /// Every token the run was billed for. The five fields are disjoint, so this
-    /// is their sum rather than a separate provider figure.
+    /// is their sum rather than a separate provider figure. `estimated_tokens`
+    /// is a marker over those five and is deliberately not among them.
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens
@@ -100,6 +125,13 @@ impl UsageTotals {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.requests == 0
+    }
+
+    /// Whether any of these counts is afi's own arithmetic rather than a
+    /// provider's. A spend cap cannot hold over one of these.
+    #[must_use]
+    pub fn has_estimates(&self) -> bool {
+        self.estimated_tokens > 0
     }
 }
 
@@ -147,15 +179,13 @@ pub fn record(source: &str, provider: Option<Provider>, model: &str, usage: &Nor
         totals.add(usage);
         return;
     }
-    let mut totals = UsageTotals::default();
-    totals.add(usage);
     guard.entries.push((
         Billed {
             source: source.to_string(),
             provider,
             model: model.to_string(),
         },
-        totals,
+        UsageTotals::of(usage),
     ));
 }
 
@@ -294,6 +324,26 @@ pub fn refused_tool_calls() -> RefusedToolCalls {
         by_policy: REFUSED_BY_POLICY.load(Ordering::Relaxed),
         by_approval: REFUSED_BY_APPROVAL.load(Ordering::Relaxed),
     }
+}
+
+/// Held by every test that owns the run's process-wide state.
+///
+/// The ledger and the cost guard are one per process by design - one CLI process
+/// is one run - so a test cannot be given its own the way it is given its own
+/// temp dir. Several tests each documented that they were the sole owner, and
+/// under a filter that put two of them in flight together they raced: one
+/// test's `reset` landed between another's `record` and its `checkpoint`, and
+/// the cap read as unreached. The full suite passed only because sorted
+/// dispatch order happened to separate them, which nothing enforced.
+///
+/// This serializes those tests against each other and nothing else, so the
+/// suite still runs in parallel. Poisoning is recovered rather than propagated:
+/// one test panicking must not turn every later one into a second failure that
+/// hides it.
+#[cfg(test)]
+pub(crate) fn run_state_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Clear the totals. Exists for tests, which share one process.

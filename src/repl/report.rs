@@ -10,8 +10,9 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::config::{Runtime, Source, nested};
+use crate::cost;
 use crate::model::usage_totals::{self, Billed, UsageTotals};
-use crate::pricing::Pricing;
+use crate::pricing::{Priced, Pricing};
 use crate::summary::{self, RunError, RunSummary, SourceSpend, final_answer};
 
 use crate::term::{MessageKind, UserInterface};
@@ -78,6 +79,21 @@ fn build<'a>(
         // the requests carried - including a level `EXTRA_BODY` set by hand.
         effort: rt.active_source().and_then(Source::resolved_effort),
         refused_tool_calls: usage_totals::refused_tool_calls(),
+        // Read the same way the counts beside it are: the guard is
+        // process-wide because a budget is a fact about the run, so nothing
+        // had to be threaded here to ask it.
+        budget: cost::outcome(),
+        // The cap's own view of the same read `cost_usd` comes from, rather
+        // than the guard's last checkpoint - which runs before a turn, so on a
+        // run that finished normally it predates the final request.
+        spent_micros: rt
+            .pricing
+            .as_ref()
+            .and_then(|pricing| match pricing.run_cost(&spent) {
+                Priced::Spent(micros) | Priced::Estimated(micros) => Some(micros),
+                Priced::Nothing => Some(0),
+                Priced::Unpriceable(_) => None,
+            }),
         auth: billing_source(&rt.sources, rt.active_source(), &by_source).map(Source::run_auth),
         sources: spend_by_source(&rt.sources, rt.pricing.as_ref(), &by_source),
         // A run that reaches here resolved its prompt; the refusal path reports

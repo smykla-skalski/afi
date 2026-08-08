@@ -46,10 +46,6 @@ fn slug(provider: Provider) -> &'static str {
 }
 
 impl Catalog for ModelsDev {
-    fn name(&self) -> &'static str {
-        "models.dev"
-    }
-
     fn url(&self) -> &'static str {
         "https://models.dev/api.json"
     }

@@ -81,6 +81,5 @@ fn the_active_catalogue_says_who_it_is() {
     // The one place a catalogue is named. A swap is this assertion changing and
     // nothing above `catalog` noticing.
     let catalog = active();
-    assert_eq!(catalog.name(), "models.dev");
-    assert!(catalog.url().starts_with("https://"));
+    assert_eq!(catalog.url(), "https://models.dev/api.json");
 }

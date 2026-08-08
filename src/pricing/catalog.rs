@@ -46,10 +46,12 @@ pub type Projection = BTreeMap<Provider, BTreeMap<String, ModelRates>>;
 /// nothing about caching, staleness, layering, or how afi stores a table. Those
 /// are afi's, and a new catalogue does not get to have opinions about them.
 pub trait Catalog: Send + Sync {
-    /// What to call this catalogue in a message a person reads.
-    fn name(&self) -> &'static str;
-
     /// Where the catalogue is fetched from.
+    ///
+    /// Also what identifies it. There is deliberately no `name`: the refresh
+    /// reports nothing by design, and the staleness warning names the date
+    /// rather than the publisher, so a display name would be a method the trait
+    /// obliged an implementer to write and nothing ever called.
     fn url(&self) -> &'static str;
 
     /// Narrow a fetched catalogue to the providers afi can bill against.

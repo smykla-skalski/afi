@@ -28,7 +28,12 @@ use provider::Provider;
 pub(crate) use rates::{RATE_CLASSES, millionths, usd};
 use rates::{RawRates, key, report_bad_rate, report_duplicate, round_to_micros};
 
-pub mod catalog;
+// Crate-internal, unlike `provider`: `Provider` is a field type on the public
+// `usage_totals::Billed`, but nothing outside this module names a catalogue. A
+// `pub` facade would make the trait's shape a semver commitment and contradict
+// the one promise it exists to make - that swapping catalogues is invisible
+// above it.
+pub(crate) mod catalog;
 pub mod provider;
 mod rates;
 pub(crate) mod refresh;
@@ -155,8 +160,13 @@ impl Pricing {
     ///
     /// The rate table as the caller wrote it and nothing else, for a caller
     /// testing what it wrote rather than what a run would bill.
+    ///
+    /// Compiled only for tests, which is what `pub` was hiding: a run reaches
+    /// its rates through [`Self::from_env`], and this shape - overrides with no
+    /// table beneath them - is one no run produces.
+    #[cfg(test)]
     #[must_use]
-    pub fn parse(raw: Option<&str>) -> Option<Self> {
+    pub(crate) fn parse(raw: Option<&str>) -> Option<Self> {
         let overrides = read_overrides(raw)?;
         if overrides.is_empty() {
             return None;
@@ -232,23 +242,35 @@ impl Pricing {
         if billed.is_empty() {
             return Priced::Nothing;
         }
-        let mut weighted: u128 = 0;
-        let mut estimated = false;
-        for (who, usage) in billed {
-            estimated |= usage.has_estimates();
-            let Some(rates) = self.rates_for(who.provider, &who.model) else {
-                return Priced::Unpriceable(format!("no rate for model {:?}", who.model));
-            };
-            match rates.weighted(usage, Bound::Ceiling) {
-                Ok(amount) => weighted = weighted.saturating_add(amount),
-                Err(class) => return Priced::Unpriceable(missing(&who.model, class)),
-            }
-        }
-        let micros = round_to_micros(weighted);
-        if estimated {
+        let micros = match self.weigh(billed, Bound::Ceiling) {
+            Ok(weighted) => round_to_micros(weighted),
+            Err(why) => return Priced::Unpriceable(why),
+        };
+        if billed.iter().any(|(_, usage)| usage.has_estimates()) {
             return Priced::Estimated(micros);
         }
         Priced::Spent(micros)
+    }
+
+    /// `tokens x rate` summed over every billed entry, left undivided, or the
+    /// sentence naming what could not be priced.
+    ///
+    /// The one walk of the ledger. Both callers want the same arithmetic and
+    /// differ only in what an unpriced class costs, which is what [`Bound`]
+    /// already says - so parameterising here rather than at [`Rates::weighted`]
+    /// alone keeps the two from drifting, which is the pair `Bound` exists for.
+    fn weigh(&self, billed: &[(Billed, UsageTotals)], bound: Bound) -> Result<u128, String> {
+        let mut weighted: u128 = 0;
+        for (who, usage) in billed {
+            let Some(rates) = self.rates_for(who.provider, &who.model) else {
+                return Err(format!("no rate for model {:?}", who.model));
+            };
+            let amount = rates
+                .weighted(usage, bound)
+                .map_err(|class| missing(&who.model, class))?;
+            weighted = weighted.saturating_add(amount);
+        }
+        Ok(weighted)
     }
 
     /// The run's cost in USD, priced per entry so a session that switched source
@@ -261,15 +283,13 @@ impl Pricing {
     /// `usage.estimated_tokens` beside it is what marks it as one.
     #[must_use]
     pub fn run_cost_usd(&self, billed: &[(Billed, UsageTotals)]) -> Option<f64> {
+        // Kept rather than folded into `weigh`, which prices an empty ledger at
+        // zero: a run that spent nothing has no cost to report, where the cap
+        // reads the same ledger as `Nothing` and carries on.
         if billed.is_empty() {
             return None;
         }
-        let mut weighted: u128 = 0;
-        for (who, usage) in billed {
-            let rates = self.rates_for(who.provider, &who.model)?;
-            weighted = weighted.saturating_add(rates.weighted(usage, Bound::Exact).ok()?);
-        }
-        usd(round_to_micros(weighted))
+        usd(round_to_micros(self.weigh(billed, Bound::Exact).ok()?))
     }
 }
 

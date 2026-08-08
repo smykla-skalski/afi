@@ -40,20 +40,45 @@ pub(super) struct Table {
     pub providers: HashMap<String, HashMap<String, RawRates>>,
 }
 
+/// The table compiled into the binary.
+const VENDORED: &str = include_str!("../../assets/prices.json");
+
+/// What a build that shipped an unreadable asset gets told. There is no runtime
+/// path to it - `the_vendored_table_is_readable` catches it in the test suite.
+const BROKEN: &str = "the vendored rate table must parse; run `mise run prices:project`";
+
 /// The compiled-in table.
 ///
 /// Parsed on first use rather than at startup, so `--help` and `--version` -
-/// which are answered before anything else - pay nothing for it.
-///
-/// A panic here is a build that shipped a broken asset, which
-/// `the_vendored_table_is_readable` catches in the test suite. There is no
-/// runtime path to it.
+/// which are answered before anything else - pay nothing for it, and so does a
+/// run whose cache wins.
 pub(super) fn vendored() -> &'static Table {
-    static VENDORED: LazyLock<Table> = LazyLock::new(|| {
-        serde_json::from_str(include_str!("../../assets/prices.json"))
-            .expect("the vendored rate table must parse; run `mise run prices:project`")
+    static PARSED: LazyLock<Table> =
+        LazyLock::new(|| serde_json::from_str(VENDORED).expect(BROKEN));
+    &PARSED
+}
+
+/// The compiled-in table's date, without building the table.
+///
+/// [`cached`] needs one string to decide which layer wins. Reading it off
+/// [`vendored`] would build ~675 models to look at a date and then drop them
+/// when the cache is newer - and being a `LazyLock`, leave them resident for the
+/// life of the process. On a machine the refresh has reached, which is the
+/// steady state this layer exists to produce, that is the whole asset parsed for
+/// nothing on every run.
+fn vendored_fetched() -> &'static str {
+    static FETCHED: LazyLock<String> = LazyLock::new(|| {
+        /// Everything but the date is skipped rather than deserialized - no
+        /// `deny_unknown_fields`, so `providers` is walked and discarded.
+        #[derive(Deserialize)]
+        struct Stamp {
+            fetched: String,
+        }
+        serde_json::from_str::<Stamp>(VENDORED)
+            .expect(BROKEN)
+            .fetched
     });
-    &VENDORED
+    &FETCHED
 }
 
 /// Where a refreshed table is kept.
@@ -71,7 +96,7 @@ pub(crate) fn cache_path(home: &Path) -> PathBuf {
 pub(super) fn cached(home: &Path) -> Option<Table> {
     let body = fs::read_to_string(cache_path(home)).ok()?;
     let table: Table = serde_json::from_str(&body).ok()?;
-    (table.fetched.as_str() > vendored().fetched.as_str()).then_some(table)
+    (table.fetched.as_str() > vendored_fetched()).then_some(table)
 }
 
 /// Whether the table is old enough to be worth refreshing.

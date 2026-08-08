@@ -28,7 +28,7 @@ use crate::pricing::{Priced, Pricing, usd};
 
 /// What the run's spend allows.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
+pub(crate) enum Verdict {
     /// No budget was set: every run before this feature, and every run that
     /// sets none.
     Unlimited,
@@ -45,7 +45,7 @@ pub enum Verdict {
 
 /// The two figures a threshold message names, in whole micro-USD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Crossing {
+pub(crate) struct Crossing {
     pub spent: u128,
     pub limit: u128,
 }
@@ -57,7 +57,7 @@ impl Crossing {
     /// sub-cent budget as `$0.00` - and a cap of $0.005 is a thing a test
     /// harness sets.
     #[must_use]
-    pub fn describe(self) -> String {
+    pub(crate) fn describe(self) -> String {
         format!("{} of {}", money(self.spent), money(self.limit))
     }
 }
@@ -159,7 +159,7 @@ fn guard() -> &'static Mutex<Option<Guard>> {
 /// this is called once at startup, and by tests, which share one process. A
 /// budget with no rates to measure it never reaches here: `config::refusals`
 /// stops that run before it starts.
-pub fn install(budget: Option<Budget>, pricing: Option<&Pricing>) {
+pub(crate) fn install(budget: Option<Budget>, pricing: Option<&Pricing>) {
     let armed = match (budget, pricing) {
         (Some(budget), Some(pricing)) => Some(Guard {
             budget,
@@ -173,8 +173,11 @@ pub fn install(budget: Option<Budget>, pricing: Option<&Pricing>) {
     *guard().lock().unwrap_or_else(PoisonError::into_inner) = armed;
 }
 
-/// Clear the budget. Exists for tests, which share one process.
-pub fn reset() {
+/// Clear the budget. Exists for tests, which share one process - and compiled
+/// only for them, which is what `pub` was hiding: no run clears a budget, it
+/// installs one at startup and lives with it.
+#[cfg(test)]
+pub(crate) fn reset() {
     install(None, None);
 }
 
@@ -183,7 +186,7 @@ pub fn reset() {
 /// Latching: only the turn loop can deliver a converge note, so only the turn
 /// loop may consume one. Everything else that spends asks [`may_spend`].
 #[must_use]
-pub fn checkpoint() -> Verdict {
+pub(crate) fn checkpoint() -> Verdict {
     if !ARMED.load(Ordering::Relaxed) {
         return Verdict::Unlimited;
     }
@@ -198,7 +201,7 @@ pub fn checkpoint() -> Verdict {
 /// Read-only and consumes nothing, for everything that spends outside the turn
 /// loop - `/compress` today, whatever is added next.
 #[must_use]
-pub fn may_spend() -> bool {
+pub(crate) fn may_spend() -> bool {
     if !ARMED.load(Ordering::Relaxed) {
         return true;
     }
@@ -211,7 +214,7 @@ pub fn may_spend() -> bool {
 
 /// The budget block the run summary reports, or `None` when none was set.
 #[must_use]
-pub fn outcome() -> Option<Outcome> {
+pub(crate) fn outcome() -> Option<Outcome> {
     guard()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 
 use super::CompressResult;
+use crate::config::nested;
 
 /// A fold that has been worked out but not performed: which turns go into the
 /// summary, which survive verbatim, and the prompt that asks for the summary.
@@ -47,6 +48,16 @@ impl CompressionPlan {
         if summary.is_empty() {
             return None;
         }
+        // Release the subtree instructions the summarized turns were carrying,
+        // the same contract `/compress` honours. Every nested block rides in a
+        // tool result, so folding one away takes it out of the conversation while
+        // `nested` still has its path marked sent and its bytes charged - the
+        // model would never be told those rules again, and `/instructions` would
+        // go on reporting rules it can no longer see. The head is exactly the
+        // dropped span by construction: `summarized_n` is its length.
+        let body_start = usize::from(self.has_sys);
+        nested::forget_in(&messages[body_start..body_start + self.summarized_n]);
+
         // The tail is what survived, so it is what the header counts. Reporting
         // the requested `keep` instead would overstate whenever
         // `trim_unrenderable_tail_head` took one back off.

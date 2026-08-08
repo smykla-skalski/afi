@@ -20,7 +20,7 @@ use crate::summary::{ErrorKind, RunError};
 use crate::term::plain::PlainUi;
 
 use core::{ReplCore, restore_prompt_resume, run_one_shot_async};
-pub(crate) use core::{TurnParams, run_turn_loop};
+pub(crate) use core::{Shared, TurnParams, run_turn_loop};
 
 pub const DIM: &str = "\x1b[2m";
 pub const CYAN: &str = "\x1b[36m";

@@ -78,9 +78,8 @@ const MILLION: u64 = 1_000_000;
 
 #[test]
 fn each_entry_takes_its_counts_and_its_credential_from_its_own_source() {
-    // The bug this is here to catch: reading either off the active source, which
-    // is `second` here, would credit it with the whole run and name its
-    // credential for both entries.
+    // The bug this is here to catch: crediting an entry with the whole run's
+    // counts, or naming a credential that belongs to some other source.
     let billed: BySource = vec![
         spent("first", "model-one", totals(MILLION, MILLION, 1)),
         spent("second", "model-two", totals(7, 3, 2)),

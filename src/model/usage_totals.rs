@@ -14,9 +14,9 @@
 //! The accumulator keys on the source a request was billed to and the model that
 //! served it, because a piped session can `/source` its way onto a second of
 //! each. Neither key derives from the other: rates are per model, and budgets
-//! are per source. `snapshot` folds both away for the summary's flat counts,
-//! `snapshot_by_model` keeps the models apart for pricing, and
-//! `snapshot_by_source` keeps the sources apart for attribution.
+//! are per source. `snapshot_by_source` is the one read, and the folds over it
+//! are pure: `by_model` folds the sources away again for pricing, and `total`
+//! folds what is left for the summary's flat counts.
 //!
 //! Which credential paid cannot be read off whichever source happens to be
 //! active when the run ends: a session that spends on one and then switches

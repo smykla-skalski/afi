@@ -137,9 +137,15 @@ pub fn of_url(base_url: &str) -> Option<Provider> {
 /// `bedrock-runtime.{region}.{suffix}`, so the Region in the middle is the part
 /// that varies and the two ends are the part that identifies AWS - matching the
 /// prefix alone would bill `bedrock-runtime.someone-else.com` at AWS's rates.
+///
+/// The FIPS spelling is accepted because `AFI_BEDROCK_BASE_URL` is a documented
+/// knob and `bedrock-runtime-fips.<region>.amazonaws.com` is the value a
+/// compliance-bound deployment sets. It is the same service billed the same way,
+/// and rejecting it would leave those runs unpriced - and any budgeted one
+/// refusing to start.
 fn is_bedrock(host: &str) -> bool {
-    host.starts_with("bedrock-runtime.")
-        && (host.ends_with(".amazonaws.com") || host.ends_with(".amazonaws.com.cn"))
+    let named = host.starts_with("bedrock-runtime.") || host.starts_with("bedrock-runtime-fips.");
+    named && (host.ends_with(".amazonaws.com") || host.ends_with(".amazonaws.com.cn"))
 }
 
 /// The host part of a base url, lowercased, without credentials or port.

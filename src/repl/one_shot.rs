@@ -17,7 +17,6 @@ use crate::config::Runtime;
 use crate::log::log_event;
 use crate::model::ModelConfig;
 use crate::model::client::ReqwestClient;
-use crate::model::usage_totals;
 use crate::summary::{ErrorKind, RunError};
 use crate::term::{MessageKind, UserInterface};
 
@@ -31,8 +30,6 @@ pub(crate) async fn run_one_shot_async(
     rt: &Runtime,
     ui: &mut dyn UserInterface,
 ) -> bool {
-    // One process is one run, but tests share a process.
-    usage_totals::reset();
     let started = Instant::now();
     let mut messages = Vec::new();
     let outcome = one_shot_run(prompt_file, rt, ui, &mut messages).await;

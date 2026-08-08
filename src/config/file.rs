@@ -38,6 +38,8 @@ use std::fs;
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
+use crate::util::{is_off, nonblank};
+
 use serde_json::Value;
 
 use crate::sessions::afi_home;
@@ -328,12 +330,7 @@ fn intersection(first: &str, second: &str) -> Result<String, String> {
 
 /// On when either file asks for it, since the posture only ever tightens.
 fn either_on(first: &str, second: &str) -> String {
-    let on = |raw: &str| {
-        !matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "no" | "off"
-        )
-    };
+    let on = |raw| nonblank(Some(raw)).is_some_and(|value| !is_off(value));
     if on(first) || on(second) {
         "1".to_string()
     } else {

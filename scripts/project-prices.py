@@ -40,7 +40,7 @@ SOURCE = "https://models.dev/api.json"
 # catalogue is how the two get welded together without anyone deciding to.
 #
 # The left column has to be `Provider::key` in `src/pricing/provider.rs`, and
-# `the_vendored_table_and_the_host_table_agree` fails when it drifts.
+# `the_vendored_table_and_the_provider_list_agree` fails when it drifts.
 PROVIDERS = {
     "anthropic": "anthropic",
     "bedrock": "amazon-bedrock",

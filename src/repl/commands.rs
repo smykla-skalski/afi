@@ -14,7 +14,7 @@ use super::core::session_meta;
 use super::failure::RunFailure;
 use super::{NO_ACTIVE_SOURCE, Shared, TurnParams, header, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
-use crate::config::{Runtime, Source, nested};
+use crate::config::{Runtime, nested};
 use crate::memory::{list_memories, remember_memories};
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
 use crate::model::{ModelConfig, TurnOutcome};
@@ -181,15 +181,11 @@ fn cmd_source(rt: &mut Runtime, arg: &str, ui: Ui<'_>) {
 /// checkpoint, and it is a failure rather than a cap hit: a budget that cannot
 /// be measured must never be treated as no budget.
 fn budget_switch_note(rt: &Runtime) -> Option<String> {
-    let budget = rt.budget?;
-    let why = rt.pricing.as_ref()?.unpriceable(
-        rt.active_source().and_then(Source::price_provider),
-        rt.model.as_deref()?,
-    )?;
+    let why = rt.budget_unenforceable()?;
     Some(format!(
         "{} cannot be enforced here: {why} - the next turn will stop the run rather \
          than spend under a cap afi cannot measure",
-        budget.named()
+        rt.budget?.named()
     ))
 }
 

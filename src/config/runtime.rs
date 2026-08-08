@@ -182,7 +182,7 @@ impl Runtime {
         // `Input`: a cap afi cannot read is the invocation naming an amount it
         // has no answer for, and retrying it lands in the same place.
         let budget =
-            budget::resolve(parsed.budget_usd.as_deref(), &env).unwrap_or_else(|refusal| {
+            budget::resolve_budget(parsed.budget_usd.as_deref(), &env).unwrap_or_else(|refusal| {
                 flag_errors.push(RunError::new(refusal, ErrorKind::Input));
                 None
             });
@@ -330,6 +330,26 @@ impl Runtime {
     #[must_use]
     pub fn active_source(&self) -> Option<&Source> {
         self.active.as_ref().and_then(|n| self.sources.get(n))
+    }
+
+    /// Why a budget this run was given could not be enforced, if it could not.
+    ///
+    /// One expression, two callers: `refusals` turns it into a refusal before the
+    /// run starts, and `/source` into a warning when a switch lands somewhere
+    /// unpriceable. They used to compute it separately and had already drifted -
+    /// only one of them treated an unreadable rate table as unenforceable.
+    ///
+    /// `None` when there is no budget, no model yet, or nothing wrong. Only the
+    /// *active* model is checked; the ledger-side question - can what was already
+    /// spent be priced - is the turn loop's, and catches what this cannot see.
+    #[must_use]
+    pub fn budget_unenforceable(&self) -> Option<String> {
+        self.budget?;
+        let model = self.model.as_deref()?;
+        let Some(pricing) = self.pricing.as_ref() else {
+            return Some("no rate table could be read".to_string());
+        };
+        pricing.unpriceable(self.active_source().and_then(Source::price_provider), model)
     }
 
     /// Why this run must not start, if it must not. See [`super::refusals`],

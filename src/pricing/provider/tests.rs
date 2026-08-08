@@ -1,4 +1,5 @@
 use super::{ALL, Provider, of_url};
+use crate::config::Bedrock;
 use crate::pricing::table::vendored;
 
 #[test]
@@ -31,6 +32,37 @@ fn every_bedrock_region_is_one_rule() {
     ] {
         assert_eq!(of_url(url), Some(Provider::Bedrock), "{url}");
     }
+}
+
+#[test]
+fn the_endpoint_afi_builds_for_itself_resolves_to_bedrock() {
+    // Two spellings of one host shape, in two modules: `bedrock::ENDPOINT`
+    // writes it and the host table reads it. Derived from the real builder
+    // rather than hardcoded, so the two cannot drift - if AWS moves the host,
+    // this fails instead of every Bedrock run silently losing its price and
+    // every budgeted one silently refusing to start.
+    for region in ["us-east-1", "eu-central-1", "cn-north-1"] {
+        let bedrock = Bedrock {
+            region: Some(region.to_string()),
+            ..Bedrock::default()
+        };
+        let built = bedrock.base_url().expect("a Region builds an endpoint");
+        assert_eq!(
+            of_url(&built),
+            Some(Provider::Bedrock),
+            "afi builds {built} and then cannot price it"
+        );
+    }
+}
+
+#[test]
+fn a_compliance_endpoint_is_still_bedrock() {
+    // `AFI_BEDROCK_BASE_URL` is documented, and this is what a FIPS-bound
+    // deployment points it at. Same service, same bill.
+    assert_eq!(
+        of_url("https://bedrock-runtime-fips.us-east-1.amazonaws.com/v1"),
+        Some(Provider::Bedrock)
+    );
 }
 
 #[test]

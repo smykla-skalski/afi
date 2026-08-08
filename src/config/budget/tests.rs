@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::resolve;
+use super::resolve_budget as resolve;
 
 fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs

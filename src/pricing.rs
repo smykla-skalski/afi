@@ -174,26 +174,23 @@ impl Pricing {
     /// refuse a configuration that is complete for the endpoint it talks to.
     #[must_use]
     pub fn unpriceable(&self, provider: Option<Provider>, model: &str) -> Option<String> {
-        let probe = Billed {
-            source: String::new(),
-            provider,
-            model: model.to_string(),
-        };
-        let Some(rates) = self.rates_for(&probe) else {
+        // Not `?`: no rates at all is the *most* unpriceable a model gets, and
+        // returning `None` there would report it as priceable.
+        let Some(rates) = self.rates_for(provider, model) else {
             return Some(format!("no rate for model {model:?}"));
         };
         match (rates.input, rates.output) {
             (Some(_), Some(_)) => None,
-            (None, _) => Some(format!("model {model:?} has no \"input\" rate")),
-            _ => Some(format!("model {model:?} has no \"output\" rate")),
+            (None, _) => Some(missing(model, "input")),
+            _ => Some(missing(model, "output")),
         }
     }
 
-    /// The rates that price one billed entry, or `None` when nothing does.
-    fn rates_for(&self, billed: &Billed) -> Option<Rates> {
-        let model = key(&billed.model);
-        let table = billed
-            .provider
+    /// The rates that price one model on one provider, or `None` when nothing
+    /// does.
+    fn rates_for(&self, provider: Option<Provider>, model: &str) -> Option<Rates> {
+        let model = key(model);
+        let table = provider
             .and_then(|provider| self.by_provider.get(&provider))
             .and_then(|models| models.get(&model))
             .copied();
@@ -205,31 +202,33 @@ impl Pricing {
 
     /// The run's cost so far in whole micro-USD, or why there is no figure.
     ///
-    /// [`Self::run_cost_usd`] folds every failure into `None`, because a summary
-    /// reports a figure or reports nothing. A spend cap cannot afford that: "no
-    /// request has spent yet" is zero and must not stop a run, while "afi cannot
-    /// price what was spent" is the one thing a cap must never read as free.
+    /// [`Self::run_cost_usd`] folds every reason into a figure or `None`, because
+    /// a summary reports one or the other. A spend cap cannot afford that: "no
+    /// request has spent yet" is zero and must not stop a run, "afi counted these
+    /// itself" is a number a cap must not act on, and "afi cannot price what was
+    /// spent" is the one thing a cap must never read as free.
     #[must_use]
     pub fn run_cost(&self, billed: &[(Billed, UsageTotals)]) -> Priced {
         if billed.is_empty() {
             return Priced::Nothing;
         }
         let mut weighted: u128 = 0;
+        let mut estimated = false;
         for (who, usage) in billed {
-            let Some(rates) = self.rates_for(who) else {
-                return Priced::NoRates(who.model.clone());
+            estimated |= usage.has_estimates();
+            let Some(rates) = self.rates_for(who.provider, &who.model) else {
+                return Priced::Unpriceable(format!("no rate for model {:?}", who.model));
             };
             match rates.weighted(usage) {
                 Ok(amount) => weighted = weighted.saturating_add(amount),
-                Err(class) => {
-                    return Priced::NoRate {
-                        model: who.model.clone(),
-                        class,
-                    };
-                }
+                Err(class) => return Priced::Unpriceable(missing(&who.model, class)),
             }
         }
-        Priced::Spent(round_to_micros(weighted))
+        let micros = round_to_micros(weighted);
+        if estimated {
+            return Priced::Estimated(micros);
+        }
+        Priced::Spent(micros)
     }
 
     /// The run's cost in USD, priced per entry so a session that switched source
@@ -237,14 +236,20 @@ impl Pricing {
     ///
     /// `None` when anything that spent tokens has no rates, or no rate for a
     /// class it used. Absent beats approximate: a partial total under-reports
-    /// without saying so.
+    /// without saying so. An estimated figure is still reported, because
+    /// `usage.estimated_tokens` beside it is what marks it as one.
     #[must_use]
     pub fn run_cost_usd(&self, billed: &[(Billed, UsageTotals)]) -> Option<f64> {
         match self.run_cost(billed) {
-            Priced::Spent(micros) => usd(micros),
-            _ => None,
+            Priced::Spent(micros) | Priced::Estimated(micros) => usd(micros),
+            Priced::Nothing | Priced::Unpriceable(_) => None,
         }
     }
+}
+
+/// A model that has rates but not the one it spent on.
+fn missing(model: &str, class: &str) -> String {
+    format!("model {model:?} has no {class:?} rate, and spent there")
 }
 
 /// What a run's spend adds up to, or why it does not.
@@ -253,29 +258,17 @@ pub enum Priced {
     /// The run's cost so far, in whole micro-USD, rounded half-up once at the
     /// end so the figure does not depend on how the run split across turns.
     Spent(u128),
+    /// The same figure, over counts afi produced itself because nobody else did.
+    ///
+    /// Reportable and not cappable. The chars-per-token fallback records no
+    /// input tokens at all, so a run capped against this would over-run by
+    /// roughly the whole prompt while looking exactly as confident.
+    Estimated(u128),
     /// No request has reported usage, so there is nothing to price. Zero, not
     /// unknown.
     Nothing,
-    /// Something that spent tokens has no rates at all - an endpoint afi does
-    /// not recognise, or a model nothing carries a rate for.
-    NoRates(String),
-    /// A model with rates has none for a class it spent on.
-    NoRate { model: String, class: &'static str },
-}
-
-impl Priced {
-    /// The sentence to report when a run cannot be priced, or `None` when it
-    /// can. `Nothing` is priceable: it is zero.
-    #[must_use]
-    pub fn why_not(&self) -> Option<String> {
-        match self {
-            Self::Spent(_) | Self::Nothing => None,
-            Self::NoRates(model) => Some(format!("no rate for model {model:?}")),
-            Self::NoRate { model, class } => Some(format!(
-                "model {model:?} has no {class:?} rate, and spent there"
-            )),
-        }
-    }
+    /// Something that spent tokens cannot be priced, and the sentence saying so.
+    Unpriceable(String),
 }
 
 /// The operator's own rates, or `None` when what they wrote is unusable.

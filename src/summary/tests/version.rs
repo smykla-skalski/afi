@@ -8,7 +8,7 @@ use super::shape::sorted_keys;
 use super::{summary, totals};
 use std::collections::HashMap;
 
-use crate::config::resolve_budget_for_tests;
+use crate::config::budget::resolve_budget;
 use crate::cost::Outcome;
 use crate::model::usage_totals::UsageTotals;
 use crate::summary::{ErrorKind, RunSummary, SCHEMA_VERSION};
@@ -197,7 +197,7 @@ fn a_cap_that_never_measured_anything_reports_a_null_rather_than_a_zero() {
 /// A $5 cap that stopped a run at $4.83, at the default thresholds.
 fn capped() -> Outcome {
     Outcome {
-        budget: resolve_budget_for_tests("5", &HashMap::new()),
+        budget: resolve_budget(Some("5"), &HashMap::new()).unwrap().unwrap(),
         spent: Some(4_830_000),
         converged: true,
         stopped: true,

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 
 use crate::pricing::{millionths, usd};
+use crate::util::nonblank;
 
 /// Where the model is told to converge, as millionths.
 const DEFAULT_SOFT: u64 = 800_000;
@@ -95,7 +96,12 @@ impl Budget {
 /// without one. A standing `soft_budget_ratio` in the operator's own file
 /// waiting for a per-run `--budget-usd` is the shape this is meant to have, and
 /// refusing that would break every interactive run on the machine.
-pub(super) fn resolve<S: BuildHasher>(
+///
+/// `pub(crate)` rather than `pub(super)` so it is also the only way a test
+/// anywhere in the crate gets a `Budget`. A second constructor for tests could
+/// disagree with the one a run uses, which is the one thing a cap fixture must
+/// not do. Nothing but `Runtime` should call it in production.
+pub(crate) fn resolve_budget<S: BuildHasher>(
     flag: Option<&str>,
     env: &HashMap<String, String, S>,
 ) -> Result<Option<Budget>, String> {
@@ -112,17 +118,17 @@ pub(super) fn resolve<S: BuildHasher>(
     let Some((named, raw)) = named_budget(flag, env) else {
         return Ok(None);
     };
-    let Some(limit) = millionths(raw.trim()) else {
+    if millionths(raw.trim()) == Some(0) {
+        return Err(format!(
+            "{named} 0 would stop the run before its first request - leave it unset for no cap"
+        ));
+    }
+    let Some(limit) = amount(raw) else {
         return Err(format!(
             "{named} {raw:?} is not an amount in USD (want dollars, nothing negative, \
              and no finer than a millionth of a dollar)"
         ));
     };
-    if limit == 0 {
-        return Err(format!(
-            "{named} 0 would stop the run before its first request - leave it unset for no cap"
-        ));
-    }
     let limit = u128::from(limit);
     Ok(Some(Budget {
         limit,
@@ -142,11 +148,8 @@ fn named_budget<'a, S: BuildHasher>(
     if let Some(raw) = flag {
         return Some(("--budget-usd", raw));
     }
-    // A blank variable is unset, as everywhere.
-    env.get("AFI_BUDGET_USD")
-        .map(String::as_str)
-        .filter(|raw| !raw.trim().is_empty())
-        .map(|raw| ("AFI_BUDGET_USD", raw))
+    // A blank variable is unset, as everywhere - `util::nonblank` is the rule.
+    nonblank(env.get("AFI_BUDGET_USD").map(String::as_str)).map(|raw| ("AFI_BUDGET_USD", raw))
 }
 
 /// A fraction of the budget, as millionths.
@@ -155,20 +158,34 @@ fn ratio<S: BuildHasher>(
     name: &'static str,
     default: u64,
 ) -> Result<u64, String> {
-    let Some(raw) = env
-        .get(name)
-        .map(String::as_str)
-        .filter(|raw| !raw.trim().is_empty())
-    else {
+    let Some(raw) = nonblank(env.get(name).map(String::as_str)) else {
         return Ok(default);
     };
-    match millionths(raw.trim()) {
-        Some(value) if value > 0 && u128::from(value) <= ONE => Ok(value),
-        _ => Err(format!(
+    fraction(raw).ok_or_else(|| {
+        format!(
             "{name} {raw:?} is not a fraction of the budget \
              (want a number above 0 and at most 1)"
-        )),
-    }
+        )
+    })
+}
+
+/// A fraction of the budget as millionths, or `None` when it is not one.
+///
+/// The bound in one place. `config::file::value::ratio` refuses the same shape
+/// under the config key's name, and a file that accepted what this refused would
+/// report the mistake against the wrong spelling.
+#[must_use]
+pub(crate) fn fraction(raw: &str) -> Option<u64> {
+    millionths(raw.trim()).filter(|value| *value > 0 && u128::from(*value) <= ONE)
+}
+
+/// An amount in USD as whole micro-USD, or `None` when it is not one.
+///
+/// Zero is refused: a budget of nothing stops a run before its first request and
+/// reports success, which is the one shape a cap must not take by accident.
+#[must_use]
+pub(crate) fn amount(raw: &str) -> Option<u64> {
+    millionths(raw.trim()).filter(|micros| *micros > 0)
 }
 
 /// `limit x ratio`, in whole micro-USD. Integer throughout - a threshold that

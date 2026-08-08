@@ -3,15 +3,13 @@
 //! discovery live in the `runtime` submodule.
 
 use std::collections::HashMap;
-#[cfg(test)]
-use std::hash::BuildHasher;
 
 use regex::Regex;
 use serde_json::{Map, Value};
 
 mod args;
 mod bedrock;
-mod budget;
+pub(crate) mod budget;
 mod builtins;
 mod effort;
 mod file;
@@ -40,21 +38,6 @@ pub(crate) use sources::source_prefix;
 pub use system_prompt::SystemPrompt;
 
 use crate::summary::RunAuth;
-
-/// Resolve a budget the way a run does, for tests that live outside this module.
-///
-/// `budget::resolve` is `pub(super)` because nothing but `Runtime` has any
-/// business calling it, and `cost`'s tests need a real `Budget` rather than a
-/// second constructor that could disagree with the one a run uses.
-#[cfg(test)]
-pub(crate) fn resolve_budget_for_tests<S: BuildHasher>(
-    usd: &str,
-    env: &HashMap<String, String, S>,
-) -> Budget {
-    budget::resolve(Some(usd), env)
-        .expect("the fixture must resolve")
-        .expect("the fixture must set a budget")
-}
 
 // --- HTTP headers for aggregators like OpenRouter ---------------------------
 

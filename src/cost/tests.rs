@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 
 use super::{Crossing, Guard, Verdict, money};
-use crate::config::{Budget, resolve_budget_for_tests};
+use crate::config::Budget;
+use crate::config::budget::resolve_budget;
 use crate::model::usage_totals::{Billed, UsageTotals};
 use crate::pricing::Pricing;
 
@@ -15,7 +16,9 @@ use crate::pricing::Pricing;
 const RATES: &str = r#"{"m": {"input": 1, "output": 1}}"#;
 
 fn budget(usd: &str) -> Budget {
-    resolve_budget_for_tests(usd, &HashMap::new())
+    resolve_budget(Some(usd), &HashMap::new())
+        .expect("the fixture must resolve")
+        .expect("the fixture must set a budget")
 }
 
 fn guard(usd: &str) -> Guard {
@@ -26,6 +29,13 @@ fn guard(usd: &str) -> Guard {
         converged: false,
         stopped: false,
     }
+}
+
+/// The same, but counted by afi rather than reported by the provider.
+fn guessed(input: u64) -> Vec<(Billed, UsageTotals)> {
+    let mut out = spent(input);
+    out[0].1.estimated_tokens = input;
+    out
 }
 
 /// A ledger holding `input` input tokens on the priced model.
@@ -48,7 +58,7 @@ fn spent(input: u64) -> Vec<(Billed, UsageTotals)> {
 fn a_run_under_the_soft_threshold_is_told_nothing() {
     let mut guard = guard("5");
     // $3.99 of a $5 cap: the soft threshold is $4.00.
-    assert_eq!(guard.checkpoint(&spent(3_990_000), false), Verdict::Under);
+    assert_eq!(guard.checkpoint(&spent(3_990_000)), Verdict::Under);
     assert!(!guard.converged);
     assert!(!guard.stopped);
 }
@@ -58,7 +68,7 @@ fn a_run_that_has_spent_nothing_yet_is_not_stopped() {
     // Zero, not unknown. The distinction the `Priced` enum exists for: an empty
     // ledger must not read as "cannot price" and end the run before it starts.
     let mut guard = guard("5");
-    assert_eq!(guard.checkpoint(&[], false), Verdict::Under);
+    assert_eq!(guard.checkpoint(&[]), Verdict::Under);
     assert!(!guard.stopped);
 }
 
@@ -72,12 +82,9 @@ fn the_converge_note_is_offered_once_and_never_again() {
         spent: 4_100_000,
         limit: 5_000_000,
     };
-    assert_eq!(
-        guard.checkpoint(&spent(4_100_000), false),
-        Verdict::Soft(at)
-    );
-    assert_eq!(guard.checkpoint(&spent(4_200_000), false), Verdict::Under);
-    assert_eq!(guard.checkpoint(&spent(4_300_000), false), Verdict::Under);
+    assert_eq!(guard.checkpoint(&spent(4_100_000)), Verdict::Soft(at));
+    assert_eq!(guard.checkpoint(&spent(4_200_000)), Verdict::Under);
+    assert_eq!(guard.checkpoint(&spent(4_300_000)), Verdict::Under);
     assert!(guard.converged);
 }
 
@@ -89,15 +96,30 @@ fn the_hard_threshold_stops_the_run_and_stays_stopped() {
         limit: 5_000_000,
     };
     // $4.80 of $5 is past the 0.95 hard threshold at $4.75.
-    assert_eq!(
-        guard.checkpoint(&spent(4_800_000), false),
-        Verdict::Hard(at)
+    assert_eq!(guard.checkpoint(&spent(4_800_000)), Verdict::Hard(at));
+    assert!(guard.stopped);
+}
+
+#[test]
+fn a_stopped_run_is_still_stopped_on_the_next_loop() {
+    // A piped session starts a fresh `run_model_turn_loop` for every user turn,
+    // and the loop acts only on `Hard`. Answering the second one with anything
+    // else let the turn after the cap open a request and spend past it.
+    let mut guard = guard("5");
+    assert!(matches!(
+        guard.checkpoint(&spent(9_000_000)),
+        Verdict::Hard(_)
+    ));
+    assert!(
+        matches!(guard.checkpoint(&spent(9_000_000)), Verdict::Hard(_)),
+        "a stopped run must never read as carry-on"
     );
-    assert!(guard.stopped);
-    // Latched: the summary still reports a stopped run, and nothing says it
-    // twice.
-    assert_eq!(guard.checkpoint(&spent(4_800_000), false), Verdict::Under);
-    assert!(guard.stopped);
+    assert!(!may_spend_with(&guard), "and nothing else may spend either");
+}
+
+/// `may_spend`'s answer for a guard, without touching the process-wide one.
+fn may_spend_with(guard: &Guard) -> bool {
+    !guard.stopped
 }
 
 #[test]
@@ -106,7 +128,7 @@ fn one_large_turn_may_pass_the_soft_threshold_without_converging() {
     // gap gets no note, and must still stop.
     let mut guard = guard("5");
     assert!(matches!(
-        guard.checkpoint(&spent(9_000_000), false),
+        guard.checkpoint(&spent(9_000_000)),
         Verdict::Hard(_)
     ));
     assert!(!guard.converged, "there was never a request to tell");
@@ -119,7 +141,7 @@ fn spend_afi_had_to_guess_at_cannot_be_capped() {
     // capped against it would over-run by roughly the whole prompt while
     // reporting a confident figure. Stopping is the only honest answer.
     let mut guard = guard("5");
-    let verdict = guard.checkpoint(&spent(1), true);
+    let verdict = guard.checkpoint(&guessed(1));
     match verdict {
         Verdict::Unpriceable(why) => {
             assert!(why.contains("counted the tokens itself"), "{why}");
@@ -149,7 +171,7 @@ fn spend_on_a_model_with_no_rates_cannot_be_capped() {
             ..UsageTotals::default()
         },
     )];
-    match guard.checkpoint(&elsewhere, false) {
+    match guard.checkpoint(&elsewhere) {
         Verdict::Unpriceable(why) => assert!(why.contains("unpriced"), "{why}"),
         other => panic!("an unpriced model must not be capped against: {other:?}"),
     }
@@ -161,19 +183,19 @@ fn the_thresholds_move_with_the_ratios() {
     env.insert("AFI_SOFT_BUDGET_RATIO".to_string(), "0.5".to_string());
     env.insert("AFI_HARD_BUDGET_RATIO".to_string(), "0.6".to_string());
     let mut guard = Guard {
-        budget: resolve_budget_for_tests("10", &env),
+        budget: resolve_budget(Some("10"), &env).unwrap().unwrap(),
         pricing: Pricing::parse(Some(RATES)).expect("the rates must parse"),
         spent: None,
         converged: false,
         stopped: false,
     };
-    assert_eq!(guard.checkpoint(&spent(4_999_999), false), Verdict::Under);
+    assert_eq!(guard.checkpoint(&spent(4_999_999)), Verdict::Under);
     assert!(matches!(
-        guard.checkpoint(&spent(5_000_000), false),
+        guard.checkpoint(&spent(5_000_000)),
         Verdict::Soft(_)
     ));
     assert!(matches!(
-        guard.checkpoint(&spent(6_000_000), false),
+        guard.checkpoint(&spent(6_000_000)),
         Verdict::Hard(_)
     ));
 }
@@ -205,10 +227,10 @@ fn a_run_that_stops_being_measurable_reports_no_figure_rather_than_a_stale_one()
     // would report `spent_usd: 0.0` for a run that had spent real money - which
     // reads as "this run was free", the one thing `cost_usd` is absent to avoid.
     let mut guard = guard("5");
-    assert_eq!(guard.checkpoint(&[], false), Verdict::Under);
+    assert_eq!(guard.checkpoint(&[]), Verdict::Under);
     assert_eq!(guard.spent, Some(0));
     assert!(matches!(
-        guard.checkpoint(&spent(1), true),
+        guard.checkpoint(&guessed(1)),
         Verdict::Unpriceable(_)
     ));
     assert_eq!(guard.spent, None, "the stale figure must not stand");

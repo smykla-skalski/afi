@@ -14,8 +14,8 @@
 //!
 //! `scripts/project-prices.py` is the same projection, in the language the
 //! vendoring step runs in, and carries the same warning at the top. The two are
-//! held together by `the_vendored_table_and_the_host_table_agree` rather than by
-//! anyone remembering.
+//! held together by `the_vendored_table_and_the_provider_list_agree` rather than
+//! by anyone remembering.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -24,16 +24,13 @@ use super::provider::Provider;
 
 pub mod models_dev;
 
-/// One published rate, in whole units per million tokens, exactly as written.
-///
-/// Kept as the text the catalogue used rather than a float, because the number
-/// is money and `pricing::micros_per_million` reads it from the digits. Parsing
-/// it here and rendering it back would put a lossy step between the publisher
-/// and the bill.
-pub type Rate = String;
-
 /// One model's rates, keyed by the class names `pricing::RATE_CLASSES` names.
-pub type ModelRates = BTreeMap<&'static str, Rate>;
+///
+/// The rate is the text the catalogue used rather than a float, because the
+/// number is money and `rates::millionths` reads it from the digits. Parsing it
+/// here and rendering it back would put a lossy step between the publisher and
+/// the bill.
+pub type ModelRates = BTreeMap<&'static str, String>;
 
 /// What afi asked a catalogue for: every provider it can bill against, each
 /// with the models that catalogue prices.
@@ -57,11 +54,15 @@ pub trait Catalog: Send + Sync {
 
     /// Narrow a fetched catalogue to the providers afi can bill against.
     ///
+    /// Bytes rather than `&str`, because the caller has bytes off the wire and
+    /// every deserializer here validates the UTF-8 itself - decoding first would
+    /// be one more full pass and one more copy of several megabytes.
+    ///
     /// `None` when the body is not this catalogue at all. An empty projection is
     /// a different answer and a legitimate one - a catalogue that priced nothing
     /// afi asked about - and it is the caller who decides that is not worth
     /// writing.
-    fn project(&self, body: &str, wanted: &[Provider]) -> Option<Projection>;
+    fn project(&self, body: &[u8], wanted: &[Provider]) -> Option<Projection>;
 }
 
 /// The catalogue afi uses.

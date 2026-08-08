@@ -9,6 +9,7 @@ fn totals(input: u64, output: u64, requests: u64) -> UsageTotals {
         cache_write_tokens: 0,
         reasoning_tokens: 0,
         requests,
+        estimated_tokens: 0,
     }
 }
 

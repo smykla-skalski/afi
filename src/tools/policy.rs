@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use super::known_tool_names;
+use crate::util::{is_off, nonblank};
 
 /// The tools the approval gate confirms before dispatch: the two writers, and
 /// the shell, which can do anything at all.
@@ -258,13 +259,7 @@ fn schema_name(entry: &Value) -> Option<&str> {
 /// and not an explicit off counts as on: a variable someone bothered to set
 /// should not be ignored because they wrote `on` rather than `1`.
 fn read_only_requested(raw: Option<&str>) -> bool {
-    match raw.map(str::trim) {
-        None | Some("") => false,
-        Some(value) => !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-    }
+    nonblank(raw).is_some_and(|value| !is_off(value))
 }
 
 /// Split one list into canonical names, appending anything unregistered to

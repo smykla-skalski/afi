@@ -85,10 +85,7 @@ impl RawRates {
     }
 }
 
-pub(super) fn micros(
-    raw: Option<&Number>,
-    field: &'static str,
-) -> Result<Option<u64>, &'static str> {
+fn micros(raw: Option<&Number>, field: &'static str) -> Result<Option<u64>, &'static str> {
     match raw {
         None => Ok(None),
         Some(number) => millionths(&number.to_string()).map(Some).ok_or(field),
@@ -119,7 +116,7 @@ pub(crate) fn millionths(raw: &str) -> Option<u64> {
 }
 
 /// Split `3e-1` into mantissa and exponent. No exponent means 0.
-pub(super) fn split_exponent(raw: &str) -> Option<(&str, i32)> {
+fn split_exponent(raw: &str) -> Option<(&str, i32)> {
     match raw.split_once(['e', 'E']) {
         None => Some((raw, 0)),
         Some((mantissa, exponent)) => Some((mantissa, exponent.parse().ok()?)),
@@ -130,7 +127,7 @@ pub(super) fn split_exponent(raw: &str) -> Option<(&str, i32)> {
 ///
 /// `None` when anything past the point is non-zero, which is a rate finer than
 /// the micro-dollar this is counted in.
-pub(super) fn scaled(digits: &str, point: i64) -> Option<u64> {
+fn scaled(digits: &str, point: i64) -> Option<u64> {
     // A u64 holds 20 digits, so a point past that is not a rate afi can use.
     if !(0..=20).contains(&point) {
         return None;

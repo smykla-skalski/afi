@@ -77,16 +77,8 @@ pub(super) fn of(rt: &Runtime) -> Vec<RunError> {
 /// source is: a `/source` switch afterwards is an interactive path with a human
 /// present, and the turn loop stops that run at its next checkpoint.
 fn unenforceable_budget(rt: &Runtime) -> Option<String> {
-    let budget = rt.budget?;
-    let model = rt.model.as_deref()?;
-    let named = budget.named();
-    let Some(pricing) = rt.pricing.as_ref() else {
-        return Some(format!(
-            "{named} cannot be enforced: no rate table could be read, and afi caps what \
-             a run spends by pricing what it used - fix AFI_PRICES, or drop the budget"
-        ));
-    };
-    let why = pricing.unpriceable(rt.active_source().and_then(Source::price_provider), model)?;
+    let why = rt.budget_unenforceable()?;
+    let named = rt.budget?.named();
     Some(format!(
         "{named} cannot be enforced: {why} - afi caps what a run spends by pricing what \
          it used, so price it in AFI_PRICES or drop the budget"

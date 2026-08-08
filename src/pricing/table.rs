@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 use super::RawRates;
 use super::provider::Provider;
-use crate::util::nonblank;
+use crate::util::env_int;
 
 /// The file name under `AFI_HOME`, and the name of the vendored copy.
 const CACHE_FILE: &str = "prices.json";
@@ -91,7 +91,11 @@ pub(crate) fn due(fetched: &str, today: &str) -> bool {
 /// whole table would take every other model's figure down with it, and a
 /// corrupted cache is a file afi wrote rather than anything the operator did.
 pub(super) fn layers(home: &Path) -> (Providers, String) {
-    let table = cached(home).unwrap_or_else(|| vendored().clone());
+    // Borrowed, not cloned: `layers` reads `providers` and takes only `fetched`,
+    // so copying ~690 strings and 15 maps of the compiled-in table to drop them
+    // again bought nothing.
+    let refreshed = cached(home);
+    let table = refreshed.as_ref().unwrap_or_else(|| vendored());
     let by_provider = table
         .providers
         .iter()
@@ -106,7 +110,7 @@ pub(super) fn layers(home: &Path) -> (Providers, String) {
             (provider, rates)
         })
         .collect();
-    (by_provider, table.fetched)
+    (by_provider, table.fetched.clone())
 }
 
 /// Provider, then normalized model id, then that model's rates.
@@ -130,9 +134,7 @@ pub(super) fn warn_if_stale<S: BuildHasher>(
     today: NaiveDate,
     env: &HashMap<String, String, S>,
 ) {
-    let limit = nonblank(env.get("AFI_PRICE_STALE_DAYS").map(String::as_str))
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .unwrap_or(STALE_DAYS);
+    let limit = env_int(env, "AFI_PRICE_STALE_DAYS", STALE_DAYS);
     // Zero turns the warning off, matching `AFI_AUTOCOMPRESS_PERCENT`.
     if limit <= 0 {
         return;

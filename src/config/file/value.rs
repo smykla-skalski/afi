@@ -12,7 +12,7 @@
 
 use serde_json::Value;
 
-use crate::pricing::millionths;
+use crate::config::budget::{amount, fraction};
 use crate::summary::SummaryFormat;
 
 use super::super::effort::{self, Effort};
@@ -113,9 +113,9 @@ pub(super) fn money(value: &Value) -> Result<String, String> {
     let Value::Number(n) = value else {
         return Err(expected("an amount in USD", value));
     };
-    match millionths(&n.to_string()) {
-        Some(micros) if micros > 0 => Ok(n.to_string()),
-        _ => Err(
+    match amount(&n.to_string()) {
+        Some(_) => Ok(n.to_string()),
+        None => Err(
             "must be an amount in USD above 0, no finer than a millionth of a dollar".to_string(),
         ),
     }
@@ -126,9 +126,9 @@ pub(super) fn ratio(value: &Value) -> Result<String, String> {
     let Value::Number(n) = value else {
         return Err(expected("a fraction of the budget", value));
     };
-    match millionths(&n.to_string()) {
-        Some(parts) if parts > 0 && parts <= 1_000_000 => Ok(n.to_string()),
-        _ => Err("must be a number above 0 and at most 1".to_string()),
+    match fraction(&n.to_string()) {
+        Some(_) => Ok(n.to_string()),
+        None => Err("must be a number above 0 and at most 1".to_string()),
     }
 }
 

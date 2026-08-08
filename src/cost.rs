@@ -107,27 +107,23 @@ impl Guard {
     /// because the converge note is one line once per run. `Hard` latches too,
     /// so the summary still reports a stopped run after the loop has returned
     /// without asking a second time.
-    fn checkpoint(&mut self, billed: &[(Billed, UsageTotals)], estimated: bool) -> Verdict {
-        // An estimate is not a measurement. The chars-per-token fallback records
-        // no input tokens at all, so a run capped against it would over-run by
-        // roughly the whole prompt while reporting a confident figure.
-        if estimated {
-            // Whatever was last measured no longer describes this run: it has
-            // since spent something afi cannot price, so the figure goes rather
-            // than standing as a total that reads far too low.
-            self.spent = None;
-            return Verdict::Unpriceable(
-                "the budget cannot be measured: this endpoint reported no usage, so afi \
-                 counted the tokens itself and a cap cannot hold over a guess"
-                    .to_string(),
-            );
-        }
+    fn checkpoint(&mut self, billed: &[(Billed, UsageTotals)]) -> Verdict {
         let spent = match self.pricing.run_cost(billed) {
             Priced::Spent(micros) => micros,
             Priced::Nothing => 0,
-            other => {
+            // Whatever was last measured no longer describes this run: it has
+            // since spent something afi cannot price, so the figure goes rather
+            // than standing as a total that reads far too low.
+            Priced::Estimated(_) => {
                 self.spent = None;
-                let why = other.why_not().unwrap_or_default();
+                return Verdict::Unpriceable(
+                    "the budget cannot be measured: this endpoint reported no usage, so afi \
+                     counted the tokens itself and a cap cannot hold over a guess"
+                        .to_string(),
+                );
+            }
+            Priced::Unpriceable(why) => {
+                self.spent = None;
                 return Verdict::Unpriceable(format!("the budget cannot be measured: {why}"));
             }
         };
@@ -137,13 +133,12 @@ impl Guard {
             limit: self.budget.limit(),
         };
         if self.budget.hard_reached(spent) {
-            let first = !self.stopped;
             self.stopped = true;
-            return if first {
-                Verdict::Hard(at)
-            } else {
-                Verdict::Under
-            };
+            // Returned every time, not just the first. A piped session starts a
+            // fresh `run_model_turn_loop` for each user turn, and the loop acts
+            // only on `Hard` - so answering a stopped run with anything else
+            // would let the turn after it open a request and spend past the cap.
+            return Verdict::Hard(at);
         }
         if self.budget.soft_reached(spent) && !self.converged {
             self.converged = true;
@@ -198,11 +193,9 @@ pub fn checkpoint() -> Verdict {
         return Verdict::Unlimited;
     }
     let billed = usage_totals::snapshot_billed();
-    let estimated = usage_totals::total(&billed).has_estimates();
     let mut held = guard().lock().unwrap_or_else(PoisonError::into_inner);
-    held.as_mut().map_or(Verdict::Unlimited, |guard| {
-        guard.checkpoint(&billed, estimated)
-    })
+    held.as_mut()
+        .map_or(Verdict::Unlimited, |guard| guard.checkpoint(&billed))
 }
 
 /// Whether a request may still be made against the run's budget.

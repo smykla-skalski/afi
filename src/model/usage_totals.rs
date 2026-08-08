@@ -11,23 +11,26 @@
 //! both cached prefixes and `output_tokens` excludes reasoning, so the five
 //! fields are disjoint and add up to the run's billable total.
 //!
-//! The accumulator keys on the model each request went to, because a piped
-//! session can `/source` its way onto a second one and the two are not billed
-//! at the same rates. `snapshot` folds the models together for the summary's
-//! flat counts; `snapshot_by_model` keeps them apart for pricing.
+//! The accumulator keys on the source a request was billed to and the model that
+//! served it, because a piped session can `/source` its way onto a second of
+//! each. Neither key derives from the other: rates are per model, and budgets
+//! are per source. `snapshot_by_source` is the one read, and the folds over it
+//! are pure: `by_model` folds the sources away again for pricing, and `total`
+//! folds what is left for the summary's flat counts.
+//!
+//! Which credential paid cannot be read off whichever source happens to be
+//! active when the run ends: a session that spends on one and then switches
+//! would attest to a credential that bought nothing. Only a request that
+//! reported usage is recorded, so the ledger names the sources that were
+//! actually billed and leaves out a source that was merely configured.
 //!
 //! Two counts here are not about tokens: `refused_tool_calls`, what the run asked
 //! for and was refused, by policy and by the approval gate. They live beside the
 //! token totals because they are the same kind of thing - run-level facts the
 //! summary reports and one `reset` clears - and because the alternative is
-//! threading a counter through the turn loop.
-//!
-//! The same switch is why the ledger also remembers which *sources* spent
-//! anything. Which credential paid cannot be read off whichever source happens
-//! to be active when the run ends: a session that spends on one and then
-//! switches would attest to a credential that bought nothing. Only a request
-//! that reported usage counts, so the list names the sources that were actually
-//! billed - see `billed_sources`.
+//! threading a counter through the turn loop. They key on neither source nor
+//! model: the dispatch site that sees a refusal knows of no request that carried
+//! it, because there was none.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -102,23 +105,22 @@ impl UsageTotals {
     }
 }
 
+/// One source's totals, split by the models that served them, in first-seen
+/// order. A `Vec` rather than a map because a run touches one or two and the
+/// order it billed them in is worth keeping.
+pub type ByModel = Vec<(String, UsageTotals)>;
+
+/// Every source the run was billed on, in the order it first spent on them.
+pub type BySource = Vec<(String, ByModel)>;
+
 /// What the run has been billed for so far.
 ///
-/// Both lists are in first-seen order, and both are `Vec`s rather than maps
-/// because a run touches one or two of each and the order is worth keeping. They
-/// share one mutex because they are one thing - written by the same call and
-/// cleared by the same `reset` - not to give readers an atomic view of the pair:
-/// the summary reads them one after the other, and nothing records once the run
-/// it reports has finished.
-#[derive(Debug, Default)]
-struct Ledger {
-    by_model: Vec<(String, UsageTotals)>,
-    sources: Vec<String>,
-}
-
-fn ledger() -> &'static Mutex<Ledger> {
-    static LEDGER: OnceLock<Mutex<Ledger>> = OnceLock::new();
-    LEDGER.get_or_init(|| Mutex::new(Ledger::default()))
+/// One mutex over the whole ledger, and one read serves a caller that needs both
+/// splits - the summary prices per model and attributes per source, and two
+/// reads would let the two describe different instants.
+fn ledger() -> &'static Mutex<BySource> {
+    static LEDGER: OnceLock<Mutex<BySource>> = OnceLock::new();
+    LEDGER.get_or_init(|| Mutex::new(BySource::new()))
 }
 
 /// Record one request's usage against the model that served it and the source it
@@ -126,36 +128,29 @@ fn ledger() -> &'static Mutex<Ledger> {
 /// must never take down a run.
 pub fn record(source: &str, model: &str, usage: &NormalizedUsage) {
     let mut guard = ledger().lock().unwrap_or_else(PoisonError::into_inner);
-    if !guard.sources.iter().any(|name| name == source) {
-        guard.sources.push(source.to_string());
-    }
-    if let Some((_, totals)) = guard.by_model.iter_mut().find(|(name, _)| name == model) {
+    // By index rather than by reference: appending the source that is missing
+    // and then reaching into it are two borrows of the same vector.
+    let at = guard
+        .iter()
+        .position(|(name, _)| name == source)
+        .unwrap_or_else(|| {
+            guard.push((source.to_string(), ByModel::new()));
+            guard.len() - 1
+        });
+    let by_model = &mut guard[at].1;
+    if let Some((_, totals)) = by_model.iter_mut().find(|(name, _)| name == model) {
         totals.add(usage);
         return;
     }
     let mut totals = UsageTotals::default();
     totals.add(usage);
-    guard.by_model.push((model.to_string(), totals));
+    by_model.push((model.to_string(), totals));
 }
 
-/// The sources that actually spent tokens, in first-seen order.
-///
-/// Empty when no request reported usage at all, which is a failed or unanswered
-/// run rather than a free one. More than one entry means no single credential
-/// paid for the run, and the summary reports none rather than picking.
-#[must_use]
-pub fn billed_sources() -> Vec<String> {
-    ledger()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .sources
-        .clone()
-}
-
-/// The run's totals so far, every model folded together.
+/// The run's totals so far, every source and model folded together.
 #[must_use]
 pub fn snapshot() -> UsageTotals {
-    total(&snapshot_by_model())
+    total(&by_model(&snapshot_by_source()))
 }
 
 /// Fold a per-model snapshot into one set of counts.
@@ -173,14 +168,39 @@ pub fn total(by_model: &[(String, UsageTotals)]) -> UsageTotals {
         })
 }
 
-/// The run's totals split by model, for anything that prices them.
+/// The run's totals split by the source that was billed for them, each source
+/// still split by model so its share can be priced at the right rates.
+///
+/// The names alone answer which credentials paid: none means nothing was billed,
+/// which is a failed or unanswered run rather than a free one, and more than one
+/// means no single credential paid for the run.
 #[must_use]
-pub fn snapshot_by_model() -> Vec<(String, UsageTotals)> {
+pub fn snapshot_by_source() -> BySource {
     ledger()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .by_model
         .clone()
+}
+
+/// Fold a per-source snapshot into one entry per model, for anything that
+/// prices them.
+///
+/// Two sources serving the same model land in one entry, because a rate belongs
+/// to the model and not to whoever routed to it. Order is first-seen within each
+/// source, source by source, which is the order the run billed them in whenever
+/// it did not interleave the two.
+#[must_use]
+pub fn by_model(by_source: &[(String, ByModel)]) -> ByModel {
+    let mut folded = ByModel::new();
+    for (_, models) in by_source {
+        for (model, totals) in models {
+            match folded.iter_mut().find(|(name, _)| name == model) {
+                Some((_, acc)) => acc.merge(totals),
+                None => folded.push((model.clone(), *totals)),
+            }
+        }
+    }
+    folded
 }
 
 /// Tool calls the run refused, split by what refused them.
@@ -247,9 +267,10 @@ pub fn refused_tool_calls() -> RefusedToolCalls {
 
 /// Clear the totals. Exists for tests, which share one process.
 pub fn reset() {
-    let mut guard = ledger().lock().unwrap_or_else(PoisonError::into_inner);
-    guard.by_model.clear();
-    guard.sources.clear();
+    ledger()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
     REFUSED_BY_POLICY.store(0, Ordering::Relaxed);
     REFUSED_BY_APPROVAL.store(0, Ordering::Relaxed);
 }

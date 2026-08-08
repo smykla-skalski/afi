@@ -303,6 +303,22 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
     "workspace_id": "wrkspc_...",
     "federation_rule_id": "fdrl_..."
   },
+  "sources": [
+    {
+      "source": "anthropic",
+      "usage": {
+        "input_tokens": 1847,
+        "output_tokens": 484,
+        "cache_read_tokens": 6837,
+        "cache_write_tokens": 2279,
+        "reasoning_tokens": 0,
+        "total_tokens": 11447,
+        "requests": 3,
+        "cost_usd": 0.023398
+      },
+      "auth": {"mode": "federated", "organization_id": "org_...", "service_account_id": "svac_...", "workspace_id": "wrkspc_...", "federation_rule_id": "fdrl_..."}
+    }
+  ],
   "system_prompt": {"mode": "builtin", "file": null}
 }
 ```
@@ -332,6 +348,14 @@ The policy count also covers calls thrown away before dispatch could rule on the
 `auth` is the other half of that posture: which credential the run billed. `mode` is `api_key` for a static key on either protocol, `oauth` for a bearer token minted elsewhere and handed to afi, `federated` for one afi minted itself, `sigv4` for an AWS signature over a stored key ([details](#bedrock)), `sigv4_web_identity` for one over a role afi assumed ([details](#bedrock-without-a-key)), and `none` for a source with no credential configured, which is the local llama.cpp case. The three that have identifiers carry them: the federation ids for `federated`, `region` and `access_key_id` for `sigv4`, and `region`, `role_arn`, and `session_name` for `sigv4_web_identity`. It answers the question that follows `cost_usd` - a job that quietly fell back to a personal key otherwise prints a summary indistinguishable from one that used the service account it was meant to.
 
 It names the credential the tokens were **billed** to, not the one that happens to be active when the run ends. Those differ in a piped session that `/source`-switches after spending: `source` and `model` report where the session finished, while `auth` stays with whoever paid. A session that spent on two sources gets `"auth": null`, since no single credential paid for it - as does a run with no source at all. A run that billed nothing reports the credential it tried, which is what a failed run has to show.
+
+`sources` is that question answered rather than declined: one entry per source the run was actually billed on, with its own token counts, its own `cost_usd`, and the credential that paid for it. A single-source run gets one entry saying what the flat fields already say, so nothing reading those has to change. A switched session gets two, which is where `auth` goes `null` and the flat counts stop being attributable to anyone.
+
+Each entry's counts add up to the flat `usage`, since every billed request belongs to exactly one source. The money is close but not bound to add up: each figure is rounded to the micro-dollar on its own, while `cost_usd` rounds once over the whole run. An entry is priced at the rates of the models *that source* served, so two sources running the same model, or one source running two, still bill at the right rate. A model with no rate takes the run's `cost_usd` with it, as it always has, and leaves the other entries' figures standing.
+
+An entry carries no `refused_tool_calls` counts, which the flat block does. A refused call was never sent, so no request carried it and no source was billed for it.
+
+**A source that was configured and never billed has no entry.** An entry of zeros would read as a source that ran for free, and the array is the set of budgets this run actually spent from. A run that billed nothing - one that was [refused before it started](#failure-kinds), or that failed before its first answer - reports `[]`, not `null`: there is no zero row to be misread here, so the empty list says what it means and iterates like any other.
 
 The identifiers are the non-secret ones the [federation](#anthropic) exchange sends, and only those. A rule covering one workspace passes no `ANTHROPIC_WORKSPACE_ID`, so no `workspace_id` comes back here, and a static-key run has nothing to identify at all - both name the mode and stop rather than emitting empty strings. Neither the access token nor the OIDC identity token is ever in the block: this JSON usually ends up as a build artifact, and an artifact carries no masking, so a value redacted in a log would be plain text there.
 

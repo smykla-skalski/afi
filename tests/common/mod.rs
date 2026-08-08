@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
-use std::process::Output;
+use std::process::{Command, Output, Stdio};
 use std::thread;
 
 use afi::Runtime;
@@ -118,6 +118,38 @@ where
     }
     body.push_str("data: [DONE]\n\n");
     http_response("200 OK", "text/event-stream", &body)
+}
+
+/// Run the real `afi` binary on a clean environment and feed it `input`.
+///
+/// Every end-to-end summary test needs the same setup, and got it by copying it:
+/// a home nothing else has written to, `env_clear` so the shell that started
+/// `cargo test` cannot configure the run, three piped streams, the prompt
+/// written to stdin, and the exit awaited. What a test actually varies is `args`
+/// and `env`, so that is all it passes.
+///
+/// `home` comes from the caller rather than being made here, because a test that
+/// runs the binary twice may want the second run to see what the first one saved.
+#[allow(dead_code)]
+pub fn run_afi(home: &Path, args: &[&str], env: &[(&str, &str)], input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_afi"))
+        .args(args)
+        .env_clear()
+        .env("AFI_HOME", home)
+        .env("HOME", home)
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("afi must start");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes())
+        .expect("the input must write");
+    child.wait_with_output().expect("afi must exit")
 }
 
 /// The run summary from a finished process's stdout.

@@ -1,9 +1,9 @@
 //! Shared scaffolding for the assertions that pin the published shape.
 //!
-//! Three of them exist - the top-level object, `usage`, and the `auth` block -
-//! and each one is the only thing standing between a renamed key and a consumer
-//! that silently stops finding it. One helper so the fourth calls this rather
-//! than copying it again.
+//! Four of them exist - the top-level object, `usage`, the `auth` block, and an
+//! entry of the per-source breakdown - and each one is the only thing standing
+//! between a renamed key and a consumer that silently stops finding it. One
+//! helper so the fifth calls this rather than copying it again.
 
 use serde_json::Value;
 

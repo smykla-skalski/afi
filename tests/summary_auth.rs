@@ -7,14 +7,13 @@
 //! artifact, which carries no masking, so a token that leaks here leaks in
 //! plain text.
 
-use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::process::Output;
 
 use serde_json::Value;
 use tempfile::TempDir;
 
 mod common;
-use common::{billing_server, summary_of};
+use common::{billing_server, run_afi, summary_of};
 
 /// Stands in for the OIDC assertion. Distinctive enough to grep the whole of
 /// stdout for.
@@ -58,25 +57,8 @@ fn unreachable_federated() -> Vec<(&'static str, &'static str)> {
 
 fn run(args: &[&str], env: &[(&str, &str)], input: &str) -> Output {
     let home = TempDir::new().expect("a temporary home");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_afi"))
-        .args(args)
-        .args(["--summary", "json"])
-        .env_clear()
-        .env("AFI_HOME", home.path())
-        .env("HOME", home.path())
-        .envs(env.iter().copied())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("afi must start");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(input.as_bytes())
-        .expect("the input must write");
-    child.wait_with_output().expect("afi must exit")
+    let args: Vec<&str> = args.iter().copied().chain(["--summary", "json"]).collect();
+    run_afi(home.path(), &args, env, input)
 }
 
 /// A one-shot run, which is the shape a CI job uses.

@@ -9,15 +9,14 @@
 mod common;
 
 use std::fs;
-use std::io::Write;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::Output;
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::{billing_server, summary_of};
+use common::{billing_server, run_afi, summary_of};
 
 /// Usage the fake endpoint reports, chosen so the arithmetic is checkable by
 /// eye: a million tokens of each kind bills at exactly the per-million rate.
@@ -39,37 +38,25 @@ fn billed_usage() -> String {
     )
 }
 
-fn run_afi(
+/// A one-shot run against the canned endpoint, with the rate table and the
+/// summary path the case is about.
+fn run_one_shot(
     home: &TempDir,
     addr: SocketAddr,
     prices: Option<&str>,
     summary_file: Option<&Path>,
 ) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_afi"));
-    command
-        .args(["--yolo", "--summary", "json", "-f", "-"])
-        .env_clear()
-        .env("AFI_HOME", home.path())
-        .env("HOME", home.path())
-        .env("AFI_BASE_URL", format!("http://{addr}/v1"))
-        .env("AFI_MODEL", "test-model")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(prices) = prices {
-        command.env("AFI_PRICES", prices);
-    }
+    let base_url = format!("http://{addr}/v1");
+    let mut env = vec![
+        ("AFI_BASE_URL", base_url.as_str()),
+        ("AFI_MODEL", "test-model"),
+    ];
+    env.extend(prices.map(|prices| ("AFI_PRICES", prices)));
+    let mut args = vec!["--yolo", "--summary", "json", "-f", "-"];
     if let Some(path) = summary_file {
-        command.args(["--summary-file", path.to_str().expect("a utf-8 path")]);
+        args.extend(["--summary-file", path.to_str().expect("a utf-8 path")]);
     }
-    let mut child = command.spawn().expect("afi must start");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(b"say done\n")
-        .expect("the prompt must write");
-    child.wait_with_output().expect("afi must exit")
+    run_afi(home.path(), &args, &env, "say done\n")
 }
 
 #[test]
@@ -77,7 +64,7 @@ fn a_priced_run_reports_what_it_cost() {
     let addr = billing_server(&billed_usage(), 8);
     let home = TempDir::new().unwrap();
 
-    let priced = summary_of(&run_afi(&home, addr, Some(RATES), None));
+    let priced = summary_of(&run_one_shot(&home, addr, Some(RATES), None));
     let usage = &priced["usage"];
     assert_eq!(usage["input_tokens"], PROMPT_TOKENS - CACHED_TOKENS);
     assert_eq!(usage["cache_read_tokens"], CACHED_TOKENS);
@@ -88,7 +75,7 @@ fn a_priced_run_reports_what_it_cost() {
     );
 
     // Same run, no rate table: the counts stay, the money goes.
-    let unpriced = summary_of(&run_afi(&home, addr, None, None));
+    let unpriced = summary_of(&run_one_shot(&home, addr, None, None));
     assert_eq!(unpriced["usage"]["total_tokens"], usage["total_tokens"]);
     assert!(
         unpriced["usage"].get("cost_usd").is_none(),
@@ -103,7 +90,7 @@ fn one_source_spending_everything_breaks_down_into_the_flat_block() {
     // consumer reading those needs no change at all.
     let addr = billing_server(&billed_usage(), 4);
     let home = TempDir::new().unwrap();
-    let summary = summary_of(&run_afi(&home, addr, Some(RATES), None));
+    let summary = summary_of(&run_one_shot(&home, addr, Some(RATES), None));
 
     let sources = summary["sources"].as_array().expect("an array");
     assert_eq!(sources.len(), 1, "one source was billed: {summary}");
@@ -126,7 +113,7 @@ fn a_run_that_worked_writes_the_same_object_to_the_summary_file() {
     let home = TempDir::new().unwrap();
     let path = home.path().join("run.json");
 
-    let output = run_afi(&home, addr, Some(RATES), Some(&path));
+    let output = run_one_shot(&home, addr, Some(RATES), Some(&path));
 
     assert!(
         output.status.success(),

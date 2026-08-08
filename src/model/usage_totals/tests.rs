@@ -144,6 +144,16 @@ fn reset_clears_every_ledger() {
     );
 }
 
+/// The sources the ledger says were billed, in the order it recorded them. The
+/// summary reads these names off the same snapshot it takes the counts from -
+/// see `crate::repl::report`.
+fn billed_sources() -> Vec<String> {
+    snapshot_by_source()
+        .into_iter()
+        .map(|(source, _)| source)
+        .collect()
+}
+
 /// A piped session can `/source` its way onto a second model, and the two are
 /// not billed alike - so the flat counts stay whole while pricing sees the split.
 fn keeps_models_apart_while_still_totalling() {

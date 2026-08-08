@@ -147,19 +147,6 @@ pub fn record(source: &str, model: &str, usage: &NormalizedUsage) {
     by_model.push((model.to_string(), totals));
 }
 
-/// The sources that actually spent tokens, in first-seen order.
-///
-/// Empty when no request reported usage at all, which is a failed or unanswered
-/// run rather than a free one. More than one entry means no single credential
-/// paid for the run, and the summary reports none rather than picking.
-#[must_use]
-pub fn billed_sources() -> Vec<String> {
-    snapshot_by_source()
-        .into_iter()
-        .map(|(source, _)| source)
-        .collect()
-}
-
 /// The run's totals so far, every source and model folded together.
 #[must_use]
 pub fn snapshot() -> UsageTotals {
@@ -183,6 +170,10 @@ pub fn total(by_model: &[(String, UsageTotals)]) -> UsageTotals {
 
 /// The run's totals split by the source that was billed for them, each source
 /// still split by model so its share can be priced at the right rates.
+///
+/// The names alone answer which credentials paid: none means nothing was billed,
+/// which is a failed or unanswered run rather than a free one, and more than one
+/// means no single credential paid for the run.
 #[must_use]
 pub fn snapshot_by_source() -> BySource {
     ledger()

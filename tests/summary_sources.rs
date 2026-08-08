@@ -8,13 +8,12 @@
 
 mod common;
 
-use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::process::Output;
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::{billing_server, summary_of};
+use common::{billing_server, run_afi, summary_of};
 
 /// What the fake endpoint reports for every completion. A round million of each
 /// so the money below is checkable by eye.
@@ -42,40 +41,24 @@ fn run_switched_session(prices: Option<&str>) -> Output {
     let addr = billing_server(&billed_usage(), 12);
     let base_url = format!("http://{addr}/v1");
     let home = TempDir::new().expect("a temporary home");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_afi"));
-    command
-        .args(["--summary", "json"])
-        .env_clear()
-        .env("AFI_HOME", home.path())
-        .env("HOME", home.path())
-        .env("AFI_ACTIVE", "first")
-        .env("AFI_SOURCE_FIRST_BASE_URL", &base_url)
-        .env("AFI_SOURCE_FIRST_MODEL", "model-one")
-        .env("AFI_SOURCE_FIRST_API_KEY", "sk-first")
-        .env("AFI_SOURCE_SECOND_BASE_URL", &base_url)
-        .env("AFI_SOURCE_SECOND_MODEL", "model-two")
-        .env("AFI_SOURCE_SECOND_API_KEY", "sk-second")
-        .env("AFI_SOURCE_THIRD_BASE_URL", &base_url)
-        .env("AFI_SOURCE_THIRD_MODEL", "model-three")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(prices) = prices {
-        command.env("AFI_PRICES", prices);
-    }
-    let mut child = command.spawn().expect("afi must start");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(b"hi\n/source second\nhi again\n/quit\n")
-        .expect("the input must write");
-    child.wait_with_output().expect("afi must exit")
-}
-
-/// Every entry's value at `field`, in the order the summary reported them.
-fn column<'a>(sources: &'a [Value], field: &str) -> Vec<&'a Value> {
-    sources.iter().map(|entry| &entry["usage"][field]).collect()
+    let mut env = vec![
+        ("AFI_ACTIVE", "first"),
+        ("AFI_SOURCE_FIRST_BASE_URL", base_url.as_str()),
+        ("AFI_SOURCE_FIRST_MODEL", "model-one"),
+        ("AFI_SOURCE_FIRST_API_KEY", "sk-first"),
+        ("AFI_SOURCE_SECOND_BASE_URL", base_url.as_str()),
+        ("AFI_SOURCE_SECOND_MODEL", "model-two"),
+        ("AFI_SOURCE_SECOND_API_KEY", "sk-second"),
+        ("AFI_SOURCE_THIRD_BASE_URL", base_url.as_str()),
+        ("AFI_SOURCE_THIRD_MODEL", "model-three"),
+    ];
+    env.extend(prices.map(|prices| ("AFI_PRICES", prices)));
+    run_afi(
+        home.path(),
+        &["--summary", "json"],
+        &env,
+        "hi\n/source second\nhi again\n/quit\n",
+    )
 }
 
 /// What one entry attributes: the source, what it spent, what that cost, and
@@ -121,9 +104,9 @@ fn the_breakdown_accounts_for_the_run_and_nothing_more() {
 
     // A breakdown that does not add up to the totals beside it is worse than no
     // breakdown: both figures get charted and one of them is wrong.
-    let summed: u64 = column(sources, "total_tokens")
+    let summed: u64 = sources
         .iter()
-        .map(|count| count.as_u64().expect("a number"))
+        .map(|entry| entry["usage"]["total_tokens"].as_u64().expect("a count"))
         .sum();
     assert_eq!(summed, summary["usage"]["total_tokens"]);
     assert_eq!(

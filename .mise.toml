@@ -112,6 +112,14 @@ zizmor = "1.29.0"
 # actionlint type-checks the workflow expressions and the shell inside `run:`.
 actionlint = "1.7.12"
 
+[tasks."prices:project"]
+description = "Re-project the vendored rate table from models.dev (arg: a local api.json, else the live one)"
+# The only network call in the lane, and it is deliberately not part of any
+# gate: `check` must pass with no network, and a rate table that changed
+# because a scheduled job ran is a change to review rather than a build input.
+# `.github/workflows/prices.yml` runs this weekly and opens a pull request.
+run = "./scripts/project-prices.py"
+
 [tasks.dist]
 description = "Build and pack a release archive the way a release does (arg: target triple)"
 run = "./scripts/build-archive.sh"

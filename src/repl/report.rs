@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::config::{Runtime, Source, nested};
-use crate::model::usage_totals::{self, ByModel, BySource};
+use crate::model::usage_totals::{self, Billed, UsageTotals};
 use crate::pricing::Pricing;
 use crate::summary::{self, RunError, RunSummary, SourceSpend, final_answer};
 
@@ -57,10 +57,10 @@ fn build<'a>(
     elapsed: Duration,
 ) -> RunSummary<'a> {
     // One read of the accumulator: folded for the counts, priced for the cost,
-    // and split for the per-source breakdown. Reading it three times would let
+    // and grouped for the per-source breakdown. Reading it three times would let
     // the three describe different instants.
-    let billed = usage_totals::snapshot_by_source();
-    let by_model = usage_totals::by_model(&billed);
+    let spent = usage_totals::snapshot_billed();
+    let by_source = usage_totals::by_source(&spent);
     RunSummary {
         ok: error.is_none(),
         error: error.map(|error| error.message.as_str()),
@@ -68,18 +68,18 @@ fn build<'a>(
         source: rt.active.as_deref(),
         model: rt.model.as_deref(),
         answer: final_answer(messages),
-        usage: usage_totals::total(&by_model),
-        // Priced per model, so a session that switched models mid-run is still
-        // billed at each one's own rates.
-        cost_usd: priced(rt.pricing.as_ref(), &by_model),
+        usage: usage_totals::total(&spent),
+        // Priced per billed entry, so a session that switched source or model
+        // mid-run is still billed at each one's own rates.
+        cost_usd: priced(rt.pricing.as_ref(), &spent),
         elapsed_secs: elapsed.as_secs_f64(),
         tools: rt.tool_policy.permitted(),
         // Read off the source rather than the flag, so what is reported is what
         // the requests carried - including a level `EXTRA_BODY` set by hand.
         effort: rt.active_source().and_then(Source::resolved_effort),
         refused_tool_calls: usage_totals::refused_tool_calls(),
-        auth: billing_source(&rt.sources, rt.active_source(), &billed).map(Source::run_auth),
-        sources: spend_by_source(&rt.sources, rt.pricing.as_ref(), &billed),
+        auth: billing_source(&rt.sources, rt.active_source(), &by_source).map(Source::run_auth),
+        sources: spend_by_source(&rt.sources, rt.pricing.as_ref(), &by_source),
         // A run that reaches here resolved its prompt; the refusal path reports
         // `None` instead - see `RunSummary::refused`.
         system_prompt_mode: Some(rt.prompt().mode()),
@@ -112,14 +112,14 @@ fn build<'a>(
 fn spend_by_source<'a>(
     sources: &'a HashMap<String, Source>,
     pricing: Option<&Pricing>,
-    billed: &BySource,
+    by_source: &[(String, Vec<(Billed, UsageTotals)>)],
 ) -> Vec<SourceSpend<'a>> {
-    billed
+    by_source
         .iter()
-        .map(|(source, by_model)| SourceSpend {
+        .map(|(source, entries)| SourceSpend {
             source: source.clone(),
-            usage: usage_totals::total(by_model),
-            cost_usd: priced(pricing, by_model),
+            usage: usage_totals::total(entries),
+            cost_usd: priced(pricing, entries),
             auth: sources.get(source).map(Source::run_auth),
         })
         .collect()
@@ -128,8 +128,8 @@ fn spend_by_source<'a>(
 /// What a set of per-model counts cost, or nothing when the caller configured no
 /// rates. Shared by the run's figure and each source's, so the two cannot come
 /// to price the same tokens by different routes.
-fn priced(pricing: Option<&Pricing>, by_model: &ByModel) -> Option<f64> {
-    pricing.and_then(|pricing| pricing.run_cost_usd(by_model))
+fn priced(pricing: Option<&Pricing>, billed: &[(Billed, UsageTotals)]) -> Option<f64> {
+    pricing.and_then(|pricing| pricing.run_cost_usd(billed))
 }
 
 /// The source whose credential paid for the run, if exactly one did.
@@ -148,9 +148,9 @@ fn priced(pricing: Option<&Pricing>, by_model: &ByModel) -> Option<f64> {
 fn billing_source<'a>(
     sources: &'a HashMap<String, Source>,
     active: Option<&'a Source>,
-    billed: &BySource,
+    by_source: &[(String, Vec<(Billed, UsageTotals)>)],
 ) -> Option<&'a Source> {
-    match billed.as_slice() {
+    match by_source {
         [] => active,
         [(only, _)] => sources.get(only),
         _ => None,

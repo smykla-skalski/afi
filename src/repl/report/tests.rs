@@ -11,7 +11,13 @@ use std::collections::HashMap;
 
 use super::{billing_source, spend_by_source};
 use crate::config::{Bedrock, Protocol, Source};
-use crate::model::usage_totals::{ByModel, BySource, UsageTotals};
+use crate::model::usage_totals::{Billed, UsageTotals};
+
+/// The ledger shapes these fixtures build, spelled locally because the flat
+/// ledger has no alias for the grouping `spend_by_source` consumes - it derives
+/// it from one read rather than storing it.
+type ByModel = Vec<(Billed, UsageTotals)>;
+type BySource = Vec<(String, ByModel)>;
 use crate::pricing::Pricing;
 use crate::summary::RunAuth;
 
@@ -85,8 +91,21 @@ fn totals(input: u64, output: u64, requests: u64) -> UsageTotals {
     }
 }
 
+/// One ledger key. The source is carried on the entry as well as on the group,
+/// because the flat ledger names it per entry - the grouping is derived.
+fn billed_on(source: &str, model: &str) -> Billed {
+    Billed {
+        source: source.to_string(),
+        provider: None,
+        model: model.to_string(),
+    }
+}
+
 fn spent(source: &str, model: &str, usage: UsageTotals) -> (String, ByModel) {
-    (source.to_string(), vec![(model.to_string(), usage)])
+    // `provider: None` prices the entry off the model-keyed overrides above,
+    // which is what `AFI_PRICES` is: an operator naming a rate means it,
+    // whichever endpoint serves the model.
+    (source.to_string(), vec![(billed_on(source, model), usage)])
 }
 
 /// A million tokens of each kind, so the money below is checkable by eye against
@@ -173,8 +192,8 @@ fn a_source_that_served_two_models_bills_each_at_its_own_rate() {
     let billed: BySource = vec![(
         "first".to_string(),
         vec![
-            ("model-one".to_string(), totals(MILLION, 0, 1)),
-            ("model-two".to_string(), totals(MILLION, 0, 1)),
+            (billed_on("first", "model-one"), totals(MILLION, 0, 1)),
+            (billed_on("first", "model-two"), totals(MILLION, 0, 1)),
         ],
     )];
     let sources = two_sources();

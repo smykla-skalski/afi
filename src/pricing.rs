@@ -19,10 +19,17 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::Number;
 
-use crate::model::usage_totals::UsageTotals;
+use crate::model::usage_totals::{Billed, UsageTotals};
+use crate::sessions;
+
+pub mod catalog;
+pub mod provider;
+pub(crate) mod refresh;
+pub(crate) mod table;
 
 /// The env var carrying the table.
 const PRICES_ENV: &str = "AFI_PRICES";
@@ -43,6 +50,21 @@ struct Rates {
 }
 
 impl Rates {
+    /// These rates over `under`'s, class by class.
+    ///
+    /// Per class rather than wholesale, so naming one negotiated rate keeps the
+    /// rest of that model's card. Replacing would make a one-line override
+    /// silence `cost_usd` for the model it was meant to correct.
+    fn over(self, under: Self) -> Self {
+        Self {
+            input: self.input.or(under.input),
+            output: self.output.or(under.output),
+            cache_read: self.cache_read.or(under.cache_read),
+            cache_write: self.cache_write.or(under.cache_write),
+            reasoning: self.reasoning.or(under.reasoning),
+        }
+    }
+
     /// `tokens x rate` summed over the five classes, left undivided.
     ///
     /// Dividing once at the very end is what keeps the total independent of how
@@ -68,62 +90,120 @@ impl Rates {
     }
 }
 
-/// A model-to-rates table.
+/// What a run's tokens cost, in layers.
+///
+/// The operator's own rates sit above the table afi ships and refreshes, and
+/// they combine class by class rather than replacing: naming a negotiated input
+/// rate for a model should not take that model's output rate down with it and
+/// silence the figure entirely.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pricing {
-    by_model: HashMap<String, Rates>,
+    /// `AFI_PRICES` and the `prices` config block. Flat and model-keyed, with no
+    /// provider: an operator naming a rate means it, whichever endpoint serves
+    /// the model.
+    overrides: HashMap<String, Rates>,
+    /// Provider, then model. Keyed on the provider because the same model id is
+    /// served by several at different rates - see [`provider`].
+    by_provider: table::Providers,
+    /// The day the layer under the overrides was projected, or empty when there
+    /// is no such layer. Read by the footer's staleness warning.
+    fetched: String,
 }
 
 impl Pricing {
-    /// Read `AFI_PRICES`, or `None` when it is unset, empty, or unusable.
+    /// The rates this run bills against: the table afi ships or has refreshed,
+    /// with anything in `AFI_PRICES` layered on top.
+    ///
+    /// `None` only when the overrides are unusable, which disables cost
+    /// reporting outright - a half-read table would price part of a run and call
+    /// the result the total. A run with no overrides at all still gets a
+    /// `Pricing`, which is the whole point of shipping a table.
     #[must_use]
     pub fn from_env<S: BuildHasher>(env: &HashMap<String, String, S>) -> Option<Self> {
-        Self::parse(env.get(PRICES_ENV).map(String::as_str))
+        let overrides = read_overrides(env.get(PRICES_ENV).map(String::as_str))?;
+        let (by_provider, fetched) = table::layers(&sessions::afi_home(env));
+        table::warn_if_stale(&fetched, Utc::now().date_naive(), env);
+        Some(Self {
+            overrides,
+            by_provider,
+            fetched,
+        })
     }
 
-    /// Parse the table. Anything wrong with it warns to stderr and disables cost
-    /// reporting outright: a half-read table would price part of a run and call
-    /// the result the total.
+    /// Parse `AFI_PRICES` alone, with no table under it.
+    ///
+    /// The rate table as the caller wrote it and nothing else, for a caller
+    /// testing what it wrote rather than what a run would bill.
     #[must_use]
     pub fn parse(raw: Option<&str>) -> Option<Self> {
-        let raw = match raw {
-            Some(r) if !r.trim().is_empty() => r,
-            _ => return None,
-        };
-        let table: HashMap<String, RawRates> = match serde_json::from_str(raw) {
-            Ok(table) => table,
-            Err(error) => {
-                eprintln!(
-                    "afi: ignoring bad {PRICES_ENV} JSON ({error}); no cost_usd will be reported"
-                );
-                return None;
-            }
-        };
-        let by_model = normalize(table)?;
-        if by_model.is_empty() {
-            None
-        } else {
-            Some(Self { by_model })
+        let overrides = read_overrides(raw)?;
+        if overrides.is_empty() {
+            return None;
+        }
+        Some(Self {
+            overrides,
+            ..Self::default()
+        })
+    }
+
+    /// The day the shipped or refreshed rates were projected, for a caller that
+    /// has to say how old a figure is. Empty when nothing but overrides applies.
+    #[must_use]
+    pub fn fetched(&self) -> &str {
+        &self.fetched
+    }
+
+    /// The rates that price one billed entry, or `None` when nothing does.
+    fn rates_for(&self, billed: &Billed) -> Option<Rates> {
+        let model = key(&billed.model);
+        let table = billed
+            .provider
+            .and_then(|provider| self.by_provider.get(&provider))
+            .and_then(|models| models.get(&model))
+            .copied();
+        match (self.overrides.get(&model).copied(), table) {
+            (Some(over), Some(under)) => Some(over.over(under)),
+            (over, under) => over.or(under),
         }
     }
 
-    /// The run's cost in USD, priced per model so a session that switched models
-    /// is still right.
+    /// The run's cost in USD, priced per entry so a session that switched source
+    /// or model is still right.
     ///
-    /// `None` when any model that spent tokens is missing from the table, or is
-    /// missing a rate for a class it used. Absent beats approximate: a partial
-    /// total under-reports without saying so.
+    /// `None` when anything that spent tokens has no rates, or no rate for a
+    /// class it used. Absent beats approximate: a partial total under-reports
+    /// without saying so.
     #[must_use]
-    pub fn run_cost_usd(&self, per_model: &[(String, UsageTotals)]) -> Option<f64> {
-        if per_model.is_empty() {
+    pub fn run_cost_usd(&self, billed: &[(Billed, UsageTotals)]) -> Option<f64> {
+        if billed.is_empty() {
             return None;
         }
         let mut weighted: u128 = 0;
-        for (model, usage) in per_model {
-            weighted = weighted.saturating_add(self.by_model.get(&key(model))?.weighted(usage)?);
+        for (who, usage) in billed {
+            weighted = weighted.saturating_add(self.rates_for(who)?.weighted(usage)?);
         }
         usd(round_to_micros(weighted))
     }
+}
+
+/// The operator's own rates, or `None` when what they wrote is unusable.
+///
+/// An empty map is "nothing was set", which is not a problem. `None` is "what
+/// was set cannot be read", which disables cost reporting for the whole run.
+fn read_overrides(raw: Option<&str>) -> Option<HashMap<String, Rates>> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Some(HashMap::new());
+    };
+    let table: HashMap<String, RawRates> = match serde_json::from_str(raw) {
+        Ok(table) => table,
+        Err(error) => {
+            eprintln!(
+                "afi: ignoring bad {PRICES_ENV} JSON ({error}); no cost_usd will be reported"
+            );
+            return None;
+        }
+    };
+    normalize(table)
 }
 
 /// Check every rate and key the table by normalized model id.
@@ -193,7 +273,7 @@ pub(crate) const RATE_CLASSES: [&str; 5] =
 /// The table as written, before the rates are checked. Unknown keys are an
 /// error rather than a silent drop, so a misspelled `cache_reads` is heard
 /// about instead of being priced at nothing.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRates {
     input: Option<Number>,

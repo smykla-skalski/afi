@@ -294,7 +294,7 @@ pub(super) async fn complete(
             body: redact.clean(&text),
         });
     }
-    record_completion_usage(&source.name, model, &text);
+    record_completion_usage(source, model, &text);
     reshape_completion(&text)
 }
 
@@ -303,9 +303,9 @@ pub(super) async fn complete(
 /// The streaming path records through `finalize_turn`, which this never reaches,
 /// so without this a `/compress` request is billed but absent from the summary.
 /// Best effort: a response with no usage object is simply not counted.
-fn record_completion_usage(source: &str, model: &str, body: &str) {
+fn record_completion_usage(source: &Source, model: &str, body: &str) {
     if let Some(normalized) = completion_usage(body) {
-        usage_totals::record(source, model, &normalized);
+        usage_totals::record(&source.name, source.price_provider(), model, &normalized);
     }
 }
 

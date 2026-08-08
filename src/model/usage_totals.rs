@@ -11,31 +11,29 @@
 //! both cached prefixes and `output_tokens` excludes reasoning, so the five
 //! fields are disjoint and add up to the run's billable total.
 //!
-//! The accumulator keys on the source a request was billed to and the model that
-//! served it, because a piped session can `/source` its way onto a second of
-//! each. Neither key derives from the other: rates are per model, and budgets
-//! are per source. `snapshot_by_source` is the one read, and the folds over it
-//! are pure: `by_model` folds the sources away again for pricing, and `total`
-//! folds what is left for the summary's flat counts.
-//!
-//! Which credential paid cannot be read off whichever source happens to be
-//! active when the run ends: a session that spends on one and then switches
-//! would attest to a credential that bought nothing. Only a request that
-//! reported usage is recorded, so the ledger names the sources that were
-//! actually billed and leaves out a source that was merely configured.
+//! The accumulator keys on the source *and* the model each request went to,
+//! because a piped session can `/source` its way onto a second of either and
+//! none of them are billed at the same rates. `snapshot` folds them together
+//! for the summary's flat counts; `snapshot_billed` keeps them apart for
+//! pricing.
 //!
 //! Two counts here are not about tokens: `refused_tool_calls`, what the run asked
 //! for and was refused, by policy and by the approval gate. They live beside the
 //! token totals because they are the same kind of thing - run-level facts the
 //! summary reports and one `reset` clears - and because the alternative is
-//! threading a counter through the turn loop. They key on neither source nor
-//! model: the dispatch site that sees a refusal knows of no request that carried
-//! it, because there was none.
+//! threading a counter through the turn loop.
+//!
+//! The same switch is why every entry names its *source*. Which credential paid
+//! cannot be read off whichever source happens to be active when the run ends: a
+//! session that spends on one and then switches would attest to a credential
+//! that bought nothing. Only a request that reported usage is recorded, so
+//! `billed_sources` names the sources that were actually billed.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::stream::NormalizedUsage;
+use crate::pricing::provider::Provider;
 
 /// Cumulative token counts for one run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -105,62 +103,96 @@ impl UsageTotals {
     }
 }
 
-/// One source's totals, split by the models that served them, in first-seen
-/// order. A `Vec` rather than a map because a run touches one or two and the
-/// order it billed them in is worth keeping.
-pub type ByModel = Vec<(String, UsageTotals)>;
-
-/// Every source the run was billed on, in the order it first spent on them.
-pub type BySource = Vec<(String, ByModel)>;
-
-/// What the run has been billed for so far.
+/// Who served a request, for the two questions that need to tell them apart.
 ///
-/// One mutex over the whole ledger, and one read serves a caller that needs both
-/// splits - the summary prices per model and attributes per source, and two
-/// reads would let the two describe different instants.
-fn ledger() -> &'static Mutex<BySource> {
-    static LEDGER: OnceLock<Mutex<BySource>> = OnceLock::new();
-    LEDGER.get_or_init(|| Mutex::new(BySource::new()))
+/// `source` answers which credential paid, which is what the summary's `auth`
+/// block attributes spend to. `provider` answers whose rate card applies, which
+/// is a different question with a different answer: the same model id is served
+/// by several providers at different rates, so a ledger keyed on the id alone
+/// could not be priced without guessing. `None` is an address afi carries no
+/// rates for - a self-hosted llama.cpp, most often.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Billed {
+    pub source: String,
+    pub provider: Option<Provider>,
+    pub model: String,
 }
 
-/// Record one request's usage against the model that served it and the source it
-/// was billed to. A poisoned lock recovers rather than panicking: bad accounting
-/// must never take down a run.
-pub fn record(source: &str, model: &str, usage: &NormalizedUsage) {
+/// What the run has been billed for so far, in first-seen order.
+///
+/// A `Vec` rather than a map because a run touches one or two entries and the
+/// order is worth keeping. One list rather than two: which sources spent used to
+/// be tracked separately, which meant nothing could say *which model* a given
+/// source had been billed for - exactly what pricing needs.
+#[derive(Debug, Default)]
+struct Ledger {
+    entries: Vec<(Billed, UsageTotals)>,
+}
+
+fn ledger() -> &'static Mutex<Ledger> {
+    static LEDGER: OnceLock<Mutex<Ledger>> = OnceLock::new();
+    LEDGER.get_or_init(|| Mutex::new(Ledger::default()))
+}
+
+/// Record one request's usage against the model that served it, the source it
+/// was billed to, and the rate card that prices it. A poisoned lock recovers
+/// rather than panicking: bad accounting must never take down a run.
+pub fn record(source: &str, provider: Option<Provider>, model: &str, usage: &NormalizedUsage) {
     let mut guard = ledger().lock().unwrap_or_else(PoisonError::into_inner);
-    // By index rather than by reference: appending the source that is missing
-    // and then reaching into it are two borrows of the same vector.
-    let at = guard
-        .iter()
-        .position(|(name, _)| name == source)
-        .unwrap_or_else(|| {
-            guard.push((source.to_string(), ByModel::new()));
-            guard.len() - 1
-        });
-    let by_model = &mut guard[at].1;
-    if let Some((_, totals)) = by_model.iter_mut().find(|(name, _)| name == model) {
+    if let Some((_, totals)) = guard
+        .entries
+        .iter_mut()
+        .find(|(billed, _)| billed.source == source && billed.model == model)
+    {
         totals.add(usage);
         return;
     }
     let mut totals = UsageTotals::default();
     totals.add(usage);
-    by_model.push((model.to_string(), totals));
+    guard.entries.push((
+        Billed {
+            source: source.to_string(),
+            provider,
+            model: model.to_string(),
+        },
+        totals,
+    ));
 }
 
-/// The run's totals so far, every source and model folded together.
+/// The sources that actually spent tokens, in first-seen order.
+///
+/// Empty when no request reported usage at all, which is a failed or unanswered
+/// run rather than a free one. More than one entry means no single credential
+/// paid for the run, and the summary reports none rather than picking.
+#[must_use]
+pub fn billed_sources() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (billed, _) in &ledger()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entries
+    {
+        if !out.contains(&billed.source) {
+            out.push(billed.source.clone());
+        }
+    }
+    out
+}
+
+/// The run's totals so far, everything folded together.
 #[must_use]
 pub fn snapshot() -> UsageTotals {
-    total(&by_model(&snapshot_by_source()))
+    total(&snapshot_billed())
 }
 
-/// Fold a per-model snapshot into one set of counts.
+/// Fold a billed snapshot into one set of counts.
 ///
 /// Takes the snapshot rather than reading the accumulator itself, so a caller
 /// that also prices the run derives both from one read. Two reads would let the
 /// counts and the cost describe different instants.
 #[must_use]
-pub fn total(by_model: &[(String, UsageTotals)]) -> UsageTotals {
-    by_model
+pub fn total(billed: &[(Billed, UsageTotals)]) -> UsageTotals {
+    billed
         .iter()
         .fold(UsageTotals::default(), |mut acc, entry| {
             acc.merge(&entry.1);
@@ -168,39 +200,38 @@ pub fn total(by_model: &[(String, UsageTotals)]) -> UsageTotals {
         })
 }
 
-/// The run's totals split by the source that was billed for them, each source
-/// still split by model so its share can be priced at the right rates.
+/// The run's entries grouped by the source that was billed, first-seen order
+/// kept within each group and between them.
 ///
-/// The names alone answer which credentials paid: none means nothing was billed,
-/// which is a failed or unanswered run rather than a free one, and more than one
-/// means no single credential paid for the run.
+/// Derived from the one flat ledger rather than stored beside it, so the flat
+/// counts, the run's cost, and the per-source breakdown are three views of a
+/// single read and cannot describe different instants.
+///
+/// Grouped rather than folded per model. Two sources serving one model id are
+/// separate entries here because they can be separate rate cards - see
+/// [`Billed::provider`] - so folding them would price one source's tokens at the
+/// other's rates.
 #[must_use]
-pub fn snapshot_by_source() -> BySource {
+pub fn by_source(billed: &[(Billed, UsageTotals)]) -> Vec<(String, Vec<(Billed, UsageTotals)>)> {
+    let mut out: Vec<(String, Vec<(Billed, UsageTotals)>)> = Vec::new();
+    for entry in billed {
+        if let Some((_, group)) = out.iter_mut().find(|(name, _)| *name == entry.0.source) {
+            group.push(entry.clone());
+            continue;
+        }
+        out.push((entry.0.source.clone(), vec![entry.clone()]));
+    }
+    out
+}
+
+/// The run's totals split by who served them, for anything that prices them.
+#[must_use]
+pub fn snapshot_billed() -> Vec<(Billed, UsageTotals)> {
     ledger()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
+        .entries
         .clone()
-}
-
-/// Fold a per-source snapshot into one entry per model, for anything that
-/// prices them.
-///
-/// Two sources serving the same model land in one entry, because a rate belongs
-/// to the model and not to whoever routed to it. Order is first-seen within each
-/// source, source by source, which is the order the run billed them in whenever
-/// it did not interleave the two.
-#[must_use]
-pub fn by_model(by_source: &[(String, ByModel)]) -> ByModel {
-    let mut folded = ByModel::new();
-    for (_, models) in by_source {
-        for (model, totals) in models {
-            match folded.iter_mut().find(|(name, _)| name == model) {
-                Some((_, acc)) => acc.merge(totals),
-                None => folded.push((model.clone(), *totals)),
-            }
-        }
-    }
-    folded
 }
 
 /// Tool calls the run refused, split by what refused them.
@@ -267,10 +298,8 @@ pub fn refused_tool_calls() -> RefusedToolCalls {
 
 /// Clear the totals. Exists for tests, which share one process.
 pub fn reset() {
-    ledger()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
+    let mut guard = ledger().lock().unwrap_or_else(PoisonError::into_inner);
+    guard.entries.clear();
     REFUSED_BY_POLICY.store(0, Ordering::Relaxed);
     REFUSED_BY_APPROVAL.store(0, Ordering::Relaxed);
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::pricing::provider::Provider;
 
 fn usage(input: u64, output: u64, cache: u64, reasoning: u64) -> NormalizedUsage {
     NormalizedUsage {
@@ -110,14 +111,13 @@ fn the_process_accumulator_records_and_resets() {
     reset();
     names_every_source_that_was_billed();
     reset();
-    keeps_sources_apart_while_still_totalling();
-    reset();
 }
 
 fn records_one_model() {
     assert!(snapshot().is_empty());
     record(
         "anthropic",
+        Some(Provider::Anthropic),
         "claude-sonnet-5",
         &NormalizedUsage {
             input_tokens: 7,
@@ -144,25 +144,15 @@ fn reset_clears_every_ledger() {
     );
 }
 
-/// The sources the ledger says were billed, in the order it recorded them. The
-/// summary reads these names off the same snapshot it takes the counts from -
-/// see `crate::repl::report`.
-fn billed_sources() -> Vec<String> {
-    snapshot_by_source()
-        .into_iter()
-        .map(|(source, _)| source)
-        .collect()
-}
-
 /// A piped session can `/source` its way onto a second model, and the two are
 /// not billed alike - so the flat counts stay whole while pricing sees the split.
 fn keeps_models_apart_while_still_totalling() {
-    record("local", "cheap", &usage(100, 20, 0, 0));
-    record("local", "dear", &usage(300, 40, 0, 0));
-    record("local", "cheap", &usage(50, 10, 0, 0));
-    let by_model: Vec<_> = by_model(&snapshot_by_source())
+    record("local", None, "cheap", &usage(100, 20, 0, 0));
+    record("local", None, "dear", &usage(300, 40, 0, 0));
+    record("local", None, "cheap", &usage(50, 10, 0, 0));
+    let by_model: Vec<_> = snapshot_billed()
         .iter()
-        .map(|(model, totals)| (model.clone(), totals.input_tokens, totals.requests))
+        .map(|(billed, totals)| (billed.model.clone(), totals.input_tokens, totals.requests))
         .collect();
     assert_eq!(
         by_model,
@@ -186,65 +176,19 @@ fn names_every_source_that_was_billed() {
         billed_sources().is_empty(),
         "a run that billed nothing names no source"
     );
-    record("local", "cheap", &usage(100, 20, 0, 0));
-    record("anthropic", "claude-sonnet-5", &usage(300, 40, 0, 0));
-    record("local", "cheap", &usage(50, 10, 0, 0));
+    record("local", None, "cheap", &usage(100, 20, 0, 0));
+    record(
+        "anthropic",
+        Some(Provider::Anthropic),
+        "claude-sonnet-5",
+        &usage(300, 40, 0, 0),
+    );
+    record("local", None, "cheap", &usage(50, 10, 0, 0));
     assert_eq!(
         billed_sources(),
         vec!["local".to_string(), "anthropic".to_string()],
         "first-seen order, and a source that spent twice is named once"
     );
-}
-
-/// The split the summary attributes spend with: each source keeps its own
-/// counts, and folding them back together has to reproduce the flat totals a
-/// consumer already reads.
-fn keeps_sources_apart_while_still_totalling() {
-    record("local", "shared-model", &usage(100, 20, 0, 0));
-    record("anthropic", "shared-model", &usage(300, 40, 0, 0));
-    record("local", "cheap", &usage(7, 1, 0, 0));
-    record("local", "shared-model", &usage(50, 10, 0, 0));
-
-    let by_source = snapshot_by_source();
-    let named: Vec<_> = by_source
-        .iter()
-        .map(|(source, by_model)| {
-            let totals = total(by_model);
-            (source.clone(), totals.input_tokens, totals.requests)
-        })
-        .collect();
-    assert_eq!(
-        named,
-        vec![
-            ("local".to_string(), 157, 3),
-            ("anthropic".to_string(), 300, 1),
-        ],
-        "sources keep first-seen order and accumulate on their own"
-    );
-
-    // A model two sources both served is one rate, so pricing sees one entry
-    // however many sources routed to it.
-    let folded: Vec<_> = by_model(&by_source)
-        .iter()
-        .map(|(model, totals)| (model.clone(), totals.input_tokens, totals.requests))
-        .collect();
-    assert_eq!(
-        folded,
-        vec![
-            ("shared-model".to_string(), 450, 3),
-            ("cheap".to_string(), 7, 1),
-        ]
-    );
-
-    // The invariant the breakdown is only worth reading with: every entry adds
-    // up to the flat counts, because each request is billed to exactly one
-    // source.
-    let per_source = by_source.iter().fold(UsageTotals::default(), |mut acc, e| {
-        acc.merge(&total(&e.1));
-        acc
-    });
-    assert_eq!(per_source, snapshot());
-    assert_eq!(snapshot().requests, 4);
 }
 
 #[test]

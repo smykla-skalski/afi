@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -12,9 +12,9 @@ use serde_json::{Value, json};
 use super::commands::handle_slash_command;
 use super::failure::RunFailure;
 use super::report::report_run;
+use super::resume::resume_session;
 use super::{CommandResult, NO_ACTIVE_SOURCE, header};
 use crate::approval::ApprovalState;
-use crate::cli::session_id_from_args;
 use crate::config::{Runtime, Source, SystemPrompt, nested};
 use crate::log::log_event;
 use crate::model::client::ReqwestClient;
@@ -175,6 +175,9 @@ impl ReplCore {
                 self.messages
                     .push(json!({"role": "user", "content": input}));
                 self.run_user_turn(ui).await;
+                // A turn can load a subtree file, so the `instructions:` segment would
+                // otherwise stay frozen at the startup count.
+                ui.header(header(&self.rt));
                 self.auto_save(input);
                 CoreAction::Continue
             }
@@ -182,12 +185,9 @@ impl ReplCore {
     }
 
     pub(crate) fn shutdown(&mut self, ui: &mut dyn UserInterface) {
-        let _ = sessions::write_session(
-            &self.dir,
-            &self.session_id,
-            &mut self.messages,
-            Some(&json!({})),
-        );
+        let meta = self.session_meta(&Value::Null);
+        let _ =
+            sessions::write_session(&self.dir, &self.session_id, &mut self.messages, Some(&meta));
         ui.message(MessageKind::Info, self.resume_hint());
     }
 
@@ -251,82 +251,35 @@ impl ReplCore {
     }
 
     fn auto_save(&mut self, input: &str) {
-        let meta = safe_title(Some(input), 60).map_or_else(
-            || json!({"source": self.rt.active, "model": self.rt.model}),
-            |title| {
-                let cwd = env::current_dir()
-                    .ok()
-                    .map(|path| path.to_string_lossy().to_string());
-                json!({"title": title, "source": self.rt.active, "model": self.rt.model, "cwd": cwd})
-            },
-        );
+        let title = safe_title(Some(input), 60);
+        let cwd = title.as_ref().and_then(|_| {
+            env::current_dir()
+                .ok()
+                .map(|path| path.to_string_lossy().to_string())
+        });
+        let meta = self.session_meta(&json!({"title": title, "cwd": cwd}));
         let _ =
             sessions::write_session(&self.dir, &self.session_id, &mut self.messages, Some(&meta));
     }
-}
 
-fn resume_session(
-    rt: &mut Runtime,
-    dir: &Path,
-    ui: &mut dyn UserInterface,
-) -> Option<(Vec<Value>, String)> {
-    let target = rt.resume.clone()?;
-    let sid = if let Some(target) = target {
-        session_id_from_args(&["--resume".to_string(), target], &rt.env)?
-    } else {
-        let Some(summary) = sessions::list_sessions(dir, Some(1), 0, None)
-            .first()
-            .cloned()
-        else {
-            ui.message(
-                MessageKind::Info,
-                "no saved sessions to resume - starting fresh".to_string(),
-            );
-            return None;
-        };
-        summary.id
-    };
-    let data = sessions::load_session(dir, &sid)?;
-    let stored = data.get("messages").and_then(Value::as_array)?;
-    let mut messages: Vec<Value> = stored
-        .iter()
-        .filter(|message| message.get("role").and_then(Value::as_str) != Some("system"))
-        .cloned()
-        .collect();
-    // This run's prompt, not the one the session was saved under: a resumed run
-    // is still the run the operator just configured, and the stored system
-    // message was filtered out above for exactly that reason.
-    messages.insert(0, rt.prompt().message());
-    // The subtree half rides in tool messages, replayed verbatim, so it cannot be
-    // re-decided the same way - see `nested::adopt`.
-    nested::adopt(&messages);
-    if let Some(source) = data.get("source").and_then(Value::as_str) {
-        rt.restore_source(Some(source), data.get("model").and_then(Value::as_str));
-    }
-    ui.message(
-        MessageKind::Info,
-        format!("↻ resumed session {sid} ({} messages)", messages.len() - 1),
-    );
-    Some((messages, sid))
-}
-
-pub(crate) fn restore_prompt_resume(rt: &mut Runtime) {
-    let Some(target) = rt.resume.clone() else {
-        return;
-    };
-    let dir = sessions::sessions_dir(&rt.env);
-    let sid = if let Some(target) = target {
-        session_id_from_args(&["--resume".to_string(), target], &rt.env)
-    } else {
-        sessions::list_sessions(&dir, Some(1), 0, None)
-            .first()
-            .map(|summary| summary.id.clone())
-    };
-    let Some(data) = sid.and_then(|sid| sessions::load_session(&dir, &sid)) else {
-        return;
-    };
-    if let Some(source) = data.get("source").and_then(Value::as_str) {
-        rt.restore_source(Some(source), data.get("model").and_then(Value::as_str));
+    /// What a saved session records besides its messages.
+    ///
+    /// One place, because two of them disagreed: the subtree files this run sent have
+    /// to be recorded for a resume to know what the model has already been told, and a
+    /// save that left them out would hand the next run an empty answer. Null values are
+    /// dropped by the store, so an untitled save leaves an earlier title standing.
+    fn session_meta(&self, extra: &Value) -> Value {
+        let mut meta = json!({
+            "source": self.rt.active,
+            "model": self.rt.model,
+            "instructions": nested::in_history(),
+        });
+        if let (Some(meta), Some(extra)) = (meta.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                meta.insert(key.clone(), value.clone());
+            }
+        }
+        meta
     }
 }
 

@@ -27,6 +27,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use serde_json::Value;
 
 use crate::risk::is_under_path;
+use crate::tools::protocol::escape_tool_protocol_delimiters;
 
 use super::super::system_prompt::{SystemPrompt, unreadable};
 use super::{MAX_BYTES, block_for, chain_up, file_size, files_in};
@@ -74,28 +75,95 @@ fn carried() -> &'static Mutex<Vec<(String, usize)>> {
     CARRIED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Take note of the instruction blocks a resumed history already holds.
+/// Take note of the instruction blocks a resumed history already holds, from what
+/// the session file recorded.
 ///
 /// A resumed session replays its tool messages verbatim, and a block appended to one
 /// of them is still in front of the model - so this run must neither claim it sent
 /// them nor send them again. Both halves follow from recording them here: [`arm`]
 /// seeds `sent` from this list, and the reporting reads it.
 ///
-/// Recognized by the marker [`super::block_for`] writes, which is the only thing on
-/// the wire that identifies a block. A file whose own text contains that marker would
-/// be counted twice; it would also already be indistinguishable to the model, and the
-/// cost of guessing wrong here is one extra line in a listing.
-pub fn adopt(messages: &[Value]) {
-    let found: Vec<(String, usize)> = messages
-        .iter()
-        .filter_map(|message| message["content"].as_str())
-        .flat_map(super::blocks_in)
-        .collect();
+/// Read from the session file rather than recovered from the message text, which is
+/// what this did first and got wrong twice. The text is not afi's to trust: the
+/// system message carries the startup walk's own blocks, so every resume adopted
+/// those a second time and charged for them twice, and any file the model had `cat`
+/// into a tool result could name a path in the marker's shape and suppress the real
+/// file for the rest of the session while the listing reported it as sent. The
+/// session file is afi's own record of what it sent, and nothing in the working tree
+/// can write to it.
+pub fn adopt(recorded: &Value) {
+    let found: Vec<(String, usize)> = recorded
+        .as_array()
+        .map(|entries| entries.iter().filter_map(entry).collect())
+        .unwrap_or_default();
     if found.is_empty() {
         return;
     }
     let mut guard = carried().lock().unwrap_or_else(PoisonError::into_inner);
     *guard = found;
+}
+
+/// One recorded `{path, bytes}` pair, or `None` when a session file holds something
+/// else there - an older afi, or a file somebody edited.
+fn entry(value: &Value) -> Option<(String, usize)> {
+    let path = value.get("path")?.as_str()?.to_string();
+    let bytes = usize::try_from(value.get("bytes")?.as_u64()?).ok()?;
+    Some((path, bytes))
+}
+
+/// The blocks this run believes its history carries, for the session file to record.
+///
+/// Both halves: what a resume brought in, and what this run has since sent. That is
+/// the same set [`arm`] rebuilds `sent` from, so a session saved and resumed any
+/// number of times keeps one consistent answer to "what has the model been told".
+#[must_use]
+pub fn in_history() -> Value {
+    let entries: Vec<Value> = carried_in()
+        .into_iter()
+        .chain(loaded())
+        .map(|(path, bytes)| serde_json::json!({"path": path, "bytes": bytes}))
+        .collect();
+    Value::Array(entries)
+}
+
+/// Forget every block one of `dropped` was carrying, because those messages are
+/// leaving the conversation.
+///
+/// The counterpart to [`reset`], for a fold that removes some turns and keeps others:
+/// `/compress` keeps the most recent two verbatim, so a block in them is still being
+/// sent while an older one is gone. Forgetting only the gone ones is what lets the
+/// next call into that subtree be told again without duplicating what survived.
+///
+/// This reads the message text, which [`adopt`] deliberately stopped doing - the
+/// difference is which way a wrong answer fails. Believing a forged block was sent
+/// suppresses a real rule; believing one was dropped only offers a rule again. So a
+/// file that fakes the marker costs a duplicate block here, and nothing worse.
+pub fn forget_in(dropped: &[Value]) {
+    let mut guard = state().lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(state) = guard.as_mut() else {
+        return;
+    };
+    let text: String = dropped
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let gone: Vec<(String, usize)> = state
+        .loaded
+        .iter()
+        .filter(|(path, _)| super::mentions_block(&text, path))
+        .cloned()
+        .collect();
+    for (path, bytes) in gone {
+        state.sent.remove(&canonical(&path));
+        state.loaded.retain(|(sent, _)| sent != &path);
+        // Refunded: the text is no longer in front of the model, so the run is no
+        // longer paying for it on every request.
+        state.remaining = state.remaining.saturating_add(bytes);
+    }
+    drop(guard);
+    let mut carried = carried().lock().unwrap_or_else(PoisonError::into_inner);
+    carried.retain(|(path, _)| !super::mentions_block(&text, path));
 }
 
 /// What a resumed history brought with it, as `(path, bytes on the wire)`.
@@ -233,6 +301,13 @@ fn take(state: &mut State, path: &Path) -> Option<String> {
     if text.is_empty() {
         return None;
     }
+    if text.len() > state.remaining {
+        return Some(over_budget(&shown));
+    }
+    // Escaped before it is measured, because the escaped form is what goes on the
+    // wire: a repository file holding a literal tool-call delimiter would otherwise be
+    // charged less than it costs and reported as a length nothing sent.
+    let text = escape_tool_protocol_delimiters(&text);
     if text.len() > state.remaining {
         return Some(over_budget(&shown));
     }

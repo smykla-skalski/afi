@@ -273,26 +273,20 @@ pub(super) fn files_in<'a>(
     found
 }
 
-/// The blocks a message's text carries, as `(path, bytes)`.
+/// Whether `text` carries a block for `path`.
 ///
-/// The reverse of [`block_for`], and the only way to tell that a replayed tool result
-/// already holds a project's rules - the text on the wire is all a resumed run has to
-/// go on. Beside the writer so the two spellings of the marker cannot drift.
-pub(super) fn blocks_in(text: &str) -> Vec<(String, usize)> {
-    let mut found = Vec::new();
-    for start in text.match_indices(MARKER).map(|(at, _)| at) {
-        let rest = &text[start + MARKER.len()..];
-        let Some(head) = rest.find(":\n\n") else {
-            continue;
-        };
-        let body = &rest[head + 3..];
-        // A block runs to the next one, or to the end of the message.
-        let len = body.find(MARKER).map_or(body.len(), |next| {
-            body[..next].trim_end_matches(char::is_whitespace).len()
-        });
-        found.push((rest[..head].to_string(), len));
-    }
-    found
+/// The only thing on the wire that identifies a block is the header [`block_for`]
+/// writes, so this asks for exactly that. Beside the writer so the two spellings of
+/// the marker cannot drift.
+///
+/// Used in one direction only - to notice that a block has *left* a conversation, so
+/// the rules can be offered again. Nothing decides that a block was already sent from
+/// message text: a repository file can write anything into a tool result, and a
+/// forgery believed in that direction suppresses a real rule. See
+/// `nested::forget_in`, which documents the asymmetry, and `nested::adopt`, which
+/// reads afi's own session file instead.
+pub(super) fn mentions_block(text: &str, path: &str) -> bool {
+    text.contains(&format!("{MARKER}{path}:"))
 }
 
 /// One file's block, as the model reads it.
@@ -331,6 +325,15 @@ fn load(paths: &[PathBuf], found: Found) -> Result<Instructions, String> {
     let mut total = 0usize;
     for path in paths {
         let shown = path.display().to_string();
+        // A regular file, checked before anything opens it. `metadata().len()` is 0 for
+        // a fifo and for a character device, so the weight below waves both through and
+        // the read then blocks forever on the first and never ends on the second - the
+        // walk cannot reach either, since it filters on `is_file`, but a named path can.
+        if !fs::metadata(path).is_ok_and(|meta| meta.file_type().is_file()) {
+            return Err(format!(
+                "the project instructions at {shown:?} are not a regular file"
+            ));
+        }
         // Weighed before it is read. The cap exists because these bytes are paid for
         // on every request, and pulling a multi-gigabyte file into memory in order to
         // refuse it spends far more than the cap was protecting. Trimming can only

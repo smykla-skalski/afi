@@ -18,7 +18,7 @@ use crate::term::{OutputEvent, UserInterface};
 use crate::tools;
 use crate::tools::policy::ToolPolicy;
 use crate::tools::policy::is_mutating;
-use crate::tools::protocol::{escape_tool_protocol_delimiters, sanitize_tool_result};
+use crate::tools::protocol::sanitize_tool_result;
 use std::path::PathBuf;
 
 /// Accumulates the streamed fragments of a single tool call.
@@ -341,11 +341,9 @@ fn with_subtree_rules(mut result: String, name: &str, args: &Value, cwd: &Path) 
         return result;
     };
     result.push_str("\n\n");
-    // Escaped like the tool's own output, and for the same reason: this text is a
-    // repository's, and the message it lands in carries a note saying its delimiters
-    // were neutralized. A file holding a literal `[afi_tool_call]` would otherwise
-    // reach the model live under that note.
-    result.push_str(&escape_tool_protocol_delimiters(&rules));
+    // Already escaped, by the loader that measured it - the reported byte count and
+    // the bytes on the wire have to be the same number.
+    result.push_str(&rules);
     result
 }
 

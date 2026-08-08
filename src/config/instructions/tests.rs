@@ -1,4 +1,5 @@
 use std::fs;
+use std::process::Command;
 
 use tempfile::TempDir;
 
@@ -255,6 +256,26 @@ fn a_named_path_that_is_missing_refuses_the_run() {
 }
 
 #[test]
+fn a_named_path_that_is_not_a_regular_file_refuses_the_run() {
+    // `metadata().len()` is 0 for a fifo, so the size guard waved one through and the
+    // read then blocked forever - the run hung with no diagnostic at all. The walk
+    // cannot reach one, since it filters on `is_file`; a named path can.
+    let (_home, env) = no_home();
+    let dir = TempDir::new().unwrap();
+    let fifo = dir.path().join("pipe");
+    let made = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(made, "the test needs mkfifo");
+
+    let path = fifo.display().to_string();
+    let error = resolve(Some(&path), None, &env).expect_err("a fifo must refuse");
+    assert!(error.contains(&path), "{error}");
+    assert!(error.contains("not a regular file"), "{error}");
+}
+
+#[test]
 fn a_named_directory_refuses_the_run() {
     // The shape of `--instructions "$RULES_DIR"`, which reads as a path that
     // exists right up to the point something tries to read it.
@@ -322,26 +343,25 @@ fn what_was_loaded_is_reported_with_the_bytes_that_were_sent() {
 }
 
 #[test]
-fn a_block_is_recognized_again_from_the_text_it_became() {
-    // What a resumed run has to work with: the wire text is the only record that a
-    // replayed tool result already carries a project's rules. Round-tripped through
-    // the writer so the two spellings of the marker cannot drift apart.
+fn a_block_is_noticed_in_the_text_it_became() {
+    // Round-tripped through the writer so the two spellings of the marker cannot
+    // drift. Asked in one direction only: this notices that a block has left a
+    // conversation, never that one was sent - see `mentions_block`.
     let one = block_for("/repo/AGENTS.md", "use mise");
     let two = block_for("/repo/crates/api/AGENTS.md", "leave the bindings alone");
     let wire = format!("tool output\n\nsome header\n\n{one}\n\n{two}");
 
-    assert_eq!(
-        blocks_in(&wire),
-        vec![
-            ("/repo/AGENTS.md".to_string(), "use mise".len()),
-            (
-                "/repo/crates/api/AGENTS.md".to_string(),
-                "leave the bindings alone".len()
-            ),
-        ]
+    assert!(mentions_block(&wire, "/repo/AGENTS.md"));
+    assert!(mentions_block(&wire, "/repo/crates/api/AGENTS.md"));
+    assert!(
+        !mentions_block(&wire, "/repo/crates/db/AGENTS.md"),
+        "a path nothing wrote is not in there"
     );
     assert!(
-        blocks_in("an ordinary tool result with no rules in it").is_empty(),
+        !mentions_block(
+            "an ordinary tool result with no rules in it",
+            "/repo/AGENTS.md"
+        ),
         "and nothing is found where nothing was written"
     );
 }

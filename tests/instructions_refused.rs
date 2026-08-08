@@ -6,6 +6,8 @@
 //! drive a real process from a real checkout built by the same helper.
 
 use std::fs;
+use std::net::TcpListener;
+use std::sync::Arc;
 
 use afi::repl::banner;
 use serde_json::Value;
@@ -13,7 +15,10 @@ use tempfile::TempDir;
 
 mod common;
 
-use common::{ROOT_RULE, checkout, repl_afi_in, repo, run_afi_in, stderr_of, summary_of};
+use common::endpoint::{Bodies, serve, tool_call_per_user_turn};
+use common::{
+    ROOT_RULE, checkout, repl_afi_in, repo, run_afi_in, stderr_of, summary_of, workspace,
+};
 
 /// Each of these has to exit 2 and name what it could not use.
 #[test]
@@ -135,10 +140,9 @@ fn the_instructions_command_lists_what_was_loaded_with_its_sizes() {
 }
 
 #[test]
-fn the_status_line_says_how_many_files_were_loaded_and_only_then() {
-    // The interactive half of reporting what was loaded, since nobody sitting at a
-    // terminal reads the run summary. The segment appearing is itself the signal,
-    // so an unconfigured session's status line has to be unchanged.
+fn the_status_line_counts_both_halves_and_only_when_there_are_any() {
+    // The segment appearing is itself the signal, so an unconfigured session's status
+    // line has to be unchanged.
     let plain = common::build(&["afi"], &[]);
     assert!(!banner(&plain).contains("instructions:"));
 
@@ -150,5 +154,39 @@ fn the_status_line_says_how_many_files_were_loaded_and_only_then() {
         banner(&loaded).contains("instructions:1"),
         "{}",
         banner(&loaded)
+    );
+}
+
+#[test]
+fn the_status_line_follows_a_subtree_file_loaded_mid_session() {
+    // The count is rendered from `all_instructions`, which grows when the model reads
+    // into a subtree - so the header has to be re-rendered after a turn or it reports
+    // one number while `/instructions` reports another.
+    let dir = workspace();
+    let home = TempDir::new().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the fake endpoint must bind");
+    let addr = listener.local_addr().expect("an addr");
+    let bodies: Bodies = Arc::default();
+    let server = serve(listener, &bodies, |seen| {
+        tool_call_per_user_turn(
+            seen,
+            "read_file",
+            &serde_json::json!({"path": "crates/api/src/lib.rs"}),
+        )
+    });
+
+    let output = repl_afi_in(
+        &home,
+        &repo(&dir),
+        Some(addr),
+        &["--instructions", "project"],
+        "read it\n/quit\n",
+    );
+    drop(server);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("instructions:2"),
+        "the status line has to follow the on-demand load: {stdout}"
     );
 }

@@ -234,13 +234,13 @@ fn parse_completion_content(text: &str) -> Option<String> {
 
 /// Replace all but the last `COMPRESS_KEEP` turns with a summary user turn.
 fn apply_compression(messages: &mut Vec<Value>, summary: &str) {
-    let header = format!(
-        "[Compressed context - earlier turns summarized; last {COMPRESS_KEEP} turns kept verbatim]"
-    );
+    let header =
+        format!("[Compressed context - earlier turns summarized; last {COMPRESS_KEEP} kept]");
     let has_sys = messages
         .first()
         .is_some_and(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"));
     let split = messages.len().saturating_sub(COMPRESS_KEEP);
+    nested::forget_in(&messages[..split]);
     let mut new_msgs = Vec::new();
     if has_sys {
         new_msgs.push(messages[0].clone());

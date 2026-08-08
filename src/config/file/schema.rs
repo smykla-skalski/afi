@@ -31,8 +31,8 @@
 use crate::pricing::RATE_CLASSES;
 
 use super::value::{
-    Convert, allow_list, count, decimal, effort_level, flag, list, object, percent, prompt_mode,
-    protocol_name, summary_format, text, whole, wide_count,
+    Convert, allow_list, count, decimal, effort_level, flag, list, money, object, percent,
+    prompt_mode, protocol_name, ratio, summary_format, text, whole, wide_count,
 };
 
 /// Which files may set a key. The other half of the pair is
@@ -206,6 +206,17 @@ pub(super) const TOP: &[Setting] = &[
     // rather than beside the blocks because it carries one value like the rest of
     // this table - the `env` column is what the exception needs.
     row("source_order", "AFI_SOURCES", list),
+    // What a run may spend. `mine`, not `row`, and deliberately not one of the
+    // bounding keys either: a project file may neither raise a cap nor lower
+    // one. A hard stop is a *successful* exit - 0, `ok: true`, whatever the run
+    // had produced - so a repository able to write `budget_usd: 0.01` could end
+    // every run in a checkout after one request and have the summary say it
+    // worked. `read_only` is safe to tighten from a project file because a
+    // denied tool shows up in `refused_by_policy`; a truncated answer that
+    // reports success shows up nowhere.
+    mine("budget_usd", "AFI_BUDGET_USD", money),
+    mine("soft_budget_ratio", "AFI_SOFT_BUDGET_RATIO", ratio),
+    mine("hard_budget_ratio", "AFI_HARD_BUDGET_RATIO", ratio),
     // What a token costs. A repository has a legitimate say here - the rates are
     // a description of the world rather than a decision about this machine - so
     // these are `row` like `prices` itself.

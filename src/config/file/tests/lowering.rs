@@ -330,3 +330,42 @@ fn every_bad_key_is_reported_rather_than_only_the_first() {
     let all = refusals(r#"{"activ": "zai", "max_tokens": "8000", "telemetry": 1}"#);
     assert_eq!(all.len(), 3, "{all:?}");
 }
+
+#[test]
+fn a_budget_lowers_to_the_variable_that_carries_it() {
+    let out = pairs(r#"{"budget_usd": 5, "soft_budget_ratio": 0.7, "hard_budget_ratio": 0.99}"#);
+    assert_eq!(out.get("AFI_BUDGET_USD").unwrap(), "5");
+    assert_eq!(out.get("AFI_SOFT_BUDGET_RATIO").unwrap(), "0.7");
+    assert_eq!(out.get("AFI_HARD_BUDGET_RATIO").unwrap(), "0.99");
+}
+
+#[test]
+fn a_cap_the_reader_would_refuse_is_refused_here_too() {
+    // The file and `pricing::millionths` have to agree about what an amount is,
+    // or a value this accepted would be reported by the variable's name for a
+    // mistake written under the key's.
+    for body in [
+        r#"{"budget_usd": "5"}"#,
+        r#"{"budget_usd": -1}"#,
+        r#"{"budget_usd": 0}"#,
+        r#"{"budget_usd": 0.0000001}"#,
+    ] {
+        let why = refusal(body);
+        assert!(why.contains("budget_usd"), "{body} -> {why}");
+    }
+    for body in [
+        r#"{"soft_budget_ratio": 0}"#,
+        r#"{"soft_budget_ratio": 1.5}"#,
+        r#"{"soft_budget_ratio": -0.5}"#,
+    ] {
+        let why = refusal(body);
+        assert!(why.contains("above 0 and at most 1"), "{body} -> {why}");
+    }
+    // A ratio written as a string is refused for its shape rather than its
+    // range, and says so - the message a caller acts on is different.
+    let why = refusal(r#"{"hard_budget_ratio": "0.9"}"#);
+    assert!(
+        why.contains("a fraction of the budget (got string)"),
+        "{why}"
+    );
+}

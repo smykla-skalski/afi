@@ -151,3 +151,35 @@ fn a_project_file_may_tighten_the_tool_policy_and_not_widen_it() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn a_project_file_may_not_move_the_cap_in_either_direction() {
+    // The one bound where lowering is as dangerous as raising, because a hard
+    // stop is a *successful* exit: a repository able to write
+    // `budget_usd: 0.01` could end every run in a checkout after one request
+    // and have the summary report that it worked. `read_only` is safe to tighten
+    // from a project file because a denied tool shows up in `refused_by_policy`;
+    // a truncated answer that reports success shows up nowhere.
+    for body in [
+        r#"{"budget_usd": 0.01}"#,
+        r#"{"budget_usd": 1000}"#,
+        r#"{"soft_budget_ratio": 0.1}"#,
+        r#"{"hard_budget_ratio": 0.1}"#,
+    ] {
+        let refusals = project(body);
+        assert_eq!(refusals.len(), 1, "{body} -> {refusals:?}");
+        assert!(
+            refusals[0].contains("cannot be set by a file in the working directory"),
+            "{body} -> {refusals:?}"
+        );
+    }
+    // The operator's own file sets all three.
+    for body in [
+        r#"{"budget_usd": 5}"#,
+        r#"{"soft_budget_ratio": 0.7}"#,
+        r#"{"hard_budget_ratio": 0.99}"#,
+    ] {
+        let read = lower::read(Path::new("config.json"), body, Origin::Operator);
+        assert_eq!(read.refusals, Vec::<String>::new(), "{body}");
+    }
+}

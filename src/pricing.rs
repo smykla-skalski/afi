@@ -20,14 +20,17 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 
 use chrono::Utc;
-use serde::Deserialize;
-use serde_json::Number;
 
 use crate::model::usage_totals::{Billed, UsageTotals};
 use crate::sessions;
 
+use provider::Provider;
+pub(crate) use rates::{RATE_CLASSES, millionths, usd};
+use rates::{RawRates, key, report_bad_rate, report_duplicate, round_to_micros};
+
 pub mod catalog;
 pub mod provider;
+mod rates;
 pub(crate) mod refresh;
 pub(crate) mod table;
 
@@ -69,24 +72,32 @@ impl Rates {
     ///
     /// Dividing once at the very end is what keeps the total independent of how
     /// the run happened to split across turns and models.
-    fn weighted(self, usage: &UsageTotals) -> Option<u128> {
+    ///
+    /// `Err` names the class that stopped it, so a caller reporting the failure
+    /// can say which rate is missing rather than that one is.
+    fn weighted(self, usage: &UsageTotals) -> Result<u128, &'static str> {
         let classes = [
-            (usage.input_tokens, self.input),
-            (usage.output_tokens, self.output),
-            (usage.cache_read_tokens, self.cache_read),
-            (usage.cache_write_tokens, self.cache_write),
-            (usage.reasoning_tokens, self.reasoning.or(self.output)),
+            ("input", usage.input_tokens, self.input),
+            ("output", usage.output_tokens, self.output),
+            ("cache_read", usage.cache_read_tokens, self.cache_read),
+            ("cache_write", usage.cache_write_tokens, self.cache_write),
+            (
+                "reasoning",
+                usage.reasoning_tokens,
+                self.reasoning.or(self.output),
+            ),
         ];
         let mut acc: u128 = 0;
-        for (tokens, rate) in classes {
+        for (class, tokens, rate) in classes {
             if tokens == 0 {
                 // A class nobody used cannot change the bill, so leaving it
                 // unpriced must not suppress the whole figure.
                 continue;
             }
-            acc = acc.saturating_add(u128::from(tokens).saturating_mul(u128::from(rate?)));
+            let rate = rate.ok_or(class)?;
+            acc = acc.saturating_add(u128::from(tokens).saturating_mul(u128::from(rate)));
         }
-        Some(acc)
+        Ok(acc)
     }
 }
 
@@ -153,6 +164,31 @@ impl Pricing {
         &self.fetched
     }
 
+    /// Why a run on this model could not be priced, or `None` when it can.
+    ///
+    /// For a caller that has to know *before* the run whether a cap it was given
+    /// can ever fire. Only `input` and `output` are demanded, because those are
+    /// the two classes every request spends. The cache classes are checked when
+    /// they are actually spent rather than in advance: an OpenAI-compatible
+    /// source reports no cache writes at all, and demanding a rate for one would
+    /// refuse a configuration that is complete for the endpoint it talks to.
+    #[must_use]
+    pub fn unpriceable(&self, provider: Option<Provider>, model: &str) -> Option<String> {
+        let probe = Billed {
+            source: String::new(),
+            provider,
+            model: model.to_string(),
+        };
+        let Some(rates) = self.rates_for(&probe) else {
+            return Some(format!("no rate for model {model:?}"));
+        };
+        match (rates.input, rates.output) {
+            (Some(_), Some(_)) => None,
+            (None, _) => Some(format!("model {model:?} has no \"input\" rate")),
+            _ => Some(format!("model {model:?} has no \"output\" rate")),
+        }
+    }
+
     /// The rates that price one billed entry, or `None` when nothing does.
     fn rates_for(&self, billed: &Billed) -> Option<Rates> {
         let model = key(&billed.model);
@@ -167,6 +203,35 @@ impl Pricing {
         }
     }
 
+    /// The run's cost so far in whole micro-USD, or why there is no figure.
+    ///
+    /// [`Self::run_cost_usd`] folds every failure into `None`, because a summary
+    /// reports a figure or reports nothing. A spend cap cannot afford that: "no
+    /// request has spent yet" is zero and must not stop a run, while "afi cannot
+    /// price what was spent" is the one thing a cap must never read as free.
+    #[must_use]
+    pub fn run_cost(&self, billed: &[(Billed, UsageTotals)]) -> Priced {
+        if billed.is_empty() {
+            return Priced::Nothing;
+        }
+        let mut weighted: u128 = 0;
+        for (who, usage) in billed {
+            let Some(rates) = self.rates_for(who) else {
+                return Priced::NoRates(who.model.clone());
+            };
+            match rates.weighted(usage) {
+                Ok(amount) => weighted = weighted.saturating_add(amount),
+                Err(class) => {
+                    return Priced::NoRate {
+                        model: who.model.clone(),
+                        class,
+                    };
+                }
+            }
+        }
+        Priced::Spent(round_to_micros(weighted))
+    }
+
     /// The run's cost in USD, priced per entry so a session that switched source
     /// or model is still right.
     ///
@@ -175,14 +240,41 @@ impl Pricing {
     /// without saying so.
     #[must_use]
     pub fn run_cost_usd(&self, billed: &[(Billed, UsageTotals)]) -> Option<f64> {
-        if billed.is_empty() {
-            return None;
+        match self.run_cost(billed) {
+            Priced::Spent(micros) => usd(micros),
+            _ => None,
         }
-        let mut weighted: u128 = 0;
-        for (who, usage) in billed {
-            weighted = weighted.saturating_add(self.rates_for(who)?.weighted(usage)?);
+    }
+}
+
+/// What a run's spend adds up to, or why it does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Priced {
+    /// The run's cost so far, in whole micro-USD, rounded half-up once at the
+    /// end so the figure does not depend on how the run split across turns.
+    Spent(u128),
+    /// No request has reported usage, so there is nothing to price. Zero, not
+    /// unknown.
+    Nothing,
+    /// Something that spent tokens has no rates at all - an endpoint afi does
+    /// not recognise, or a model nothing carries a rate for.
+    NoRates(String),
+    /// A model with rates has none for a class it spent on.
+    NoRate { model: String, class: &'static str },
+}
+
+impl Priced {
+    /// The sentence to report when a run cannot be priced, or `None` when it
+    /// can. `Nothing` is priceable: it is zero.
+    #[must_use]
+    pub fn why_not(&self) -> Option<String> {
+        match self {
+            Self::Spent(_) | Self::Nothing => None,
+            Self::NoRates(model) => Some(format!("no rate for model {model:?}")),
+            Self::NoRate { model, class } => Some(format!(
+                "model {model:?} has no {class:?} rate, and spent there"
+            )),
         }
-        usd(round_to_micros(weighted))
     }
 }
 
@@ -223,140 +315,6 @@ fn normalize(table: HashMap<String, RawRates>) -> Option<HashMap<String, Rates>>
         }
     }
     Some(by_model)
-}
-
-/// Model ids are matched case-insensitively after trimming, so a hand-written
-/// table is not defeated by stray whitespace.
-fn key(model: &str) -> String {
-    model.trim().to_ascii_lowercase()
-}
-
-/// Whole micro-USD, rounded half-up, from the undivided `tokens x rate` sum.
-fn round_to_micros(weighted: u128) -> u128 {
-    weighted.saturating_add(500_000) / 1_000_000
-}
-
-/// Render micro-USD as a plain decimal and read it back as a float.
-///
-/// The obvious `micros as f64 / 1e6` is a lossy cast the lint policy forbids,
-/// and going through the exact decimal is not an approximation of it - every
-/// figure afi can produce round-trips.
-fn usd(micros: u128) -> Option<f64> {
-    format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000)
-        .parse::<f64>()
-        .ok()
-}
-
-fn report_bad_rate(model: &str, field: &str) {
-    eprintln!(
-        "afi: {PRICES_ENV}[{model:?}].{field} is not a usable rate; \
-         want USD per million tokens, not negative, \
-         and no finer than six decimal places; \
-         no cost_usd will be reported"
-    );
-}
-
-fn report_duplicate(model: &str) {
-    eprintln!(
-        "afi: {PRICES_ENV} names {:?} twice, counting case and surrounding \
-         space as the same id; no cost_usd will be reported",
-        key(model)
-    );
-}
-
-/// The rate classes [`RawRates`] accepts, for a caller that has to check the
-/// same shape without deserializing it - the config file, which names the key it
-/// refuses. Kept here so one list answers for both.
-pub(crate) const RATE_CLASSES: [&str; 5] =
-    ["input", "output", "cache_read", "cache_write", "reasoning"];
-
-/// The table as written, before the rates are checked. Unknown keys are an
-/// error rather than a silent drop, so a misspelled `cache_reads` is heard
-/// about instead of being priced at nothing.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawRates {
-    input: Option<Number>,
-    output: Option<Number>,
-    cache_read: Option<Number>,
-    cache_write: Option<Number>,
-    reasoning: Option<Number>,
-}
-
-impl RawRates {
-    /// Convert every rate present, naming the first bad field so the warning can
-    /// point at it.
-    fn to_rates(&self) -> Result<Rates, &'static str> {
-        Ok(Rates {
-            input: micros(self.input.as_ref(), "input")?,
-            output: micros(self.output.as_ref(), "output")?,
-            cache_read: micros(self.cache_read.as_ref(), "cache_read")?,
-            cache_write: micros(self.cache_write.as_ref(), "cache_write")?,
-            reasoning: micros(self.reasoning.as_ref(), "reasoning")?,
-        })
-    }
-}
-
-fn micros(raw: Option<&Number>, field: &'static str) -> Result<Option<u64>, &'static str> {
-    match raw {
-        None => Ok(None),
-        Some(number) => micros_per_million(&number.to_string())
-            .map(Some)
-            .ok_or(field),
-    }
-}
-
-/// Parse a USD-per-million-tokens rate into micro-USD.
-///
-/// Read from the digits rather than from the float they denote, so `3`, `0.3`,
-/// `3e-1`, and `0.000001` all land exactly. Reading it from the rendered form
-/// instead would make the answer depend on how `serde_json` chose to print the
-/// number, and `1e-6` prints as an exponent while `0.00001` does not - so of
-/// the six decimal places this module promises, only five would work.
-///
-/// Negatives, and anything finer than a micro-dollar or too large to hold, are
-/// refused rather than coerced. A rate that fine cannot move a figure afi
-/// reports, so a caller who wrote one has made a mistake worth hearing about.
-fn micros_per_million(raw: &str) -> Option<u64> {
-    let (mantissa, exponent) = split_exponent(raw)?;
-    let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
-    if (whole.is_empty() && frac.is_empty()) || !digits(whole) || !digits(frac) {
-        return None;
-    }
-    // Where the decimal point falls once the value is scaled to micro-USD.
-    let point = i64::try_from(whole.len()).ok()? + i64::from(exponent) + 6;
-    scaled(&format!("{whole}{frac}"), point)
-}
-
-/// Split `3e-1` into mantissa and exponent. No exponent means 0.
-fn split_exponent(raw: &str) -> Option<(&str, i32)> {
-    match raw.split_once(['e', 'E']) {
-        None => Some((raw, 0)),
-        Some((mantissa, exponent)) => Some((mantissa, exponent.parse().ok()?)),
-    }
-}
-
-/// Read `digits` as a whole number with the decimal point at `point`.
-///
-/// `None` when anything past the point is non-zero, which is a rate finer than
-/// the micro-dollar this is counted in.
-fn scaled(digits: &str, point: i64) -> Option<u64> {
-    // A u64 holds 20 digits, so a point past that is not a rate afi can use.
-    if !(0..=20).contains(&point) {
-        return None;
-    }
-    let point = usize::try_from(point).ok()?;
-    if digits.len() > point && digits[point..].bytes().any(|byte| byte != b'0') {
-        return None;
-    }
-    let whole: String = digits.chars().take(point).collect();
-    let padded = format!("{whole:0<point$}");
-    if padded.is_empty() {
-        // Every digit was zero and the point sits left of all of them.
-        return Some(0);
-    }
-    padded.parse().ok()
 }
 
 #[cfg(test)]

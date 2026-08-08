@@ -124,7 +124,13 @@ fn parse_args_never_takes_another_flag_as_a_value() {
 
 #[test]
 fn every_value_flag_leaves_the_flag_after_it_standing() {
-    for flag in ["--source", "--session", "--approval", "--prompt-file"] {
+    for flag in [
+        "--source",
+        "--session",
+        "--approval",
+        "--prompt-file",
+        "--budget-usd",
+    ] {
         let p = mk(&["afi", flag, "--yolo"]);
         assert!(p.yolo, "{flag} must not eat --yolo");
         assert_eq!(p.flag_errors.len(), 1, "{flag}: {:?}", p.flag_errors);
@@ -141,4 +147,28 @@ fn parse_args_still_reads_the_prompt_from_stdin() {
         Some("-")
     );
     assert!(mk(&["afi", "-f", "-", "--yolo"]).yolo);
+}
+
+#[test]
+fn the_budget_flag_takes_its_value_either_way_and_refuses_a_blank() {
+    // A cap given wrongly must refuse the run rather than leaving it uncapped:
+    // `afi --budget-usd "$CAP"` with `CAP` unset arrives as an empty argument,
+    // and that is the form a CI script is written in.
+    assert_eq!(
+        mk(&["afi", "--budget-usd", "5"]).budget_usd.as_deref(),
+        Some("5")
+    );
+    assert_eq!(
+        mk(&["afi", "--budget-usd=2.50"]).budget_usd.as_deref(),
+        Some("2.50")
+    );
+    for args in [
+        vec!["afi", "--budget-usd"],
+        vec!["afi", "--budget-usd", ""],
+        vec!["afi", "--budget-usd="],
+    ] {
+        let p = mk(&args);
+        assert_eq!(p.budget_usd, None, "{args:?}");
+        assert_eq!(p.flag_errors.len(), 1, "{args:?}: {:?}", p.flag_errors);
+    }
 }

@@ -168,6 +168,16 @@ pub struct RunSummary<'a> {
     /// text: the prompt can be long, and a workflow that wants to know what was
     /// sent has the file.
     pub system_prompt_file: Option<&'a str>,
+    /// The project instruction files the run loaded, in the order they were sent -
+    /// the startup walk's first, then any subtree file the model reached later.
+    /// Empty for a run that loaded none, which is every run that did not ask for
+    /// them.
+    ///
+    /// Beside `tools` and for the same reason: a reviewer's behaviour should be
+    /// readable out of its own output. A job that loaded last month's rules and a
+    /// job that loaded this month's produce otherwise identical summaries, and so
+    /// does one that silently loaded nothing because a path moved.
+    pub instructions: Vec<String>,
 }
 
 impl<'a> RunSummary<'a> {
@@ -211,6 +221,10 @@ impl<'a> RunSummary<'a> {
             // prompt itself is what the run was refused over.
             system_prompt_mode: None,
             system_prompt_file: None,
+            // Empty rather than null, matching `tools`: the null `system_prompt`
+            // beside it already says the run never started, so nothing here has to
+            // say it twice.
+            instructions: Vec::new(),
         }
     }
 
@@ -240,6 +254,7 @@ impl<'a> RunSummary<'a> {
             "auth": RunAuth::json(self.auth),
             "sources": SourceSpend::json(&self.sources),
             "system_prompt": self.system_prompt_json(),
+            "instructions": self.instructions,
         })
     }
 

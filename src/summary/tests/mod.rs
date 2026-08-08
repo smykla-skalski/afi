@@ -53,6 +53,7 @@ pub(in crate::summary) fn summary(ok: bool, answer: &str, usage: UsageTotals) ->
         sources: billed_by(usage),
         system_prompt_mode: Some("builtin"),
         system_prompt_file: None,
+        instructions: Vec::new(),
     }
 }
 

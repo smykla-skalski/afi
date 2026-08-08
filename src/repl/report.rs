@@ -13,6 +13,8 @@ use crate::config::{Runtime, Source};
 use crate::model::usage_totals::{self, ByModel, BySource};
 use crate::pricing::Pricing;
 use crate::summary::{self, RunError, RunSummary, SourceSpend, final_answer};
+
+use super::all_instructions;
 use crate::term::{MessageKind, UserInterface};
 
 /// Report the finished run wherever the caller asked for it. Returns whether the
@@ -83,6 +85,13 @@ fn build<'a>(
         // `None` instead - see `RunSummary::refused`.
         system_prompt_mode: Some(rt.prompt().mode()),
         system_prompt_file: rt.prompt().file(),
+        // The startup walk's files, then whatever the model reached into later. Read
+        // at the end of the run for the same reason the token totals are: a subtree
+        // file loaded on the last turn still belongs in the report.
+        instructions: all_instructions(rt)
+            .into_iter()
+            .map(|(path, _, _)| path)
+            .collect(),
     }
 }
 

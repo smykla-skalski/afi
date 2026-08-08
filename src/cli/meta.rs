@@ -28,6 +28,7 @@ flags:
   --effort <level>               low | medium | high | xhigh | max
   --system-prompt-file <path>    send these standing instructions to the model
   --system-prompt-mode <mode>    replace (default) | append, against the built-in prompt
+  --instructions <value>         project | none | a comma-separated list of paths
   --read-only                    deny every tool that can change anything
   --allowed-tools <a,b>          only these tools may be called
   --disallowed-tools <a,b>       these tools may not be called

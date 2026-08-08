@@ -391,6 +391,7 @@ fn the_run_summary_reports_those_writes_separately() {
         sources: Vec::new(),
         system_prompt_mode: Some("builtin"),
         system_prompt_file: None,
+        instructions: Vec::new(),
     }
     .to_json();
     assert_eq!(json["usage"]["cache_write_tokens"], 2279);

@@ -15,7 +15,7 @@ use super::report::report_run;
 use super::{CommandResult, NO_ACTIVE_SOURCE, header};
 use crate::approval::ApprovalState;
 use crate::cli::session_id_from_args;
-use crate::config::{Runtime, Source};
+use crate::config::{Runtime, Source, SystemPrompt, nested};
 use crate::log::log_event;
 use crate::model::client::ReqwestClient;
 use crate::model::turn::{LoopRequest, run_model_turn_loop};
@@ -46,6 +46,9 @@ pub(crate) struct Shared<'a> {
 /// Inputs for one model loop shared by REPL, one-shot, and `/recover`.
 pub(crate) struct TurnParams<'a> {
     pub config: &'a ModelConfig,
+    /// The prompt this run sends, carried for what it knows about the project
+    /// instructions already loaded - see the subtree loader armed below.
+    pub prompt: &'a SystemPrompt,
     pub source: &'a Source,
     pub model: &'a str,
     pub approval: &'a ApprovalState,
@@ -64,6 +67,10 @@ pub(crate) async fn run_turn_loop(
     let classifier = HighDefaultClassifier;
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_root = detect_project_root(Some(&cwd));
+    // The one funnel every path runs through - REPL, one-shot, `/recover` - and it
+    // already resolved the directory the loader measures the subtree from. Arming
+    // twice is a no-op, so the per-turn call cannot reset what the session has read.
+    nested::arm(params.prompt, &cwd);
     run_model_turn_loop(
         messages,
         LoopRequest {
@@ -207,6 +214,7 @@ impl ReplCore {
             &mut self.messages,
             &TurnParams {
                 config: &self.config,
+                prompt: self.rt.prompt(),
                 source,
                 model,
                 approval: &self.rt.approval,
@@ -289,6 +297,9 @@ fn resume_session(
     // is still the run the operator just configured, and the stored system
     // message was filtered out above for exactly that reason.
     messages.insert(0, rt.prompt().message());
+    // The subtree half rides in tool messages, replayed verbatim, so it cannot be
+    // re-decided the same way - see `nested::adopt`.
+    nested::adopt(&messages);
     if let Some(source) = data.get("source").and_then(Value::as_str) {
         rt.restore_source(Some(source), data.get("model").and_then(Value::as_str));
     }
@@ -367,6 +378,7 @@ async fn one_shot_run(
         messages,
         &TurnParams {
             config: &config,
+            prompt: rt.prompt(),
             source,
             model,
             approval: &rt.approval,

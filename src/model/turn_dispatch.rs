@@ -10,14 +10,15 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::approval::ApprovalState;
+use crate::config::nested;
 use crate::model::ModelConfig;
 use crate::model::usage_totals;
-use crate::risk::{RiskClassifier, confirm};
+use crate::risk::{RiskClassifier, confirm, resolve_action_path};
 use crate::term::{OutputEvent, UserInterface};
 use crate::tools;
 use crate::tools::policy::ToolPolicy;
 use crate::tools::policy::is_mutating;
-use crate::tools::protocol::sanitize_tool_result;
+use crate::tools::protocol::{escape_tool_protocol_delimiters, sanitize_tool_result};
 use std::path::PathBuf;
 
 /// Accumulates the streamed fragments of a single tool call.
@@ -309,6 +310,45 @@ fn emit_tool_finished(ui: &mut dyn UserInterface, name: &str, summary: &str) {
     });
 }
 
+/// The tools whose calls name a path, and so can take the model into a subtree
+/// whose instruction file has not been read yet.
+///
+/// `run_bash` is not among them on purpose. Its path, if it has one, is somewhere
+/// inside a shell command, and guessing at one would load a directory's rules off a
+/// substring that happened to look like a path.
+const PATH_TOOLS: [&str; 4] = ["read_file", "write_file", "edit_file", "list_dir"];
+
+/// `result`, with any instruction file the call's directory carries appended.
+///
+/// The subtree half of project instructions: the startup walk reads the launch
+/// directory and above, and a repository's deeper rules only matter once the model
+/// reads into that subtree - see [`crate::config::instructions::nested`], which
+/// decides whether there is anything to add and answers `None` for every run that
+/// did not ask for a walk.
+///
+/// Appended after the tool's own output has been sanitized, so a result long enough
+/// to be truncated cannot take the rules with it.
+fn with_subtree_rules(mut result: String, name: &str, args: &Value, cwd: &Path) -> String {
+    if !PATH_TOOLS.contains(&name) {
+        return result;
+    }
+    let Some(path) = args.get("path").and_then(Value::as_str) else {
+        return result;
+    };
+    // The same resolution the approval gate classifies against, so "inside the
+    // project" means one thing - see `resolve_action_path`.
+    let Some(rules) = nested::for_path(&resolve_action_path(path, cwd)) else {
+        return result;
+    };
+    result.push_str("\n\n");
+    // Escaped like the tool's own output, and for the same reason: this text is a
+    // repository's, and the message it lands in carries a note saying its delimiters
+    // were neutralized. A file holding a literal `[afi_tool_call]` would otherwise
+    // reach the model live under that note.
+    result.push_str(&escape_tool_protocol_delimiters(&rules));
+    result
+}
+
 /// Run structured (OpenAI-format) tool calls, pushing a tool message per call
 /// and marking later calls SKIPPED once one is escaped.
 pub(crate) fn dispatch_structured(
@@ -323,7 +363,8 @@ pub(crate) fn dispatch_structured(
         match dispatch_tool(name, args, da) {
             ToolDispatchResult::Ok(result) => {
                 let sanitized = sanitize_tool_result(&result, tool_result_chars);
-                messages.push(json!({"role": "tool", "tool_call_id": c.id.clone().unwrap_or_default(), "content": sanitized}));
+                let content = with_subtree_rules(sanitized, name, args, da.cwd);
+                messages.push(json!({"role": "tool", "tool_call_id": c.id.clone().unwrap_or_default(), "content": content}));
             }
             ToolDispatchResult::Escaped(action) => {
                 messages.push(json!({"role": "tool", "tool_call_id": c.id.clone().unwrap_or_default(), "content": "CANCELLED by user (Esc)"}));
@@ -349,7 +390,8 @@ pub(crate) fn dispatch_text(
     for (name, args) in calls {
         match dispatch_tool(name, args, da) {
             ToolDispatchResult::Ok(r) => {
-                observations.push(format!("Observation ({name}): {r}"));
+                let text = with_subtree_rules(r, name, args, da.cwd);
+                observations.push(format!("Observation ({name}): {text}"));
             }
             ToolDispatchResult::Escaped(action) => {
                 escaped = Some(action);

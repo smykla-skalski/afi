@@ -192,9 +192,13 @@ pub(super) const TOP: &[Setting] = &[
         list,
         Merge::Union,
     ),
-    // What it is told to do, before the conversation starts.
+    // What it is told to do, before the conversation starts. `instructions` is
+    // the operator's for a reason of its own: it decides whether the working tree
+    // is read for standing instructions, so a project file able to set it would
+    // be a repository voting itself the right to instruct the agent.
     mine("system_prompt_file", "AFI_SYSTEM_PROMPT_FILE", text),
     mine("system_prompt_mode", "AFI_SYSTEM_PROMPT_MODE", prompt_mode),
+    mine("instructions", "AFI_INSTRUCTIONS", list),
     // How it reports itself.
     row("summary", "AFI_SUMMARY", summary_format),
     mine("summary_file", "AFI_SUMMARY_FILE", text),

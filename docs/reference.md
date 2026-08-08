@@ -18,6 +18,7 @@ Flags, environment variables, subcommands, and slash commands for `afi`. See the
 | `--effort <low\|medium\|high\|xhigh\|max>`  | how hard the model is asked to think ([details](#reasoning-effort))  |
 | `--system-prompt-file <path>`               | send these standing instructions to the model ([details](#system-prompt)) |
 | `--system-prompt-mode <replace\|append>`    | against the built-in prompt, default `replace` ([details](#system-prompt)) |
+| `--instructions <value>`                    | `project`, `none`, or paths to load standing rules from ([details](#project-instructions)) |
 | `--read-only`                               | deny every tool that can change anything ([details](#tool-policy)) |
 | `--allowed-tools <a,b>`                     | only these tools may be called ([details](#tool-policy))    |
 | `--disallowed-tools <a,b>`                  | these tools may not be called ([details](#tool-policy))     |
@@ -76,6 +77,7 @@ Every field except the version and the profile is best-effort. A build with no g
 | `AFI_EFFORT`                                 | reasoning effort for every source ([details](#reasoning-effort))     |
 | `AFI_SYSTEM_PROMPT_FILE`                     | standing instructions to send instead of afi's ([details](#system-prompt)) |
 | `AFI_SYSTEM_PROMPT_MODE`                     | `replace` (default) or `append` ([details](#system-prompt))           |
+| `AFI_INSTRUCTIONS`                           | load a project's own standing rules ([details](#project-instructions)) |
 | `AFI_ALLOWED_TOOLS` / `AFI_DISALLOWED_TOOLS` | restrict which tools a run may call ([details](#tool-policy))         |
 | `AFI_READ_ONLY`                              | deny every tool that can change anything ([details](#tool-policy))    |
 | `AFI_PRICES`                                 | per-model token rates, so the summary reports cost ([details](#cost)) |
@@ -138,7 +140,7 @@ So a project file may say **what to work with** - `active`, `source_order`, a so
 | `sources.*.base_url`, `sources.*.protocol`, `anthropic.base_url`  | where requests go, and what credential goes with them |
 | `anthropic.federation.*`                                          | whose credential is exchanged                   |
 | `approval`                                                        | whether you are asked before a tool runs        |
-| `system_prompt_file`, `system_prompt_mode`                         | whose instructions the model follows            |
+| `system_prompt_file`, `system_prompt_mode`, `instructions`          | whose instructions the model follows            |
 | `summary_file`, `home`, `sessions_dir`                             | where afi writes                                |
 
 Reaching for one of those from a project file refuses the run and says so, naming the key.
@@ -209,6 +211,50 @@ Replacing is what makes the setting worth having. Most of afi's prompt explains 
 The flags are stricter than the variables about being given nothing, the way [`--summary-file`](#writing-the-summary-to-a-file) is. `afi --system-prompt-file "$PROMPT"` with `PROMPT` unset is refused; a blank `AFI_SYSTEM_PROMPT_FILE` names no file and is not an error, since that is what an exported-but-unset shell variable looks like in a workflow's env block. A mode set with no file configured does nothing, so a workflow can export `AFI_SYSTEM_PROMPT_MODE` once for jobs that pass a file and jobs that do not.
 
 The [run summary](#run-summary) reports which prompt the run used, so a job's behaviour can be read out of its own output rather than out of the workflow file that was supposed to have configured it. A run that configures nothing sends the bytes afi has always sent, and the Anthropic prompt cache keeps hitting across turns.
+
+## Project instructions
+
+Most repositories already write down how work in them is done, in an `AGENTS.md` or a `CLAUDE.md`. `--instructions` (or `AFI_INSTRUCTIONS`) reads those files at startup and sends them as system content, so the rules the model follows are the ones the repository currently states rather than a copy of them pasted into a prompt file. A copy drifts with nothing to detect it - no import, no checksum, no failure when the upstream rules change - and a reviewer enforcing last month's policy looks exactly like one that is working.
+
+| value                | what it loads                                                          |
+| -------------------- | ---------------------------------------------------------------------- |
+| unset                | nothing, which is what every run did before this setting existed        |
+| `project`            | your `$AFI_HOME/AGENTS.md`, then `AGENTS.md` and `CLAUDE.md` at and above the working directory |
+| `none`               | nothing, explicitly                                                    |
+| `a.md,b.md`          | exactly those files, in that order                                     |
+
+```bash
+afi --instructions project -f task.md
+afi --instructions ci/review-rules.md,ci/format-policy.md -f task.md --read-only --summary json
+```
+
+**Nothing is read unless you ask.** These files are written by whoever wrote the repository, and on a review job that repository is the thing under review - a pull request that edits `AGENTS.md` is editing the instructions of the agent about to review it. So the walk is off by default, `instructions` is a key only [your own config file](#config-file) may set, and a job that needs a fixed rule set names the files instead, from a path the reviewed branch cannot reach. `none` exists for the run that inherits `project` from your config file or a workflow's env block, where leaving the value out is not an option.
+
+**The walk stops at the project.** It reads your own `$AFI_HOME/AGENTS.md` (or `CLAUDE.md`) first, then the working directory and every directory above it up to the one holding `.git`, reading both names wherever it finds them; outside a repository it reads only the working directory. Without that boundary it would climb to `$HOME` and read whatever standing instructions live up there as though this project had written them - the same rule the [project config file](#config-file) uses. The same file reached two ways is sent once.
+
+**A closer file wins.** Blocks are sent broadest first - yours, then the repository root's, then each directory down to where you started - so a subtree's `AGENTS.md` reads after the root's, which is the precedence both file names document for themselves. Both names are read when a directory holds both, so a `CLAUDE.md` with something of its own to say is never dropped for sharing a directory with an `AGENTS.md`.
+
+**A subtree below where you started arrives when the model gets there.** The startup walk goes up, not down, so `afi --instructions project` at a repository root does not send `crates/api/AGENTS.md` in the first request - there is no reason to pay for rules the run may never reach. This holds whether or not the walk found anything, so a monorepo whose rules live only in its crates still gets them. It is read the first time the model touches that subtree with `read_file`, `write_file`, `edit_file`, or `list_dir`, and appended to that tool's result, once per directory for the rest of the session. Reading `crates/api/src/lib.rs` picks up `crates/api/AGENTS.md` too: the model arrives at a subtree, not at a directory.
+
+The same boundary applies. A call on a path outside the directory afi started in reads nothing, so a `read_file` on `~/notes.txt`, or on `../../elsewhere`, cannot turn whatever `AGENTS.md` lives up there into this project's rules. The path is resolved the way the [approval gate](#approval-modes) resolves it - `~` expanded, relative paths joined onto the working directory, and `..` and symlinks followed - because a boundary checked against the unresolved form passes for a path that lands anywhere: `Path::starts_with` is a component-wise test, so `<repo>/src/../../..` reads as inside `<repo>`. `run_bash` is not one of the four: its path, if it has one, is somewhere inside a shell command, and guessing would load a directory's rules off a substring that happened to look like one.
+
+**Naming files switches this off too.** `--instructions <path,...>` pins exactly what a job sends, so nothing deeper in the tree arrives later either - which is the point of pinning when the tree is the thing under review.
+
+A subtree file counts against the same 32 KiB total. Past it the file is not sent, and the model is told so by name rather than left with a subtree whose rules look absent.
+
+**The blocks land after your own prompt**, whichever [system-prompt mode](#system-prompt) is in force, and they say so: the model is told these are the project's standing rules, that anything above them and anything you ask for directly takes precedence, and that a later block wins over an earlier one. Position alone would not settle it for the run that supplied its own prompt, which is the run most likely to want these files.
+
+**Instructions that cannot be used exit 2 and name them.** A named file that is missing, unreadable, a directory, or empty is refused, as is a value that names no file at all. A file the walk turned up that holds nothing is left out instead - a placeholder `AGENTS.md` is a fact about the repository rather than a mistake in the invocation - and the summary then names only what was really sent. The flag is stricter than the variable about being given nothing, the way [`--system-prompt-file`](#system-prompt) is: `afi --instructions "$RULES"` with `RULES` unset is refused, while a blank `AFI_INSTRUCTIONS` loads nothing and is not an error.
+
+**There is a 32 KiB cap on the total**, which is what Codex caps its own `AGENTS.md` chain at. A file is weighed before it is read, so an enormous `AGENTS.md` is refused rather than pulled into memory first. These bytes sit in front of every request and the whole history is resent each turn, so a large file is paid for on every one of them - roughly 8k tokens at the cap. Over it the run refuses and names the total: truncating would leave the model following half a rule set, which is instructions nobody wrote. Name the files the job needs instead of walking the tree.
+
+**Ask what was loaded with `/instructions`**, which lists each file, the bytes it put in front of the model, and whether it arrived at startup or on demand. A [resumed](#flags) session replays the subtree blocks its earlier run loaded, since those ride in tool messages rather than in the system prompt; they are listed as `carried in from the resumed session`, counted against this run's budget, and not sent a second time - whatever this run asked for, including `--instructions none`. It is the first thing to reach for when the model ignores a rule the repository states, because a file that was never found, a subtree the model has not walked into yet, and a rule the model simply did not follow are otherwise indistinguishable. The sizes are what this run sent, so a file edited mid-session shows up as the difference between the listing and the file on disk - afi reads each one once and does not watch it afterwards.
+
+The [run summary](#run-summary) lists the same paths for a job nobody is watching - including any subtree file loaded on the last turn, since it is read when the run ends - and an interactive session carries an `instructions:<n>` segment in its status line. A run that loads none sends the bytes afi has always sent, so the Anthropic prompt cache is undisturbed.
+
+**The startup half survives compression and `/reset`.** It rides inside the system content, which both leave whole, so those rules are still there afterwards - nothing has to be re-read or re-injected, which is the failure mode of sending them as a leading user message instead.
+
+**A subtree block rides in a tool result, so it is only as durable as that turn.** `/reset` empties the history, so afi forgets it sent those blocks and the next call into each subtree is told again. `/compress` is different: it keeps the most recent turns verbatim, so a recent block is still in the conversation and is left alone, while one older than the kept tail is folded into the summary and not offered a second time. `/instructions` reports it as sent either way, which is true of the summary it was folded into.
 
 ## Tool policy
 
@@ -319,7 +365,8 @@ On the Anthropic path one default gives way. `thinking` is sent as `disabled` un
       "auth": {"mode": "federated", "organization_id": "org_...", "service_account_id": "svac_...", "workspace_id": "wrkspc_...", "federation_rule_id": "fdrl_..."}
     }
   ],
-  "system_prompt": {"mode": "builtin", "file": null}
+  "system_prompt": {"mode": "builtin", "file": null},
+  "instructions": ["/src/repo/AGENTS.md", "/src/repo/crates/api/AGENTS.md"]
 }
 ```
 
@@ -361,6 +408,8 @@ The identifiers are the non-secret ones the [federation](#anthropic) exchange se
 
 The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run - unless the run was refused a call, which afi observed itself and reports either way, with `requests` still `0` to mark the silence.
 `system_prompt` is there for the same reason. `mode` is `builtin`, `replace`, or `append`, and `file` is the path the text came from, or `null` for `builtin` - see [System prompt](#system-prompt). The path rather than the text: a prompt can be long, and a job that wants to know what was sent has the file.
+
+`instructions` lists the [project instruction files](#project-instructions) the run loaded, in the order they were sent - the startup walk's first, then any subtree file the model reached into - and is `[]` for the run that loaded none - which is every run that did not ask for any. An array on every run, empty included, so a consumer reading it as a list never has to handle a `null`; the `null` `system_prompt` beside it is what marks a run that never started. It answers the question a reviewer's output otherwise cannot: a job applying this month's rules, a job applying last month's, and a job that quietly loaded nothing because a path moved all print the same summary without it.
 
 The five token counts are disjoint and sum to `total_tokens`. They are per-run totals across every billed request, which is what a provider charges for: each turn resends the whole history. `requests` counts those requests - a model turn is one, and so is a compression request, which is why it is not called `turns`. `usage` is `null` rather than a row of zeros when nothing reported any, so a caller can tell a silent provider from a free run.
 
@@ -696,6 +745,7 @@ It takes `--page`/`-p` and `--limit`/`-n`, in either spelling, and everything el
 | `/compress`                         | summarize older turns into one, keep last 2 verbatim            |
 | `/compact`                          | alias for `/compress`                                           |
 | `/autocompress [pct\|off\|on]`      | show or set the auto-compress threshold                         |
+| `/instructions`                     | list the [project instructions](#project-instructions) this run loaded, with sizes |
 | `/reset`                            | clear conversation, start a fresh session                       |
 | `/clear`                            | alias for `/reset`                                              |
 | `/new`                              | alias for `/reset`                                              |

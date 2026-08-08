@@ -16,7 +16,9 @@ use std::fmt;
 use crate::approval::Level;
 
 mod classify;
-pub use classify::{classify_action_path, confirm, extract_action_path, risk_user_message};
+pub use classify::{
+    classify_action_path, confirm, extract_action_path, resolve_action_path, risk_user_message,
+};
 
 /// Control-flow signal: the user pressed Esc at an approval prompt. Not a
 /// real error - propagates up from `confirm` through the tool dispatch to

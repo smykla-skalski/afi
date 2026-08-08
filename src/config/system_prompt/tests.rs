@@ -166,6 +166,62 @@ fn a_byte_order_mark_is_stripped_off_a_real_prompt() {
 }
 
 #[test]
+fn project_instructions_land_after_a_supplied_prompt() {
+    // The run that most wants a repository's rules is also the one that supplied
+    // its own prompt, so the two have to be tellable apart. The seam between afi's
+    // part and the operator's is the one both modes already agree on, which is why
+    // the project's blocks go after it rather than into the middle.
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("AGENTS.md"),
+        "Run every command through mise.",
+    )
+    .unwrap();
+    let (_prompt_dir, path) = prompt_file("Review the diff. Do not write files.\n");
+    // `AFI_HOME` inside the same tree, so the walk finds no operator file of the
+    // developer running this.
+    let env = HashMap::from([(
+        "AFI_HOME".to_string(),
+        dir.path().join("home").to_string_lossy().into_owned(),
+    )]);
+    let loaded =
+        instructions::resolve(Some("project"), Some(dir.path()), &env).expect("the walk resolves");
+
+    let resolved = resolve(Some(&path), None)
+        .expect("the file resolves")
+        .with(loaded);
+    let text = resolved.text();
+    let supplied = text.find("Review the diff.").expect("the supplied text");
+    let project = text.find("Run every command").expect("the project rules");
+    assert!(supplied < project, "{text}");
+    assert_eq!(
+        resolved.instruction_files().len(),
+        1,
+        "and the run can report what it loaded"
+    );
+    assert_eq!(
+        resolved.mode(),
+        "replace",
+        "the prompt's own mode is unchanged"
+    );
+}
+
+#[test]
+fn a_prompt_with_no_instructions_is_byte_identical() {
+    // Every existing Anthropic cache entry depends on this: asking for nothing has
+    // to leave the prefix exactly as it was before the setting existed.
+    let plain = resolve(None, None).expect("the built-in prompt always resolves");
+    let with_none = resolve(None, None)
+        .expect("the built-in prompt always resolves")
+        .with(
+            instructions::resolve(None, None, &HashMap::new())
+                .expect("nothing configured resolves"),
+        );
+    assert_eq!(plain.text(), with_none.text());
+    assert!(with_none.instruction_files().is_empty());
+}
+
+#[test]
 fn surrounding_blank_lines_are_trimmed_off_the_supplied_text() {
     // The seam between afi's part and the operator's is one blank line in both
     // modes. A file that ends with a newline, which every editor writes, must

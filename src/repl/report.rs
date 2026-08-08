@@ -134,3 +134,6 @@ fn billing_source<'a>(rt: &'a Runtime, billed: &BySource) -> Option<&'a Source> 
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -33,7 +33,18 @@ fn billed_usage() -> String {
     format!(r#"{{"prompt_tokens":{PROMPT_TOKENS},"completion_tokens":{COMPLETION_TOKENS}}}"#)
 }
 
+/// The AWS secret behind `second`'s signature. Never in the summary - the
+/// access key id beside it is, and the pair is what makes the difference
+/// testable.
+const AWS_SECRET: &str = "aws-secret-never-published";
+const AWS_KEY_ID: &str = "AKIAEXAMPLEFIRST";
+
 /// A piped session that spends on `first`, switches, and spends on `second`.
+///
+/// The two sources authenticate differently on purpose. Both on a static key
+/// would make every assertion about a credential pass whichever source it was
+/// read off, which is the misattribution the breakdown exists to prevent: a
+/// stored key and an AWS signature are what tell the two entries apart.
 ///
 /// `third` is configured and never switched to, which is the case the breakdown
 /// has to leave out: a source that was available is not a source that was billed.
@@ -48,7 +59,10 @@ fn run_switched_session(prices: Option<&str>) -> Output {
         ("AFI_SOURCE_FIRST_API_KEY", "sk-first"),
         ("AFI_SOURCE_SECOND_BASE_URL", base_url.as_str()),
         ("AFI_SOURCE_SECOND_MODEL", "model-two"),
-        ("AFI_SOURCE_SECOND_API_KEY", "sk-second"),
+        ("AFI_SOURCE_SECOND_PROTOCOL", "aws-bedrock-openai"),
+        ("AWS_REGION", "us-east-1"),
+        ("AWS_ACCESS_KEY_ID", AWS_KEY_ID),
+        ("AWS_SECRET_ACCESS_KEY", AWS_SECRET),
         ("AFI_SOURCE_THIRD_BASE_URL", base_url.as_str()),
         ("AFI_SOURCE_THIRD_MODEL", "model-three"),
     ];
@@ -90,9 +104,17 @@ fn each_source_reports_its_own_counts_its_own_cost_and_its_own_credential() {
         reported,
         vec![
             ("first", PROMPT_TOKENS, FIRST_USD, "api_key"),
-            ("second", PROMPT_TOKENS, SECOND_USD, "api_key"),
+            ("second", PROMPT_TOKENS, SECOND_USD, "sigv4"),
         ],
         "{summary}"
+    );
+    // The identifiers travel with the entry too, not just the mode. Reading them
+    // off the source that ended the session would name this one for both.
+    assert_eq!(sources[1]["auth"]["access_key_id"], AWS_KEY_ID);
+    assert_eq!(sources[1]["auth"]["region"], "us-east-1");
+    assert!(
+        sources[0]["auth"].get("access_key_id").is_none(),
+        "a static key identifies nothing: {summary}"
     );
 }
 
@@ -122,11 +144,15 @@ fn the_breakdown_accounts_for_the_run_and_nothing_more() {
         "a source that spent nothing has nothing to report: {summary}"
     );
 
-    // The block sits one field away from two API keys, and this JSON is what CI
-    // uploads as an unmasked artifact.
+    // The block sits one field away from two credentials, and this JSON is what
+    // CI uploads as an unmasked artifact. The AWS access key id is the one
+    // identifier here that is safe to publish; its secret half is not.
     let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
-    for key in ["sk-first", "sk-second"] {
-        assert!(!stdout.contains(key), "the summary leaked {key}: {stdout}");
+    for secret in ["sk-first", AWS_SECRET] {
+        assert!(
+            !stdout.contains(secret),
+            "the summary leaked {secret}: {stdout}"
+        );
     }
 }
 

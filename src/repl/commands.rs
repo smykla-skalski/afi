@@ -5,14 +5,17 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
+/// The one command that spends money, kept apart for that reason - see its
+/// module doc.
+mod compress;
+use compress::cmd_compress;
+
 use super::core::session_meta;
 use super::failure::RunFailure;
 use super::{NO_ACTIVE_SOURCE, Shared, TurnParams, header, run_turn_loop};
 use crate::approval::{apply_approval, approval_display, normalize_approval};
 use crate::config::{Runtime, nested};
 use crate::memory::{list_memories, remember_memories};
-use crate::model::client::ReqwestClient;
-use crate::model::compress::{self, COMPRESS_KEEP, Summary, plan_compression};
 use crate::model::recovery::MANUAL_RECOVERY_NUDGE;
 use crate::model::{ModelConfig, TurnOutcome};
 use crate::sessions::{self, new_session_id, resolve_session};
@@ -164,38 +167,6 @@ fn cmd_source(rt: &mut Runtime, arg: &str, ui: Ui<'_>) {
         ui.header(header(rt));
     } else {
         say(ui, Error, format!("Unknown source {name:?}"));
-    }
-}
-
-async fn cmd_compress(rt: &Runtime, messages: &mut Vec<Value>, client: &ReqwestClient, ui: Ui<'_>) {
-    // Through the same plan the automatic fold runs, so `/compress` gets the pieces it
-    // was missing by having its own: a prompt that actually carries the conversation,
-    // a tail trimmed to something a chat template can render, and the release of the
-    // subtree instructions the summarized turns were carrying. `plan_compression`
-    // also owns "too short to fold", which this measured itself and got wrong for a
-    // history with no system message - it subtracted one regardless.
-    let Some(plan) = plan_compression(messages, COMPRESS_KEEP, false) else {
-        say(ui, Info, "Nothing to compress (too few turns)");
-        return;
-    };
-    let (Some(source), Some(model)) = (rt.active_source(), rt.model.as_ref()) else {
-        say(ui, Error, "No active source");
-        return;
-    };
-
-    let cancel = ui.start_activity("Compressing context");
-    let summary = compress::fetch(client, source, model, plan.prompt(), &cancel).await;
-    ui.stop_activity();
-    match summary {
-        // No `nested::reset()` here, unlike `/reset` - see `nested::reset`. The plan
-        // releases what the fold actually dropped.
-        Summary::Text(text) => match plan.apply(messages, &text) {
-            Some(_) => say(ui, Info, "Compressed context"),
-            // An empty summary would replace the conversation and report success.
-            None => say(ui, Warning, "Compress produced no summary; kept context"),
-        },
-        Summary::Failed(error) => say(ui, Error, format!("Compress failed: {error}")),
-        Summary::Cancelled => say(ui, Info, "Compression cancelled"),
     }
 }
 

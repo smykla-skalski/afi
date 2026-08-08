@@ -95,7 +95,7 @@ pub(crate) async fn run(plan: Plan) {
     // projection that lost a provider takes its rates away permanently. Refuse
     // any table that covers less than the one it would replace, which also
     // covers the empty case: a catalogue that answered and priced nothing.
-    let (replacing, _) = table::layers(&plan.home);
+    let (replacing, _) = table::layers(&plan.home, &plan.today);
     if loses_coverage(&replacing, &projection) {
         return;
     }

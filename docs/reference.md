@@ -144,7 +144,7 @@ Credentials stay in the environment or the [env file](#environment-variables), w
 
 **A project file sets what a repository has a say in, and no more.** It is written by whoever wrote the repository rather than by whoever is running afi, so `cd`-ing into a clone must not reconfigure the run. Given the whole keyspace it could: one key redirecting a source's `base_url` is enough for the clone to receive whatever credential your environment holds, and `approval` in the same file switches off the gate that would have asked.
 
-So a project file may say **what to work with** - `active`, `source_order`, a source's `model`, `effort`, `backend`, `max_tokens` and the other sizing and tuning knobs, `summary`, `prices`, a source's `extra_body`, `app_name`, and `app_url`. It may not say where requests go, whose instructions the model follows, whether you are asked, or how much of your money a run may spend:
+So a project file may say **what to work with** - `active`, `source_order`, a source's `model`, `effort`, `backend`, `max_tokens` and the other sizing and tuning knobs, `summary`, a source's `extra_body`, `app_name`, and `app_url`. It may not say where requests go, whose instructions the model follows, whether you are asked, or how much of your money a run may spend:
 
 | refused in a project file                                        | why                                              |
 | ---------------------------------------------------------------- | ------------------------------------------------ |
@@ -154,6 +154,7 @@ So a project file may say **what to work with** - `active`, `source_order`, a so
 | `system_prompt_file`, `system_prompt_mode`, `instructions`          | whose instructions the model follows            |
 | `summary_file`, `home`, `sessions_dir`                             | where afi writes                                |
 | `budget_usd`, `soft_budget_ratio`, `hard_budget_ratio`           | how much of your money a run may spend, in either direction - see [Budget](#budget) |
+| `prices`, `price_refresh`, `price_stale_days`                    | what a token costs, which is what a cap is enforced with - see [Budget](#budget) |
 
 Reaching for one of those from a project file refuses the run and says so, naming the key.
 
@@ -167,7 +168,7 @@ Reaching for one of those from a project file refuses the run and says so, namin
 
 Two allow lists with nothing in common are a conflict between the files rather than a value either got wrong, so the run exits 2 saying which tools each one permits. It cannot be answered with an empty list: that reads as "every tool" by the time it reaches the policy, so the run would end up with every tool precisely because two files agreed on none.
 
-`prices` and a source's `extra_body` combine key by key too, the later file winning per key. A project file pricing one model leaves your rates for the others standing, where replacing would have dropped them and taken `cost_usd` quiet with them.
+`prices` and a source's `extra_body` combine key by key too, the later file winning per key. One of your files pricing a single model leaves your rates for the others standing, where replacing would have dropped them and taken `cost_usd` quiet with them.
 
 `--config <path>` reads a file with your full trust, whatever directory it sits in, because naming a path is the act of trust - so `afi --config ./.afi/config.json` opts into a repository's file whole.
 
@@ -624,7 +625,11 @@ The same thing found later is a failure rather than a cap hit. A `/source` switc
 
 **Nothing inside the run can move the cap.** The flag beats the variable, the variable beats your config file, and a project's `.afi/config.json` cannot set it at all - not even downwards. It is the one bound where lowering is as dangerous as raising, because a hard stop is a *successful* exit: a repository able to write `budget_usd: 0.01` could end every run in a checkout after one request and have the summary report that it worked. `read_only` is safe to tighten from a project file because a denied tool shows up in `refused_by_policy`; a truncated answer that reports success shows up nowhere.
 
-`/compress` is asked too. It is the one slash command that issues a billed request, so a run whose cap has already stopped the turn loop cannot spend more by typing it.
+**`prices` is refused there for the same reason**, which is less obvious: a cap is enforced by pricing what the run used, so the rates are the cap's own input rather than a description of the world. A checkout writing `{"prices": {"your-model": {"input": 10000}}}` ends every run in it after one request with `ok: true`; writing a rate of a millionth means the cap never fires at all. `price_refresh` and `price_stale_days` go with them, since a repository that turns the refresh off and pushes the staleness warning past any horizon leaves the checkout billing silently against rates that have moved.
+
+**A cap too small to have a threshold is refused rather than honoured.** The thresholds are whole micro-dollars, so `--budget-usd 0.000001` would put the hard threshold at zero, and a run stops the moment its spend reaches it - before the first request, reporting success. That is what `--budget-usd 0` is refused for, so the same refusal covers any cap whose hard threshold rounds down to nothing.
+
+`/compress` is asked too. It is the one slash command that issues a billed request, and it asks the ledger rather than whether the turn loop has looked recently - the loop checks at the top of a turn, so its last answer predates the turn that just finished.
 
 ## Anthropic
 

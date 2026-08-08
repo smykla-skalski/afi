@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
+use tokio::runtime::Builder;
 
 use super::Budgeted;
 use crate::config::budget::resolve_budget;
@@ -114,10 +115,24 @@ async fn read_metadata(client: &Budgeted<Counting>) {
     let _ = client.get_props(&source).await;
 }
 
-/// One test owns the process-wide guard; a second would interleave with it under
-/// the parallel runner.
-#[tokio::test]
-async fn a_stopped_run_reaches_the_endpoint_for_nothing_that_spends() {
+/// Held under [`usage_totals::run_state_lock`], which is what keeps the other
+/// owners of the process-wide guard and ledger out while this runs.
+///
+/// A plain `#[test]` driving its own runtime rather than `#[tokio::test]`, so
+/// the guard is held across a synchronous `block_on` rather than across an
+/// `.await`. Holding a `std` lock over an await point is the shape that
+/// deadlocks when something else on the same runtime wants it, and it is not
+/// worth leaving in place on the argument that nothing else does today.
+#[test]
+fn a_stopped_run_reaches_the_endpoint_for_nothing_that_spends() {
+    let _run = usage_totals::run_state_lock();
+    Builder::new_current_thread()
+        .build()
+        .expect("a runtime")
+        .block_on(a_stopped_run_spends_on_nothing());
+}
+
+async fn a_stopped_run_spends_on_nothing() {
     cost::reset();
     usage_totals::reset();
 
@@ -129,20 +144,7 @@ async fn a_stopped_run_reaches_the_endpoint_for_nothing_that_spends() {
         "with no budget every billed call goes out, as every run before this did"
     );
 
-    // Arm a cap and drive it past its hard threshold the way a turn does.
-    let budget = resolve_budget(Some("1"), &HashMap::new()).unwrap().unwrap();
-    let rates = Pricing::parse(Some(r#"{"m": {"input": 1, "output": 1}}"#));
-    cost::install(Some(budget), rates.as_ref());
-    usage_totals::record(
-        "local",
-        None,
-        "m",
-        &NormalizedUsage {
-            input_tokens: 9_000_000,
-            ..NormalizedUsage::default()
-        },
-    );
-    assert!(matches!(cost::checkpoint(), cost::Verdict::Hard(_)));
+    blow_the_cap();
 
     let stopped = Budgeted::new(Counting::default());
     spend_everything(&stopped).await;
@@ -161,6 +163,23 @@ async fn a_stopped_run_reaches_the_endpoint_for_nothing_that_spends() {
 
     cost::reset();
     usage_totals::reset();
+}
+
+/// Arm a cap and drive it past its hard threshold the way a turn does.
+fn blow_the_cap() {
+    let budget = resolve_budget(Some("1"), &HashMap::new()).unwrap().unwrap();
+    let rates = Pricing::parse(Some(r#"{"m": {"input": 1, "output": 1}}"#));
+    cost::install(Some(budget), rates.as_ref());
+    usage_totals::record(
+        "local",
+        None,
+        "m",
+        &NormalizedUsage {
+            input_tokens: 9_000_000,
+            ..NormalizedUsage::default()
+        },
+    );
+    assert!(matches!(cost::checkpoint(), cost::Verdict::Hard(_)));
 }
 
 #[test]

@@ -93,9 +93,30 @@ pub(crate) fn cache_path(home: &Path) -> PathBuf {
 /// them is the operator's problem: a cache that will not parse is a file afi
 /// wrote, and refusing a run over it would turn a stale rate into a stopped
 /// session.
-pub(super) fn cached(home: &Path) -> Option<Table> {
+/// A cache stamped with something other than a date on or before `today` is
+/// not one this run can use, whatever else it holds.
+///
+/// The comparison that ranks the layers is lexical, so an unreadable stamp -
+/// `zzzz-99-99` - outranks every real date, and a date from the future outranks
+/// today's. Either then wins permanently: `due` asks whether the stamp is older
+/// than today, so neither is ever refreshed, and `warn_if_stale` returns
+/// silently on both a parse failure and a negative age. One run on a
+/// clock-skewed container writes tomorrow from `Utc::now()` and freezes that
+/// home's rates - the figures every cap is computed from - with no signal at
+/// all. Refusing the stamp puts the vendored table back in front, which makes
+/// the table due, which lets the next refresh heal it.
+fn usable(fetched: &str, today: &str) -> bool {
+    fetched.parse::<NaiveDate>().is_ok() && fetched <= today
+}
+
+pub(super) fn cached(home: &Path, today: &str) -> Option<Table> {
     let body = fs::read_to_string(cache_path(home)).ok()?;
     let table: Table = serde_json::from_str(&body).ok()?;
+    if !usable(&table.fetched, today) {
+        return None;
+    }
+    // Both stamps are known dates in the same fixed-width form by now, so the
+    // lexical compare is the chronological one.
     (table.fetched.as_str() > vendored_fetched()).then_some(table)
 }
 
@@ -115,11 +136,11 @@ pub(crate) fn due(fetched: &str, today: &str) -> bool {
 /// it leaves that one model unpriced, which reports no figure; refusing the
 /// whole table would take every other model's figure down with it, and a
 /// corrupted cache is a file afi wrote rather than anything the operator did.
-pub(super) fn layers(home: &Path) -> (Providers, String) {
+pub(super) fn layers(home: &Path, today: &str) -> (Providers, String) {
     // Borrowed, not cloned: `layers` reads `providers` and takes only `fetched`,
     // so copying ~690 strings and 15 maps of the compiled-in table to drop them
     // again bought nothing.
-    let refreshed = cached(home);
+    let refreshed = cached(home, today);
     let table = refreshed.as_ref().unwrap_or_else(|| vendored());
     let by_provider = table
         .providers

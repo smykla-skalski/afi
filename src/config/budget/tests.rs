@@ -26,8 +26,37 @@ fn a_cap_is_read_as_an_exact_decimal() {
     // agreeing about a float.
     assert_eq!(budget(Some("5"), &[]).limit(), 5_000_000);
     assert_eq!(budget(Some("2.50"), &[]).limit(), 2_500_000);
-    assert_eq!(budget(Some("0.000001"), &[]).limit(), 1);
     assert_eq!(budget(Some(" 5 "), &[]).limit(), 5_000_000);
+    // The smallest cap that survives `scale` at the default hard ratio: 0.95 of
+    // two micros is one, where 0.95 of one micro floors to nothing.
+    assert_eq!(budget(Some("0.000002"), &[]).limit(), 2);
+}
+
+#[test]
+fn a_cap_too_small_to_have_a_threshold_is_refused() {
+    // `scale` floors, so a cap whose hard threshold rounds to zero stops on the
+    // pre-flight checkpoint - `hard_reached(0)` is `0 >= 0` - and the run exits
+    // 0 reporting success having sent nothing. That is exactly the shape
+    // `--budget-usd 0` is refused for, reached by writing a very small number
+    // instead; a low hard ratio widens the window well past one micro.
+    let why = refusal(Some("0.000001"), &[]);
+    assert!(why.starts_with("--budget-usd"), "{why}");
+    assert!(why.contains("too small to enforce"), "{why}");
+    assert!(
+        why.contains("stop before its first request"),
+        "the message has to name the outcome, not just the arithmetic: {why}"
+    );
+    let why = refusal(
+        Some("0.000009"),
+        &[
+            ("AFI_SOFT_BUDGET_RATIO", "0.05"),
+            ("AFI_HARD_BUDGET_RATIO", "0.1"),
+        ],
+    );
+    assert!(
+        why.contains("too small to enforce"),
+        "a low hard ratio widens the window well past one micro: {why}"
+    );
 }
 
 #[test]

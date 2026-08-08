@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use tempfile::TempDir;
@@ -10,6 +10,11 @@ use crate::pricing::provider::Provider;
 
 fn day(text: &str) -> NaiveDate {
     text.parse().expect("a date")
+}
+
+/// A home with nothing written in it, for the cases about the shipped table.
+fn no_cache() -> PathBuf {
+    TempDir::new().unwrap().path().join("nothing-here")
 }
 
 #[test]
@@ -34,7 +39,7 @@ fn every_shipped_rate_converts() {
     // wrote and wrong for a file that shipped: there, a dropped entry is a model
     // that silently stops being priced. Counted rather than assumed.
     let raw: usize = vendored().providers.values().map(HashMap::len).sum();
-    let (by_provider, _) = layers(&TempDir::new().unwrap().path().join("nothing-here"));
+    let (by_provider, _) = layers(&no_cache(), &vendored().fetched);
     let converted: usize = by_provider.values().map(HashMap::len).sum();
     assert_eq!(
         converted, raw,
@@ -46,7 +51,7 @@ fn every_shipped_rate_converts() {
 fn the_shipped_table_prices_the_models_afi_registers_by_itself() {
     // The four built-in sources exist so nobody has to configure them, and a cap
     // on one of them is only enforceable if the model it defaults to is priced.
-    let (by_provider, _) = layers(&TempDir::new().unwrap().path().join("nothing-here"));
+    let (by_provider, _) = layers(&no_cache(), &vendored().fetched);
     for (provider, model) in [
         // `builtins::ANTHROPIC_MODEL`, and the same model through the
         // aggregator, which spells its ids its own way.
@@ -71,7 +76,7 @@ fn a_cache_older_than_the_shipped_table_is_ignored() {
     let older = day(&vendored().fetched).pred_opt().expect("a day before");
     write_cache(home.path(), &older.to_string());
     assert!(
-        cached(home.path()).is_none(),
+        cached(home.path(), &vendored().fetched).is_none(),
         "a stale cache must not shadow the table that shipped"
     );
 }
@@ -81,7 +86,7 @@ fn a_newer_cache_replaces_the_shipped_table_outright() {
     let home = TempDir::new().unwrap();
     let newer = day(&vendored().fetched).succ_opt().expect("a day after");
     write_cache(home.path(), &newer.to_string());
-    let (by_provider, fetched) = layers(home.path());
+    let (by_provider, fetched) = layers(home.path(), &newer.to_string());
     assert_eq!(fetched, newer.to_string());
     assert_eq!(
         by_provider[&Provider::Anthropic].len(),
@@ -98,10 +103,46 @@ fn a_cache_afi_cannot_read_costs_the_run_nothing() {
     let home = TempDir::new().unwrap();
     for body in ["not json at all", r#"{"fetched": "2099-01-01"}"#, ""] {
         fs::write(cache_path(home.path()), body).unwrap();
-        assert!(cached(home.path()).is_none(), "{body:?}");
-        let (by_provider, fetched) = layers(home.path());
+        assert!(
+            cached(home.path(), &vendored().fetched).is_none(),
+            "{body:?}"
+        );
+        let (by_provider, fetched) = layers(home.path(), &vendored().fetched);
         assert_eq!(fetched, vendored().fetched);
         assert!(!by_provider.is_empty());
+    }
+}
+
+#[test]
+fn a_cache_stamped_after_today_or_with_no_date_at_all_never_wins() {
+    // Both outrank every real date on the lexical compare that ranks the layers,
+    // and both would then win permanently: `due` asks whether the stamp is older
+    // than today, so neither is ever refreshed, and `warn_if_stale` is silent on
+    // a parse failure and on a negative age. One run on a clock-skewed container
+    // writes tomorrow from `Utc::now()` and freezes the rates every cap is
+    // computed from, with no signal at all.
+    let home = TempDir::new().unwrap();
+    let today = day(&vendored().fetched);
+    for stamp in [
+        today.succ_opt().expect("a day after").to_string(),
+        "2099-01-01".to_string(),
+        "zzzz-99-99".to_string(),
+    ] {
+        write_cache(home.path(), &stamp);
+        assert!(
+            cached(home.path(), &today.to_string()).is_none(),
+            "{stamp} must not outrank the shipped table"
+        );
+        let (_, fetched) = layers(home.path(), &today.to_string());
+        assert_eq!(
+            fetched,
+            vendored().fetched,
+            "{stamp} must leave the shipped table in front, so a refresh can heal it"
+        );
+        assert!(
+            due(&fetched, &today.succ_opt().expect("tomorrow").to_string()),
+            "and the table it falls back to must still be refreshable"
+        );
     }
 }
 
@@ -142,7 +183,7 @@ fn two_spellings_of_one_model_id_are_both_dropped() {
     );
     fs::write(cache_path(home.path()), body).unwrap();
 
-    let (by_provider, _) = layers(home.path());
+    let (by_provider, _) = layers(home.path(), &newer.to_string());
     let together = &by_provider[&Provider::Together];
     assert!(
         !together.contains_key("qwen/qwen3-coder"),

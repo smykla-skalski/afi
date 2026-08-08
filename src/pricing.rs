@@ -147,8 +147,9 @@ impl Pricing {
     #[must_use]
     pub fn from_env<S: BuildHasher>(env: &HashMap<String, String, S>) -> Option<Self> {
         let overrides = read_overrides(env.get(PRICES_ENV).map(String::as_str))?;
-        let (by_provider, fetched) = table::layers(&sessions::afi_home(env));
-        table::warn_if_stale(&fetched, Utc::now().date_naive(), env);
+        let today = Utc::now().date_naive();
+        let (by_provider, fetched) = table::layers(&sessions::afi_home(env), &today.to_string());
+        table::warn_if_stale(&fetched, today, env);
         Some(Self {
             overrides,
             by_provider,

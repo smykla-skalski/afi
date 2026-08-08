@@ -27,9 +27,10 @@ fn project(body: &str) -> Vec<String> {
 fn a_project_file_may_say_what_to_work_with() {
     let read = lower::read(
         Path::new(".afi/config.json"),
+        // No `prices` here: the rates are the cap's own input, so they went to
+        // the operator with `budget_usd` - see the refusal test below.
         r#"{"active": "local", "effort": "high", "max_tokens": 8000,
-             "sources": {"local": {"model": "glm-4.6"}},
-             "prices": {"glm-4.6": {"input": 0.6}}}"#,
+             "sources": {"local": {"model": "glm-4.6"}}}"#,
         Origin::WorkingTree,
     );
     assert_eq!(read.refusals, Vec::<String>::new());
@@ -165,6 +166,18 @@ fn a_project_file_may_not_move_the_cap_in_either_direction() {
         r#"{"budget_usd": 1000}"#,
         r#"{"soft_budget_ratio": 0.1}"#,
         r#"{"hard_budget_ratio": 0.1}"#,
+        // The rates are the cap's own input, so writing one moves the cap just
+        // as surely as writing the cap. A rate of 10000 ends the run after a
+        // single request reporting success; a rate of nothing means it never
+        // fires at all. Both were reachable while `prices` was a block that
+        // never met the `Scope` column.
+        r#"{"prices": {"m": {"input": 10000, "output": 10000}}}"#,
+        r#"{"prices": {"m": {"input": 0.000001}}}"#,
+        // And the pair that decides whether the rates are current, since a
+        // checkout that turns the refresh off and pushes the staleness warning
+        // past any horizon bills silently against rates that have moved.
+        r#"{"price_refresh": false}"#,
+        r#"{"price_stale_days": 3650}"#,
     ] {
         let refusals = project(body);
         assert_eq!(refusals.len(), 1, "{body} -> {refusals:?}");
@@ -173,11 +186,14 @@ fn a_project_file_may_not_move_the_cap_in_either_direction() {
             "{body} -> {refusals:?}"
         );
     }
-    // The operator's own file sets all three.
+    // The operator's own file sets every one of them.
     for body in [
         r#"{"budget_usd": 5}"#,
         r#"{"soft_budget_ratio": 0.7}"#,
         r#"{"hard_budget_ratio": 0.99}"#,
+        r#"{"prices": {"m": {"input": 3, "output": 15}}}"#,
+        r#"{"price_refresh": false}"#,
+        r#"{"price_stale_days": 60}"#,
     ] {
         let read = lower::read(Path::new("config.json"), body, Origin::Operator);
         assert_eq!(read.refusals, Vec::<String>::new(), "{body}");

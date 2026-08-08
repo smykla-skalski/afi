@@ -106,10 +106,13 @@ fn saturates_instead_of_overflowing() {
     assert_eq!(totals.total_tokens(), u64::MAX);
 }
 
-/// One test owns the process-wide accumulator. A second one would interleave
-/// with it under the parallel runner, so the phases below are plain calls.
+/// The process-wide accumulator, held under [`run_state_lock`] for the
+/// duration. The phases below are plain calls because they are one sequence
+/// against one ledger; the lock is what keeps the cost guard's tests, which
+/// reset the same ledger, from interleaving.
 #[test]
 fn the_process_accumulator_records_and_resets() {
+    let _run = super::run_state_lock();
     reset();
     records_one_model();
     reset_clears_every_ledger();

@@ -116,15 +116,16 @@ fn a_stopped_run_is_still_stopped_on_the_next_loop() {
     );
 }
 
-/// The one test that owns the process-wide guard, so nothing here can be
-/// satisfied by a re-statement of the code under test.
+/// The process-wide guard, held under [`run_state_lock`] for the duration.
 ///
 /// `may_spend` is what stops `/compress` issuing a billed request after the cap
 /// has fired, and it had no test at all: inverting it left the whole suite
-/// green. A second `#[test]` would interleave with this one under the parallel
-/// runner, so the phases below are plain calls.
+/// green. The phases below are plain calls rather than separate `#[test]`s
+/// because they are one sequence against one guard; the lock is what keeps the
+/// *other* owners of this state out while it runs.
 #[test]
 fn the_installed_guard_answers_may_spend() {
+    let _run = usage_totals::run_state_lock();
     reset();
     assert!(
         may_spend(),
@@ -134,11 +135,34 @@ fn the_installed_guard_answers_may_spend() {
     install(Some(budget("5")), Pricing::parse(Some(RATES)).as_ref());
     assert!(may_spend(), "a budget nothing has spent against yet");
 
+    stops_spending_without_waiting_to_be_told();
     stops_spending_once_the_cap_fires();
 
     reset();
     usage_totals::reset();
     assert!(may_spend(), "reset clears the latch for the next run");
+}
+
+/// Spend past the cap with nobody checkpointing, which is the ordinary shape of
+/// a finished turn.
+///
+/// `checkpoint` is called only at the *top* of a turn-loop iteration, so a turn
+/// that ended `TURN_DONE` never reports the spend it just made. A `may_spend`
+/// that answered from the `stopped` flag therefore said yes however far over
+/// the cap the run was, and `/compress` - the exact case the read-only question
+/// exists for - billed on unbounded. Two user turns over budget then let three
+/// `/compress` calls through, and the summary reported `stopped: false`.
+fn stops_spending_without_waiting_to_be_told() {
+    usage_totals::reset();
+    usage_totals::record("local", None, "m", &spent_usage(9_000_000));
+    assert!(
+        !may_spend(),
+        "the cap must hold on the ledger, not on whether the loop looked recently"
+    );
+    assert!(
+        outcome().is_some_and(|o| !o.stopped),
+        "and it must answer without latching, which only a checkpoint may do"
+    );
 }
 
 /// Drive the process-wide guard past its hard threshold the way a turn does.

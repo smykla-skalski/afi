@@ -29,6 +29,8 @@
 //! that bought nothing. Only a request that reported usage is recorded, so
 //! `billed_sources` names the sources that were actually billed.
 
+#[cfg(test)]
+use std::sync::MutexGuard;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -322,6 +324,26 @@ pub fn refused_tool_calls() -> RefusedToolCalls {
         by_policy: REFUSED_BY_POLICY.load(Ordering::Relaxed),
         by_approval: REFUSED_BY_APPROVAL.load(Ordering::Relaxed),
     }
+}
+
+/// Held by every test that owns the run's process-wide state.
+///
+/// The ledger and the cost guard are one per process by design - one CLI process
+/// is one run - so a test cannot be given its own the way it is given its own
+/// temp dir. Several tests each documented that they were the sole owner, and
+/// under a filter that put two of them in flight together they raced: one
+/// test's `reset` landed between another's `record` and its `checkpoint`, and
+/// the cap read as unreached. The full suite passed only because sorted
+/// dispatch order happened to separate them, which nothing enforced.
+///
+/// This serializes those tests against each other and nothing else, so the
+/// suite still runs in parallel. Poisoning is recovered rather than propagated:
+/// one test panicking must not turn every later one into a second failure that
+/// hides it.
+#[cfg(test)]
+pub(crate) fn run_state_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Clear the totals. Exists for tests, which share one process.

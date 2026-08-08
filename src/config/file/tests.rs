@@ -157,8 +157,14 @@ fn two_allow_lists_with_nothing_in_common_say_so() {
 
 #[test]
 fn an_object_combines_key_by_key_rather_than_replacing() {
-    // A project file pricing one model used to take the rates for every other one
+    // A second file pricing one model used to take the rates for every other one
     // with it, and `cost_usd` went quiet for them without a word.
+    //
+    // Both files are the operator's, because `prices` is operator-only: the
+    // rates are what a cap is enforced with, so a repository able to write one
+    // moves the cap. That the merge is per key rather than wholesale is a
+    // property of `Merge::Object` and not of where the file was found, which is
+    // what this proves; `trust.rs` owns the question of who may set it.
     let dir = TempDir::new().unwrap();
     let user = write(
         dir.path(),
@@ -166,16 +172,13 @@ fn an_object_combines_key_by_key_rather_than_replacing() {
         r#"{"prices": {"glm-4.6": {"input": 0.6}, "claude-opus-5": {"input": 5}},
              "sources": {"zai": {"extra_body": {"provider": {"order": ["z-ai"]}}}}}"#,
     );
-    let project = write(
+    let named = write(
         dir.path(),
-        "repo/config.json",
+        "named/config.json",
         r#"{"prices": {"glm-4.6": {"input": 0.9}},
              "sources": {"zai": {"extra_body": {"reasoning": {"effort": "high"}}}}}"#,
     );
-    let out = applied(
-        &[(user, Origin::Operator), (project, Origin::WorkingTree)],
-        &[],
-    );
+    let out = applied(&[(user, Origin::Operator), (named, Origin::Operator)], &[]);
     let prices = out.get("AFI_PRICES").unwrap();
     // The model both files priced takes the later answer.
     assert!(prices.contains(r#""glm-4.6":{"input":0.9}"#), "{prices}");

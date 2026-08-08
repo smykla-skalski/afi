@@ -142,6 +142,32 @@ impl Guard {
         }
         Verdict::Under
     }
+
+    /// Whether another request may be opened, consuming nothing.
+    ///
+    /// Prices the ledger rather than reading [`Self::stopped`]. That flag is
+    /// written only by [`Self::checkpoint`], which only the turn loop calls, and
+    /// only at the *top* of an iteration - so a turn that finished never set it,
+    /// however far past the cap it went. Asking the flag let every spender
+    /// outside the loop through: two turns over budget, then `/compress` billing
+    /// on for as long as anyone typed it.
+    ///
+    /// The flag is still consulted first, because a cap that has fired stays
+    /// fired even if the ledger were somehow to read lower afterwards.
+    fn may_spend(&self, billed: &[(Billed, UsageTotals)]) -> bool {
+        if self.stopped {
+            return false;
+        }
+        match self.pricing.run_cost(billed) {
+            Priced::Spent(micros) => !self.budget.hard_reached(micros),
+            Priced::Nothing => true,
+            // Measured by nobody, or priced by nothing: a cap that cannot be
+            // computed cannot be honoured, and spending anyway is the one thing
+            // it must never do. The turn loop reports this as a failed run; a
+            // caller here only needs to not send.
+            Priced::Estimated(_) | Priced::Unpriceable(_) => false,
+        }
+    }
 }
 
 /// Fast path for the run that set no budget, which is nearly every run: one
@@ -199,17 +225,23 @@ pub(crate) fn checkpoint() -> Verdict {
 /// Whether a request may still be made against the run's budget.
 ///
 /// Read-only and consumes nothing, for everything that spends outside the turn
-/// loop - `/compress` today, whatever is added next.
+/// loop - `/compress` today, whatever is added next. It prices the ledger
+/// itself rather than trusting the loop to have looked recently, because the
+/// loop's last look predates the turn that finished.
+///
+/// The ledger is read before the guard is locked, the same order
+/// [`checkpoint`] uses, so the two can never deadlock against each other.
 #[must_use]
 pub(crate) fn may_spend() -> bool {
     if !ARMED.load(Ordering::Relaxed) {
         return true;
     }
-    !guard()
+    let billed = usage_totals::snapshot_billed();
+    guard()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .as_ref()
-        .is_some_and(|guard| guard.stopped)
+        .is_none_or(|guard| guard.may_spend(&billed))
 }
 
 /// The budget block the run summary reports, or `None` when none was set.

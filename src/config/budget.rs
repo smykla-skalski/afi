@@ -133,10 +133,25 @@ pub(crate) fn resolve_budget<S: BuildHasher>(
         ));
     }
     let limit = u128::from(limit);
+    let hard = scale(limit, hard_ratio);
+    // `scale` floors, so a cap small enough that its hard threshold rounds to
+    // nothing stops on the pre-flight checkpoint: `hard_reached(0)` is `0 >= 0`,
+    // and the run exits 0 reporting success having sent nothing. That is the
+    // shape a budget of zero is refused for, reached by writing a very small
+    // number instead - and at a low `hard_budget_ratio` "very small" is not that
+    // small. Refused rather than floored up to one micro, because a cap this
+    // size cannot mean what it says either way.
+    if hard == 0 {
+        return Err(format!(
+            "{named} {raw:?} is too small to enforce: {} of it rounds down to nothing, so the \
+             run would stop before its first request - leave it unset for no cap",
+            show(hard_ratio)
+        ));
+    }
     Ok(Some(Budget {
         limit,
         soft: scale(limit, soft_ratio),
-        hard: scale(limit, hard_ratio),
+        hard,
         soft_ratio,
         hard_ratio,
         named,
